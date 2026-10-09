@@ -90,7 +90,7 @@ public:
 	virtual bool	UpdateEntityTransform( CBaseEntity *pEntity ) { return false; }
 	virtual void	UpdateEntityAABB( CBaseEntity *pEntity ) {}
 	virtual void	UpdateCollisionBodygroup( CBaseEntity *pEntity ) {}
-	virtual bool	ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end, Vector &impactPoint, Vector &impactNormal, uint32_t &materialHash ) { return false; }
+	virtual bool	ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end, Vector &impactPoint, Vector &impactNormal, std::uint32_t &materialHash ) override { return false; }
 	virtual bool	UpdateActorPos( CBaseEntity *pEntity ) { return false; };
 	virtual void	SetupWorld( void ) {}
 	virtual void	FreeWorld( void ) {}

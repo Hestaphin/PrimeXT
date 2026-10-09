@@ -3004,7 +3004,7 @@ static bool BuildCurrentStudioRenderMesh( CBaseEntity *pEntity, CMeshDesc &mesh 
 // already-confirmed impact onto the visible render model so material sounds
 // and studio decals come from the surface the player actually sees.
 bool CPhysicPhysX::ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end,
-	Vector &impactPoint, Vector &impactNormal, uint32_t &materialHash )
+	Vector &impactPoint, Vector &impactNormal, std::uint32_t &materialHash )
 {
 	if( !pEntity )
 		return false;

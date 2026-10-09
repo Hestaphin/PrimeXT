@@ -13,6 +13,9 @@
 namespace physicsasset
 {
 using PrimitiveTriangle = std::array<Vec3, 3>;
+// The template argument must be resolved outside capturing lambdas on MSVC.
+inline constexpr int PrimitiveRingSegments = 12;
+using PrimitiveRing = std::array<Vec3, PrimitiveRingSegments>;
 
 inline int PrimitiveHingeBodyIndex(const AssetDef &asset, const PartLayout &part)
 {
@@ -46,12 +49,12 @@ inline void BuildPrimitiveTraceTriangles(const ShapeDef &shape, std::vector<Prim
     if(shape.type != ShapeType::Sphere && shape.type != ShapeType::Capsule) return;
     const float half = shape.type == ShapeType::Capsule ? shape.halfHeight : 0.0f;
     if(half < 0 || !std::isfinite(half)) return;
-    constexpr int segments = 12, hemisphereSteps = 4;
+    constexpr int segments = PrimitiveRingSegments, hemisphereSteps = 4;
     constexpr float pi = 3.14159265358979323846f;
     const Vec3 left{-half-shape.radius,0,0}, right{half+shape.radius,0,0};
-    std::vector<std::array<Vec3,segments>> rings;
+    std::vector<PrimitiveRing> rings;
     const auto ring = [&](float x, float r) {
-        std::array<Vec3,segments> points{};
+        PrimitiveRing points{};
         for(int i=0;i<segments;++i)
         {
             const float a = 2*pi*static_cast<float>(i)/segments;

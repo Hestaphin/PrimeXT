@@ -92,7 +92,7 @@ public:
 	bool	UpdateEntityTransform( CBaseEntity *pEntity );
 	void	UpdateEntityAABB( CBaseEntity *pEntity );
 	void	UpdateCollisionBodygroup( CBaseEntity *pEntity );
-	bool	ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end, Vector &impactPoint, Vector &impactNormal, uint32_t &materialHash );
+	bool	ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end, Vector &impactPoint, Vector &impactNormal, std::uint32_t &materialHash ) override;
 	bool	UpdateActorPos( CBaseEntity *pEntity );
 	void	SetupWorld( void );	
 	void	FreeWorld( void );

@@ -15,6 +15,8 @@ GNU General Public License for more details.
 #ifndef PHYSIC_H
 #define PHYSIC_H
 
+#include <cstdint>
+
 class Vector;
 class Vector4D;
 class CBaseEntity;
@@ -137,7 +139,7 @@ public:
 	virtual bool	UpdateEntityTransform( CBaseEntity *pEntity ) = 0;
 	virtual void	UpdateEntityAABB( CBaseEntity *pEntity ) = 0;
 	virtual void	UpdateCollisionBodygroup( CBaseEntity *pEntity ) = 0;
-	virtual bool	ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end, Vector &impactPoint, Vector &impactNormal, uint32_t &materialHash ) = 0;
+	virtual bool	ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end, Vector &impactPoint, Vector &impactNormal, std::uint32_t &materialHash ) = 0;
 	virtual bool	UpdateActorPos( CBaseEntity *pEntity ) = 0;
 	virtual void	SetupWorld( void ) = 0;	
 	virtual void	FreeWorld( void ) = 0;
