@@ -23,6 +23,10 @@ GNU General Public License for more details.
 #include "assert_handler.h"
 #include "clipfile.h"
 #include "filesystem_utils.h"
+#include "physics_asset.h"
+#include "physics_part_layout.h"
+#include "physics_hinge_frame.h"
+#include "meshdesc.h"
 
 #include <PxPhysicsAPI.h>
 #include <PxSimulationEventCallback.h>
@@ -32,7 +36,12 @@ GNU General Public License for more details.
 #include <PxConvexMeshDesc.h>
 #include <PxMaterial.h>
 #include <PxCooking.h>
+#include <map>
+#include <string>
 #include <PxTriangle.h>
+#include <vector>
+#include <memory>
+#include <cstdint>
 	
 class DebugRenderer;
 class EventHandler;
@@ -56,6 +65,10 @@ public:
 	void	*CreateTriggerFromEntity( CBaseEntity *pEntity );
 	void	*RestoreBody( CBaseEntity *pEntity );
 	void	SaveBody( CBaseEntity *pObject );
+    bool CaptureRagdollState(CBaseEntity *, PhysicsRagdollSaveState &,
+        PhysicsRagdollBodySaveRecord *, int) override;
+    bool RestoreRagdollState(CBaseEntity *, const PhysicsRagdollSaveState &,
+        const PhysicsRagdollBodySaveRecord *, int) override;
 	bool	Initialized( void ) { return (m_pPhysics != NULL); }
 	void	SetOrigin( CBaseEntity *pEntity, const Vector &origin );
 	void	SetAngles( CBaseEntity *pEntity, const Vector &angles );
@@ -78,6 +91,8 @@ public:
 	int		BuildCollisionTree( char *szMapName );
 	bool	UpdateEntityTransform( CBaseEntity *pEntity );
 	void	UpdateEntityAABB( CBaseEntity *pEntity );
+	void	UpdateCollisionBodygroup( CBaseEntity *pEntity );
+	bool	ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end, Vector &impactPoint, Vector &impactNormal, uint32_t &materialHash );
 	bool	UpdateActorPos( CBaseEntity *pEntity );
 	void	SetupWorld( void );	
 	void	FreeWorld( void );
@@ -93,8 +108,38 @@ public:
 	bool	IsBodySleeping( CBaseEntity *pEntity );
 	void	*GetCookingInterface( void ) { return m_pCooking; }
 	void	*GetPhysicInterface( void ) { return m_pPhysics; }
+	bool	CreatePhysicsAsset( CBaseEntity *pEntity ) override;
+	bool	HasPhysicsAsset( CBaseEntity *pEntity ) override;
+	void	UpdatePhysicsAssetPose( CBaseEntity *pEntity ) override;
+    bool SetPhysicsPartMode( CBaseEntity *entity, const char *partName, PhysicsPartMode mode ) override;
+    bool GetPhysicsPartWorldPose( CBaseEntity *entity, const char *partName, matrix4x4 &pose ) override;
+    bool DamagePhysicsPart( CBaseEntity *entity, const char *partName, float damage ) override;
+    int CaptureInteractiveParts(CBaseEntity *entity, PhysicsPartSaveRecord *out, int capacity) override;
+    void RestoreInteractiveParts(CBaseEntity *entity, const PhysicsPartSaveRecord *records, int count) override;
+	bool GetRagdollWorldBounds( CBaseEntity *pEntity, Vector &mins, Vector &maxs ) override;
+	bool	IsRagdoll( CBaseEntity *pEntity ) override;
+	void	SetRagdoll( CBaseEntity *pEntity, bool enabled ) override;
+	bool SetRagdollBodyPhysicsWeight( CBaseEntity *pEntity, const char *bodyName, float physicsWeight, bool includeChildren ) override;
+	bool IsRagdollFrozen( CBaseEntity *pEntity ) override;
+	bool BuildRagdollDecalAttachment( CBaseEntity *pEntity, const Vector &worldPosition, const Vector &worldNormal, int preferredHitGroup, int &boneIndex, Vector &localPosition, Vector &localNormal ) override;
+	CollisionRepresentation ResolveCollisionRepresentation( CBaseEntity *pEntity, CollisionQueryPurpose purpose ) override;
+	bool TraceBulletPhysicsParts( const Vector &start, const Vector &end,
+		edict_t *ignore, TraceResult *ioTrace ) override;
+	bool TraceBulletRagdolls( const Vector &start, const Vector &end, edict_t *ignore, TraceResult *ioTrace, int *bodyIndex ) override;
+	bool TraceBallisticPhysicsExit( CBaseEntity *target, int ragdollBodyIndex,
+		const Vector &entry, const Vector &forward, float maxDepth, Vector &exit, Vector &normal ) override;
+	bool ApplyPhysicsPartBulletImpact( CBaseEntity *entity, const Vector &start, const Vector &end,
+		const Vector &legacyContact, const Vector &impulse, float damage ) override;
+	void AddPhysicsPartRadialImpulse( CBaseEntity *entity, const Vector &origin,
+		float radius, float impulse, float damage ) override;
+	bool AddPhysicsAssetImpulse( CBaseEntity *pEntity, int bodyIndex, const Vector &impulse, const Vector &position ) override;
+	void QueuePhysicsAssetImpulse( CBaseEntity *pEntity, int hitGroup, const Vector &impulse, const Vector &position ) override;
+	void AddPhysicsAssetRadialImpulse( CBaseEntity *pEntity, const Vector &origin, float radius, float impulse ) override;
 
 private:
+	struct PhysicsAssetCollisionState;
+	struct PhysicsPartRuntime;
+
 	// misc routines
 	bool DebugEnabled() const;
 	bool TracingStateChanges(physx::PxActor *actor) const;
@@ -103,9 +148,30 @@ private:
 	physx::PxConvexMesh	*ConvexMeshFromBmodel( entvars_t *pev, int modelindex );
 	physx::PxConvexMesh	*ConvexMeshFromStudio( entvars_t *pev, int modelindex, int32_t body, int32_t skin );
 	physx::PxConvexMesh	*ConvexMeshFromEntity( CBaseEntity *pObject );
+	physx::PxConvexMesh *ConvexMeshFromPhysicsAsset( CBaseEntity *pObject, const PhysicsAssetDef &asset );
 	physx::PxTriangleMesh *TriangleMeshFromBmodel( entvars_t *pev, int modelindex );
-	physx::PxTriangleMesh *TriangleMeshFromStudio( entvars_t *pev, int modelindex, int32_t body, int32_t skin );
+	physx::PxTriangleMesh *TriangleMeshFromStudio( model_t *model, int32_t body, int32_t skin );
 	physx::PxTriangleMesh *TriangleMeshFromEntity( CBaseEntity *pObject );
+	physx::PxTriangleMesh *TriangleMeshFromPhysicsAsset( CBaseEntity *pObject, const PhysicsAssetDef &asset );
+	physx::PxTriangleMesh *TriangleMeshFromPhysicsAssetSection( const PhysicsAssetDef &asset, size_t collisionIndex );
+	physx::PxConvexMesh *ConvexMeshFromPhysicsAssetSection( const PhysicsAssetDef &asset, size_t collisionIndex );
+	bool HasPhysicsAssetCollision( CBaseEntity *pObject );
+	void TrackPhysicsAssetCollision( CBaseEntity *pObject );
+	void ReleaseAnimatedCollisionActors( PhysicsAssetCollisionState &state );
+	void BuildAnimatedCollisionActors( CBaseEntity *pObject, PhysicsAssetCollisionState &state, const PhysicsAssetDef &asset );
+    void BuildInteractiveHingeJoints( CBaseEntity *entity, PhysicsAssetCollisionState &state, const PhysicsAssetDef &asset );
+	void UpdateAnimatedCollisionActors();
+	void RebuildAnimatedCollisionTraceMesh( CBaseEntity *pObject, PhysicsAssetCollisionState &state, const PhysicsAssetDef &asset );
+	void SetAnimatedCollisionEnabled( PhysicsAssetCollisionState &state, bool enabled );
+    void ApplyPhysicsAssetRootCollision( CBaseEntity *entity, PhysicsAssetCollisionState &state, bool enableWhenAllowed );
+	void SetArticulatedCollisionOwnership( CBaseEntity *pEntity, bool enabled );
+    PhysicsPartRuntime *FindPhysicsPart( CBaseEntity *pEntity, const char *partName );
+    void SampleInteractivePart( CBaseEntity *entity, PhysicsPartRuntime &part );
+    void ApplyInteractivePartDrives( float dt );
+    bool ApplyPhysicsPartDamageEvent( CBaseEntity *entity, PhysicsPartRuntime &part, float damage, float impulseMagnitude );
+    bool DetachPhysicsPart( CBaseEntity *entity, PhysicsPartRuntime &part );
+	bool SetPhysicsPartOwnership( CBaseEntity *pEntity, const char *partName, physicsasset::PartOwner owner );
+	void UpdatePhysicsAssetCollisionBodygroups();
 	physx::PxActor *ActorFromEntity( CBaseEntity *pObject );
 	physx::PxBounds3 GetIntersectionBounds( const physx::PxBounds3 &a, const physx::PxBounds3 &b );
 	CBaseEntity	*EntityFromActor( physx::PxActor *pObject );
@@ -119,8 +185,133 @@ private:
 	void CacheNameForModel( model_t *model, fs::Path &hullfile, uint32_t hash, const char *suffix );
 	uint32_t GetHashForModelState( model_t *model, int32_t body, int32_t skin );
 	clipfile::GeometryType ShapeTypeToGeomType(physx::PxGeometryType::Enum geomType);
+	PhysicsAssetInstance *FindPhysicsAsset( CBaseEntity *pEntity );
+	PhysicsAssetInstance *EnsurePhysicsAssetInstance( CBaseEntity *pEntity );
+	void SuspendLegacyCollisionForRagdoll( CBaseEntity *pEntity, physx::PxRigidActor *actor );
+	void RestoreLegacyCollisionAfterRagdoll( CBaseEntity *pEntity );
+	void SuspendEntityForRagdoll( CBaseEntity *pEntity, PhysicsAssetInstance *asset );
+	void RestoreEntityAfterRagdoll( CBaseEntity *pEntity );
+	void UpdateRagdollPresentation( PhysicsAssetInstance *asset );
+	void SendRagdollPose( PhysicsAssetInstance *asset );
+	void ClearRagdollPose( CBaseEntity *pEntity );
+    void SendInteractivePartPoses();
+	std::shared_ptr<PhysicsAssetDef> GetPhysicsAssetDefinition( CBaseEntity *pEntity );
+	void ClearWorldAssetCaches();
 
 private:
+	// The authoritative actor for a moving bone owns every collider section
+	// on that bone. A future hinge takes over this same part; it must never
+	// spawn a second simultaneous collision proxy for the same door.
+	struct PhysicsPartShape
+	{
+		size_t collisionIndex = 0;
+		physx::PxShape *shape = nullptr;
+	};
+	struct PhysicsPartRuntime
+	{
+		std::string name;
+		int bodyIndex = -1; // authored .phys body, or -1 for legacy v3 proxy
+		int boneIndex = -1;
+		physicsasset::PropDriveMode initialMode = physicsasset::PropDriveMode::Animated;
+		physicsasset::PartOwner owner = physicsasset::PartOwner::AnimatedProxy;
+        physx::PxRigidDynamic *actor = nullptr;
+        bool dynamicCompatible = false;
+        bool hasHinge = false;
+        bool detached = false;
+        float accumulatedDamage = 0.0f;
+        float releaseDamage = 0.0f;
+        float breakDamage = 0.0f;
+        float breakImpulse = 0.0f;
+        PhysicsPartMode mode = PhysicsPartMode::Animated;
+        physx::PxRevoluteJoint *hinge = nullptr;
+        float driveStrength = 0.0f;
+        float driveDamping = 0.0f;
+        float driveMaxForce = 0.0f;
+        float lastTargetAngle = 0.0f;
+        float targetAngularVelocity = 0.0f;
+        float targetSampleTime = 0.0f;
+        bool hasTargetAngle = false;
+        bool sampledPose = false;
+        physx::PxTransform previousAnimatedPose = physx::PxTransform(physx::PxIdentity);
+        physx::PxTransform latestAnimatedPose = physx::PxTransform(physx::PxIdentity);
+        float previousSampleTime = 0.0f;
+        float latestSampleTime = 0.0f;
+        float partNetNextSend = 0.0f;
+        bool partNetActive = false;
+        bool partNetDetached = false;
+        std::vector<PhysicsPartShape> shapes;
+	};
+
+	struct PhysicsAssetCollisionState
+	{
+		edict_t *edict = nullptr;
+		model_t *renderModel = nullptr;
+		int32_t renderBody = 0;
+		bool selectionHasGeometry = true;
+		bool collisionRequested = true;
+		// Activated full ragdolls take ownership of their bone collisions.
+		// Do not let animated prop proxies overlap the articulated actors.
+		bool articulatedOverride = false;
+		std::vector<PhysicsPartRuntime> parts;
+        std::vector<physx::PxRevoluteJoint *> hinges;
+		std::unique_ptr<CMeshDesc> animatedTraceMesh;
+	};
+
+	struct LegacyShapeCollisionState
+	{
+		bool simulation = false;
+		bool sceneQuery = false;
+	};
+	struct RagdollLegacyCollisionState
+	{
+		physx::PxRigidActor *actor = nullptr;
+        int32_t renderBodyAtSuspend = 0;
+        bool collisionRequestedAtSuspend = true;
+		std::vector<LegacyShapeCollisionState> shapes;
+	};
+	struct RagdollEntityState
+	{
+		int solid = SOLID_NOT;
+		int movetype = MOVETYPE_NONE;
+		Vector mins;
+		Vector maxs;
+		Vector angles;
+		matrix4x4 rootToEntity;
+		bool hasRootRelation = false;
+	};
+
+	struct PendingRagdollImpulse
+	{
+		edict_t *edict = nullptr;
+		Vector impulse;
+		Vector position;
+		int hitGroup = 0;
+		float time = 0.0f;
+	};
+	struct RagdollNetworkState
+	{
+		float nextSendTime = 0.0f;
+		float lastSendTime = 0.0f;
+		bool initialized = false;
+		bool sleeping = false;
+		bool frozen = false;
+	};
+
+	std::map<int, PhysicsAssetCollisionState> m_physicsAssetCollisionStates;
+	std::map<int, RagdollLegacyCollisionState> m_ragdollLegacyCollisionState;
+	std::map<int, RagdollEntityState> m_ragdollEntityState;
+	std::map<int, RagdollNetworkState> m_ragdollNetworkState;
+	std::map<int, std::vector<PendingRagdollImpulse>> m_pendingRagdollImpulses;
+	void TransferPendingRagdollImpulses( CBaseEntity *entity, PhysicsAssetInstance *asset );
+	std::uint32_t m_ragdollSnapshotSequence = 0;
+    std::uint32_t m_partSnapshotSequence = 0;
+	std::map<std::string, physx::PxTriangleMesh *> m_triangleMeshCache;
+	std::map<std::string, physx::PxConvexMesh *> m_physicsAssetConvexMeshCache;
+	// Cache both successful and failed .phys lookups for the map lifetime. A null
+	// entry means the sibling asset was missing/invalid and avoids filesystem
+	// probes every time HasPhysicsAsset() is queried.
+	std::map<std::string, std::shared_ptr<PhysicsAssetDef>> m_physicsAssetDefinitions;
+
 	physx::PxPhysics *m_pPhysics;	// pointer to the PhysX engine
 	physx::PxFoundation	*m_pFoundation;
 	physx::PxDefaultCpuDispatcher *m_pDispatcher;
@@ -151,4 +342,5 @@ private:
 	physx::PxCooking *m_pCooking;
 	physx::PxDefaultAllocator m_Allocator;
 	physx::PxPvd *m_pVisualDebugger;
+	std::vector<std::unique_ptr<PhysicsAssetInstance>> m_physicsAssets;
 };

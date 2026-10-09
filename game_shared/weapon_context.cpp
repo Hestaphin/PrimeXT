@@ -67,6 +67,7 @@ CBaseWeaponContext::~CBaseWeaponContext()
 
 void CBaseWeaponContext::ItemPostFrame()
 {
+	OnPreItemPostFrame();
 	if ((m_fInReload) && m_pLayer->GetPlayerNextAttackTime() <= m_pLayer->GetWeaponTimeBase(false))
 	{
 		// complete the reload. 
@@ -77,6 +78,7 @@ void CBaseWeaponContext::ItemPostFrame()
 		m_pLayer->SetPlayerAmmo( m_iPrimaryAmmoType,  m_pLayer->GetPlayerAmmo(m_iPrimaryAmmoType) - j );
 
 		m_fInReload = FALSE;
+        OnReloadFinished();
 	}
 
 	if (!m_pLayer->CheckPlayerButtonFlag(IN_ATTACK))

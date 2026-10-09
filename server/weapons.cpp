@@ -31,7 +31,14 @@
 #include "decals.h"
 #include "gamerules.h"
 #include "sv_materials.h"
+#include "physic.h"
 #include "user_messages.h"
+#include "game.h"
+#include "modular_weapons.h"
+#include "modular_ammo_policy.h"
+
+#include <algorithm>
+#include <cmath>
 
 extern int gEvilImpulse101;
 
@@ -49,6 +56,16 @@ DLL_GLOBAL short	g_sModelIndexBloodSpray;// holds the sprite index for splattere
 
 MULTIDAMAGE gMultiDamage;
 
+bool SameInventoryWeaponType(const CBasePlayerItem* a, const CBasePlayerItem* b) {
+    if (!a || !b) return false;
+    ItemInfo ai{}, bi{};
+    const bool am = a->GetItemInfo(&ai) && modular::SharedRegistry().FindWeaponByRuntimeId(ai.iId);
+    const bool bm = b->GetItemInfo(&bi) && modular::SharedRegistry().FindWeaponByRuntimeId(bi.iId);
+    if (am || bm) return am && bm && ai.iId == bi.iId;
+    return FClassnameIs(a->pev, STRING(b->pev->classname));
+}
+
+
 #define TRACER_FREQ		4			// Tracers fire every fourth bullet
 
 
@@ -59,6 +76,10 @@ MULTIDAMAGE gMultiDamage;
 //=========================================================
 int MaxAmmoCarry( int iszName )
 {
+    // Cartridge reserve belongs to the cartridge, not whichever of several
+    // compatible weapons happened to register first.
+    const int modularLimit = modular::SharedRegistry().AmmoReserveLimit(STRING(iszName));
+    if (modularLimit > 0) return modularLimit;
 	for ( int i = 0;  i < MAX_WEAPONS; i++ )
 	{
 		if ( CBaseWeaponContext::ItemInfoArray[i].pszAmmo1 && !strcmp( STRING(iszName), CBaseWeaponContext::ItemInfoArray[i].pszAmmo1 ) )
@@ -152,6 +173,81 @@ const char *DamageDecal( CBaseEntity *pEntity, int bitsDamageType )
 	return pEntity->DamageDecal( bitsDamageType );
 }
 
+int ResolveRagdollBulletCollision( TraceResult *pTrace, const vec3_t &origin, const vec3_t &vecEnd, edict_t *pIgnore )
+{
+	if( !pTrace || !WorldPhysic ) return -1;
+	int bodyIndex = -1;
+	// Resolve parts before ragdolls, each against the currently nearest trace.
+	WorldPhysic->TraceBulletPhysicsParts( origin, vecEnd, pIgnore, pTrace );
+	WorldPhysic->TraceBulletRagdolls( origin, vecEnd, pIgnore, pTrace, &bodyIndex );
+	return bodyIndex;
+}
+
+void ApplyPhysicsBulletImpulse( const TraceResult *pTrace, int bodyIndex,
+    const vec3_t &origin, const vec3_t &rayEnd, const vec3_t &direction, float damage )
+{
+    if( !pTrace || damage <= 0.0f || !WorldPhysic || !UTIL_IsValidEntity( pTrace->pHit ) ) return;
+    CBaseEntity *target = CBaseEntity::Instance( pTrace->pHit );
+    if( !target ) return;
+    const Vector dir = direction.Normalize();
+    if( dir == g_vecZero ) return;
+
+    // Interactive props are resolved only against the entity selected by the
+    // original trace. That trace already accounts for walls, world and nearer
+    // objects; querying all parts globally here would permit shots through them.
+    if( !(target->pev->flags & (FL_CLIENT | FL_MONSTER)) && !WorldPhysic->IsRagdoll(target) )
+    {
+        const float configured = prop_bullet_impulse_scale.value;
+        const float scale = std::isfinite(configured) ? std::clamp(configured, 0.0f, 100.0f) : 0.0f;
+        // Even with zero scale the part query runs, so Animated/disabled
+        // reactions never fall through into a ragdoll pending-impulse queue.
+        if( WorldPhysic->ApplyPhysicsPartBulletImpact(target, origin, rayEnd,
+                pTrace->vecEndPos, dir * (damage * scale), damage) ) return;
+        return; // Non-character props must not queue character death impulses.
+    }
+
+    const float configured = ragdoll_bullet_impulse_scale.value;
+    const float scale = std::isfinite(configured) ? std::clamp(configured, 0.0f, 100.0f) : 0.0f;
+    if( scale <= 0.0f ) return;
+    const Vector impulse = dir * (damage * scale);
+    if( bodyIndex >= 0 && WorldPhysic->IsRagdoll(target) )
+    {
+        // An animation anchor (weight 0) cannot accept a dynamic impulse yet.
+        // Retain it for a possible death promotion; successful dynamic hits
+        // have already received their impulse and must never be queued again.
+        if( !WorldPhysic->AddPhysicsAssetImpulse(target, bodyIndex, impulse, pTrace->vecEndPos) )
+            WorldPhysic->QueuePhysicsAssetImpulse(target, pTrace->iHitgroup, impulse, pTrace->vecEndPos);
+    }
+    else if( !WorldPhysic->IsRagdoll(target) && WorldPhysic->HasPhysicsAsset(target) )
+        WorldPhysic->QueuePhysicsAssetImpulse(target, pTrace->iHitgroup, impulse, pTrace->vecEndPos);
+}
+
+bool ResolveBulletImpactEffects( const TraceResult *pCollisionTrace, const vec3_t &origin, const vec3_t &vecEnd, TraceResult *pEffectTrace )
+{
+	if( !pCollisionTrace || !pEffectTrace )
+		return false;
+
+	*pEffectTrace = *pCollisionTrace;
+
+	if( !UTIL_IsValidEntity( pCollisionTrace->pHit ) || !WorldPhysic )
+		return false;
+
+	CBaseEntity *pTarget = CBaseEntity::Instance( pCollisionTrace->pHit );
+	if( !pTarget || pTarget->pev->solid != SOLID_CUSTOM )
+		return false;
+
+	Vector visualPoint, visualNormal;
+	uint32_t visualMaterial = pCollisionTrace->materialHash;
+	if( !WorldPhysic->ResolveRenderImpact( pTarget, origin, vecEnd, visualPoint, visualNormal, visualMaterial ))
+		return false;
+
+	pEffectTrace->vecEndPos = visualPoint;
+	pEffectTrace->vecPlaneNormal = visualNormal;
+	pEffectTrace->flPlaneDist = DotProduct( visualPoint, visualNormal );
+	pEffectTrace->materialHash = visualMaterial;
+	return true;
+}
+
 void DecalGunshot( TraceResult *pTrace, int iBulletType, const vec3_t &origin, const vec3_t &vecEnd)
 {
 	if (!UTIL_IsValidEntity(pTrace->pHit))
@@ -172,6 +268,19 @@ void DecalGunshot( TraceResult *pTrace, int iBulletType, const vec3_t &origin, c
 	}
 	else if (characterEntity)
 	{
+		// Ragdolls are posed by physics, not the animation skeleton used by the
+		// legacy Studio decal message. Encode the contact in physics-bone local
+		// space so the client can project it against the current ragdoll pose.
+		if( WorldPhysic && WorldPhysic->IsRagdoll( pTarget ))
+		{
+			const int blood = pTarget->BloodColor();
+			if( blood != DONT_BLEED )
+				UTIL_BloodDrips( pTrace->vecEndPos, pTrace->vecPlaneNormal, blood, 12 );
+			const int damageBits = ( iBulletType == BULLET_PLAYER_CROWBAR ) ? DMG_CLUB : DMG_BULLET;
+			UTIL_RagdollStudioDecalTrace( pTrace, DamageDecal( pTarget, damageBits ));
+			return;
+		}
+
 		// Decal the model with a blood
 		switch (iBulletType)
 		{
@@ -207,6 +316,7 @@ void DecalGunshot( TraceResult *pTrace, int iBulletType, const vec3_t &origin, c
 		}
 	}
 }
+
 
 //
 // EjectBrass - tosses a brass shell from passed origin at passed velocity
@@ -289,6 +399,78 @@ void UTIL_PrecacheOtherWeapon( const char *szClassname )
 	}
 
 	REMOVE_ENTITY(pEntity->edict());
+}
+
+// Load modular definitions from virtual-filesystem manifests; the legacy
+// weapon list is deliberately unchanged for existing mods and old maps.
+static void PrecacheModularWeaponDefinitions() {
+    auto& registry = modular::SharedRegistry();
+    auto read = [](const std::string& path, std::string& content) -> bool {
+        int size = 0;
+        char* data = reinterpret_cast<char*>(LOAD_FILE(const_cast<char*>(path.c_str()), &size));
+        if (!data) return false;
+        const bool valid = size >= 0 && size <= 65536;
+        if (valid) content.assign(data, static_cast<size_t>(size));
+        FREE_FILE(data);
+        return valid;
+    };
+    if (!registry.Load(read)) {
+        for (const auto& error : registry.Diagnostics())
+            ALERT(at_warning, "Modular asset %s:%d: %s\n", error.file.c_str(), error.line, error.message.c_str());
+        return;
+    }
+    // Admission is all-or-nothing. The legacy registry compares ammo names
+    // case-insensitively and silently aliases duplicates; that would make two
+    // different cartridge definitions consume the same reserve slot.
+    std::vector<std::string> occupiedAmmo;
+    for (int i = 1; i <= giAmmoIndex; ++i)
+        if (CBaseWeaponContext::AmmoInfoArray[i].pszName)
+            occupiedAmmo.emplace_back(CBaseWeaponContext::AmmoInfoArray[i].pszName);
+    std::vector<int> occupiedWeapons;
+    for (int i = modular::kFirstWeaponId; i <= modular::kLastWeaponId; ++i)
+        if (CBaseWeaponContext::ItemInfoArray[i].iId != 0)
+            occupiedWeapons.push_back(i);
+    std::string admissionError;
+    if (!registry.ValidateForRuntime(MAX_AMMO_SLOTS, giAmmoIndex,
+            occupiedAmmo, occupiedWeapons, admissionError)) {
+        ALERT(at_warning, "Modular asset registration disabled: %s\n", admissionError.c_str());
+        registry.DisableRuntime(admissionError);
+        return;
+    }
+    for (const auto& c : registry.Cartridges())
+        AddAmmoNameToAmmoRegistry(c.id.c_str());
+    for (const auto& w : registry.Weapons()) {
+        if (CBaseWeaponContext::ItemInfoArray[w.runtimeId].iId != 0) {
+            ALERT(at_warning, "Modular asset %s collides with a registered weapon ID\n", w.id.c_str());
+            continue;
+        }
+        // All cartridge IDs were already inserted above, so the number of
+        // unused ammo slots must NOT reject a valid registered weapon.
+        ItemInfo info{};
+        info.pszName = w.id.c_str();
+        info.pszAmmo1 = w.defaultCartridgeId.c_str();
+        info.iMaxAmmo1 = w.maxCarry;
+        info.iMaxAmmo2 = -1;
+        info.iMaxClip = w.clipSize;
+        info.iSlot = w.slot;
+        info.iPosition = w.position;
+        info.iFlags = w.flags | (w.autoReload ? 0 : ITEM_FLAG_NOAUTORELOAD);
+        info.iId = w.runtimeId;
+        info.iWeight = w.weight;
+        CBaseWeaponContext::ItemInfoArray[w.runtimeId] = info;
+        PRECACHE_MODEL(w.viewModel.c_str());
+        PRECACHE_MODEL(w.playerModel.c_str());
+        PRECACHE_MODEL(w.worldModel.c_str());
+        if (!w.fireSound.empty()) PRECACHE_SOUND(w.fireSound.c_str());
+        if (!w.reloadSound.empty()) PRECACHE_SOUND(w.reloadSound.c_str());
+        if (!w.pickupSound.empty()) PRECACHE_SOUND(w.pickupSound.c_str());
+        if (!w.sprite.empty()) PRECACHE_GENERIC(w.sprite.c_str());
+        // Both actions have their own optional audiovisual assets.
+        if (!w.primary.sound.empty() && w.primary.sound != w.fireSound) PRECACHE_SOUND(w.primary.sound.c_str());
+        if (!w.secondary.sound.empty() && w.secondary.sound != w.primary.sound) PRECACHE_SOUND(w.secondary.sound.c_str());
+        if (!w.primary.event.empty()) PRECACHE_EVENT(1, w.primary.event.c_str());
+        if (!w.secondary.event.empty() && w.secondary.event != w.primary.event) PRECACHE_EVENT(1, w.secondary.event.c_str());
+    }
 }
 
 // called by worldspawn
@@ -390,6 +572,8 @@ void W_Precache(void)
 
 	PRECACHE_SOUND("items/weapondrop1.wav");// weapon falls to the ground
 
+	PrecacheModularWeaponDefinitions();
+
 }
 
 BEGIN_DATADESC( CBasePlayerItem )
@@ -422,6 +606,7 @@ BEGIN_DATADESC( CBasePlayerWeapon )
 	DEFINE_BASEPLAYERWEAPON_FIELD( m_iDefaultAmmo, FIELD_INTEGER ),
 	DEFINE_BASEPLAYERWEAPON_FIELD( m_iId, FIELD_INTEGER ),
 	DEFINE_BASEPLAYERWEAPON_FIELD( m_fInSpecialReload, FIELD_INTEGER ),
+	DEFINE_BASEPLAYERWEAPON_FIELD( m_fInReload, FIELD_INTEGER ),
 END_DATADESC()
 
 void CBasePlayerItem :: SetObjectCollisionBox( void )
@@ -583,13 +768,13 @@ void CBasePlayerItem::DefaultTouch( CBaseEntity *pOther )
 		return;
 	}
 
-	if (pOther->AddPlayerItem( this ))
-	{
-		AttachToPlayer( pPlayer );
-		EMIT_SOUND(ENT(pPlayer->pev), CHAN_ITEM, "items/gunpickup2.wav", 1, ATTN_NORM);
-	}
-
-	SUB_UseTargets( pOther, USE_TOGGLE, 0 ); // UNDONE: when should this happen?
+    const ItemPickupResult result = pPlayer->TryAddPlayerItem(this);
+    if (result == ItemPickupResult::Attached) AttachToPlayer(pPlayer);
+    if (ItemPickupTransferred(result))
+    {
+        EMIT_SOUND(ENT(pPlayer->pev), CHAN_ITEM, "items/gunpickup2.wav", 1, ATTN_NORM);
+        SUB_UseTargets(pOther, USE_TOGGLE, 0);
+    }
 }
 
 
@@ -1047,53 +1232,61 @@ void CWeaponBox::Touch( CBaseEntity *pOther )
 		return;
 	}
 
-	CBasePlayer *pPlayer = (CBasePlayer *)pOther;
-	int i;
-
-// dole out ammo
-	for ( i = 0 ; i < MAX_AMMO_SLOTS ; i++ )
-	{
-		if ( !FStringNull( m_rgiszAmmo[ i ] ) )
-		{
-			// there's some ammo of this type. 
-			pPlayer->GiveAmmo( m_rgAmmo[ i ], (char *)STRING( m_rgiszAmmo[ i ] ), MaxAmmoCarry( m_rgiszAmmo[ i ] ) );
-
-			//ALERT ( at_console, "Gave %d rounds of %s\n", m_rgAmmo[i], STRING(m_rgiszAmmo[i]) );
-
-			// now empty the ammo from the weaponbox since we just gave it to the player
-			m_rgiszAmmo[ i ] = iStringNull;
-			m_rgAmmo[ i ] = 0;
-		}
-	}
-
-// go through my weapons and try to give the usable ones to the player. 
-// it's important the the player be given ammo first, so the weapons code doesn't refuse 
-// to deploy a better weapon that the player may pick up because he has no ammo for it.
-	for ( i = 0 ; i < MAX_ITEM_TYPES ; i++ )
-	{
-		if ( m_rgpPlayerItems[ i ] )
-		{
-			CBasePlayerItem *pItem;
-
-			// have at least one weapon in this slot
-			while ( m_rgpPlayerItems[ i ] )
-			{
-				//ALERT ( at_console, "trying to give %s\n", STRING( m_rgpPlayerItems[ i ]->pev->classname ) );
-
-				pItem = m_rgpPlayerItems[ i ];
-				m_rgpPlayerItems[ i ] = m_rgpPlayerItems[ i ]->m_pNext;// unlink this weapon from the box
-
-				if ( pPlayer->AddPlayerItem( pItem ) )
-				{
-					pItem->AttachToPlayer( pPlayer );
-				}
-			}
-		}
-	}
-
-	EMIT_SOUND( pOther->edict(), CHAN_ITEM, "items/gunpickup2.wav", 1, ATTN_NORM );
-	SetTouch( NULL);
-	UTIL_Remove(this);
+    CBasePlayer *player = static_cast<CBasePlayer *>(pOther);
+    bool transferred = false;
+    for (int i = 0; i < MAX_AMMO_SLOTS; ++i)
+    {
+        if (FStringNull(m_rgiszAmmo[i])) continue;
+        if (m_rgAmmo[i] <= 0)
+        {
+            m_rgAmmo[i] = 0;
+            m_rgiszAmmo[i] = iStringNull;
+            continue;
+        }
+        const char *name = STRING(m_rgiszAmmo[i]);
+        const int index = player->GetAmmoIndex(name);
+        if (index <= 0 || index >= MAX_AMMO_SLOTS) continue;
+        const int before = player->m_rgAmmo[index];
+        player->GiveAmmo(m_rgAmmo[i], const_cast<char *>(name), MaxAmmoCarry(m_rgiszAmmo[i]));
+        const int granted = modular_ammo::ActualGranted(before, player->m_rgAmmo[index], m_rgAmmo[i]);
+        m_rgAmmo[i] -= granted;
+        transferred = transferred || granted > 0;
+        if (m_rgAmmo[i] == 0) m_rgiszAmmo[i] = iStringNull;
+    }
+    // Visit each packed item once. AddToPlayer can reuse m_pNext for the
+    // player's list, so retain the next box item before calling it.
+    for (int slot = 0; slot < MAX_ITEM_TYPES; ++slot)
+    {
+        CBasePlayerItem **link = &m_rgpPlayerItems[slot];
+        while (*link)
+        {
+            CBasePlayerItem *item = *link;
+            CBasePlayerItem *next = item->m_pNext;
+            const ItemPickupResult result = g_pGameRules->CanHavePlayerItem(player, item)
+                ? player->TryAddPlayerItem(item) : ItemPickupResult::Rejected;
+            if (result == ItemPickupResult::Attached || result == ItemPickupResult::Consumed)
+            {
+                *link = next;
+                if (result == ItemPickupResult::Attached) item->AttachToPlayer(player);
+                else item->m_pNext = nullptr;
+            }
+            else
+            {
+                item->m_pNext = next;
+                item->m_pPlayer = nullptr;
+                item->pev->owner = edict();
+                link = &item->m_pNext;
+            }
+            transferred = transferred || ItemPickupTransferred(result);
+        }
+    }
+    if (transferred)
+        EMIT_SOUND(pOther->edict(), CHAN_ITEM, "items/gunpickup2.wav", 1, ATTN_NORM);
+    if (IsEmpty())
+    {
+        SetTouch(NULL);
+        UTIL_Remove(this);
+    }
 }
 
 //=========================================================
@@ -1221,7 +1414,7 @@ BOOL CWeaponBox::HasWeapon( CBasePlayerItem *pCheckItem )
 
 	while (pItem)
 	{
-		if (FClassnameIs( pItem->pev, STRING( pCheckItem->pev->classname) ))
+		if (SameInventoryWeaponType(pItem, pCheckItem))
 		{
 			return TRUE;
 		}

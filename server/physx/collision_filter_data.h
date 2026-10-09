@@ -20,14 +20,21 @@ GNU General Public License for more details.
 class CollisionFilterData
 {
 public:
-	CollisionFilterData();
-	CollisionFilterData(const physx::PxFilterData &data);
+    CollisionFilterData();
+    CollisionFilterData(const physx::PxFilterData &data);
 
-	bool HasConveyorFlag() const;
-	void SetConveyorFlag(bool state);
+    bool HasConveyorFlag() const;
+    void SetConveyorFlag(bool state);
 
-	physx::PxFilterData ToNativeType() const;
+    bool IsPhysicsAssetBody() const;
+    void SetPhysicsAssetBody(bool state);
+    physx::PxU32 GetPhysicsAssetOwner() const;
+    void SetPhysicsAssetOwner(physx::PxU32 owner);
+
+    physx::PxFilterData ToNativeType() const;
 
 private:
-	bool m_conveyorFlag;
+    bool m_conveyorFlag;
+    bool m_physicsAssetBody;
+    physx::PxU32 m_physicsAssetOwner;
 };

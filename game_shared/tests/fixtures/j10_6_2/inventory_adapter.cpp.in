@@ -1,0 +1,259 @@
+// Engine/entity/save adapters around unchanged production methods. Registry,
+// typed transfer policy and UUID generation are actual project code.
+#include "modular_weapons.h"
+#include "modular_ammo_policy.h"
+#include "modular_item_identity.h"
+#include "item_pickup_result.h"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cstring>
+#include <functional>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+using BOOL=int;using string_t=int;
+constexpr int TRUE=1,FALSE=0,iStringNull=0,MAX_AMMO_SLOTS=32,MAX_ITEM_TYPES=6,MAX_WEAPONS=64;
+constexpr int DEAD_NO=0,FL_ONGROUND=1,FL_KILLME=2,EF_NODRAW=4,ITEM_FLAG_LIMITINWORLD=8;
+constexpr int CHAN_ITEM=0,ATTN_NORM=0;
+constexpr int kPrimaryLatch=1,kSecondaryLatch=2;
+enum {at_warning,at_console,USE_TOGGLE};
+#define Q_min(a,b) std::min(a,b)
+#define Q_max(a,b) std::max(a,b)
+#define FStringNull(x) ((x)==0)
+#define FBitSet(a,b) ((a)&(b))
+#define DECLARE_CLASS(a,b) using BaseClass=b
+#define DECLARE_DATADESC()
+struct Vector { float x=0,y=0,z=0; Vector()=default;Vector(float a,float b,float c):x(a),y(b),z(c) {} };
+std::vector<std::string> stringPool={""};
+string_t ALLOC_STRING(const char* text) {stringPool.emplace_back(text);return stringPool.size()-1;}
+const char* STRING(string_t id) {return stringPool.at(id).c_str();}
+void ALERT(int,const char*,...) {}
+struct KeyValueData {char* szKeyName;char* szValue;int fHandled=0;};
+class CBaseEntity;class CBasePlayer;class CBasePlayerItem;class CBasePlayerWeapon;
+struct edict_t { CBaseEntity* entity; };
+struct entvars_t {
+    int deadflag=DEAD_NO,flags=0,effects=0,spawnflags=0,body=0,skin=0;
+    float scale=1,nextthink=0;
+    string_t classname=0,target=0,targetname=0;
+    edict_t* owner=nullptr;
+};
+struct CRestore {std::function<void(CBaseEntity*)> restore;};
+struct ItemInfo {int iId=0,iMaxAmmo1=0,iMaxAmmo2=0;const char* pszAmmo1=nullptr;const char* pszAmmo2=nullptr;};
+class CBaseEntity {
+public:
+    entvars_t vars{};entvars_t* pev=&vars;edict_t entity{this};Vector origin{},angles{};
+    bool removed=false,thinkSet=false,touchSet=true,m_fSetAngles=false;
+    virtual ~CBaseEntity()=default;
+    virtual bool IsPlayer() {return false;}virtual bool IsAlive() {return true;}
+    virtual void Spawn() {}virtual void Precache() {}virtual void KeyValue(KeyValueData*) {}
+    virtual int Restore(CRestore& restore) { if(restore.restore)restore.restore(this);return 1;}
+    virtual CBaseEntity* Respawn() {return nullptr;}
+    edict_t* edict() {return &entity;}
+    static CBaseEntity* Instance(edict_t* e) {return e ? e->entity : nullptr;}
+    Vector GetAbsAngles() {return angles;}void SetAbsAngles(Vector a) {angles=a;}
+    void SetAbsOrigin(Vector a) {origin=a;}
+    template<class T> void SetTouch(T callback) {touchSet=callback!=0;}
+    template<class T> void SetThink(T callback) {thinkSet=callback!=0;}
+    void SetTouch(std::nullptr_t) {touchSet=false;}void SetThink(std::nullptr_t) {thinkSet=false;}
+};
+#define ENT(p) (&playerEntityUnused)
+edict_t playerEntityUnused{};
+int sounds=0;void EMIT_SOUND(edict_t*,int,const char*,int,int) {++sounds;}
+void UTIL_Remove(CBaseEntity* entity) {entity->removed=true;entity->pev->flags|=FL_KILLME;}
+int PRECACHE_MODEL(const char*) {return 1;}void SET_MODEL(edict_t*,const char*) {}
+bool FClassnameIs(const entvars_t* vars,const char* text) {return !strcmp(STRING(vars->classname),text);}
+struct CServerWeaponLayerImpl {
+    explicit CServerWeaponLayerImpl(CBasePlayerWeapon*) {}
+    int PrecacheEvent(const char*) {return 0;}int FindAmmoType(const char*);
+};
+struct CBaseWeaponContext {virtual ~CBaseWeaponContext()=default;static ItemInfo ItemInfoArray[MAX_WEAPONS];};
+ItemInfo CBaseWeaponContext::ItemInfoArray[MAX_WEAPONS]{};
+struct CModularWeaponContext: CBaseWeaponContext {
+    int m_iId=0,m_iDefaultAmmo=0,m_iClip=0,m_loadedCartridgeIndex=0,m_selectedCartridgeIndex=0;
+    int m_iPrimaryAmmoType=0,m_iSecondaryAmmoType=0,m_modularFlags=0,m_burstRemaining=0;
+    int m_primaryEvent=0,m_secondaryEvent=0;const modular::Weapon* m_definition=nullptr;
+    std::unique_ptr<CServerWeaponLayerImpl> m_pLayer;
+    CModularWeaponContext(std::unique_ptr<CServerWeaponLayerImpl> layer,const modular::Weapon* definition):m_pLayer(std::move(layer)) {BindDefinition(definition);}
+    void BindDefinition(const modular::Weapon*,bool initializeSpawn=true);
+    void CancelBurst() {m_burstRemaining=0;}
+};
+class CBasePlayerItem:public CBaseEntity {
+public:
+    CBasePlayer* m_pPlayer=nullptr;CBasePlayerItem* m_pNext=nullptr;int infoUpdates=0,respawnChecks=0;
+    virtual int AddToPlayer(CBasePlayer* p) {m_pPlayer=p;return TRUE;}
+    virtual int AddDuplicate(CBasePlayerItem*) {return FALSE;}
+    virtual ItemPickupResult AddDuplicateResult(CBasePlayerItem* p) {return AddDuplicate(p) ? ItemPickupResult::Consumed : ItemPickupResult::Rejected;}
+    virtual int DuplicateAmmoCapacity(const CBasePlayer*) const {return -1;}
+    virtual int GetItemInfo(ItemInfo* info) const {*info={};return FALSE;}
+    virtual const char* pszAmmo1() {return nullptr;}virtual int iMaxAmmo1() {return 0;}
+    virtual int iItemSlot() {return 1;}virtual int iFlags() {return 0;}virtual int iWeaponID() {ItemInfo info{};GetItemInfo(&info);return info.iId;}
+    void Kill() {UTIL_Remove(this);}void UpdateItemInfo() {++infoUpdates;}
+    void CheckRespawn() {++respawnChecks;}
+    void AttachToPlayer(CBasePlayer* p) {m_pPlayer=p;pev->owner=nullptr;}
+    void AttemptToMaterialize() {}void FallInit() {}
+    void DefaultTouch(CBaseEntity*);void SUB_UseTargets(CBaseEntity*,int,int) {}
+};
+class CBasePlayerWeapon: public CBasePlayerItem {
+public:
+    std::unique_ptr<CBaseWeaponContext> m_pWeaponContext;
+    int GetItemInfo(ItemInfo* info) const override {
+        auto* context=static_cast<CModularWeaponContext*>(m_pWeaponContext.get());
+        if(!context || !context->m_definition)return FALSE;
+        info->iId=context->m_iId;info->pszAmmo1=context->m_definition->defaultCartridgeId.c_str();info->iMaxAmmo1=context->m_definition->maxCarry;return TRUE;
+    }
+    const char* pszAmmo1() override {ItemInfo i{};GetItemInfo(&i);return i.pszAmmo1;}
+    int iMaxAmmo1() override {ItemInfo i{};GetItemInfo(&i);return i.iMaxAmmo1;}
+};
+bool SameInventoryWeaponType(const CBasePlayerItem*,const CBasePlayerItem*);
+class CBasePlayer:public CBaseEntity {
+public:
+    int m_rgAmmo[MAX_AMMO_SLOTS]{};CBasePlayerItem* m_rgpPlayerItems[MAX_ITEM_TYPES]{};CBasePlayerItem* m_pActiveItem=nullptr;
+    bool IsPlayer() override {return true;}bool IsAlive() override {return pev->deadflag==DEAD_NO;}
+    static int GetAmmoIndex(const char* name) {return !strcmp(name,"test_fmj")?1:!strcmp(name,"test_jhp")?2:0;}
+    void AddWeapon(int) {}void SwitchWeapon(CBasePlayerItem*) {}
+    int GiveAmmo(int amount,char* name,int limit) {int i=GetAmmoIndex(name);if(!i)return -1;m_rgAmmo[i]+=std::min(amount,std::max(0,limit-m_rgAmmo[i]));return i;}
+    int AmmoInventory(int index) {return m_rgAmmo[index];}
+    BOOL HasPlayerItem(CBasePlayerItem*);int AddPlayerItem(CBasePlayerItem*);ItemPickupResult TryAddPlayerItem(CBasePlayerItem*);
+};
+int CServerWeaponLayerImpl::FindAmmoType(const char* name) {return CBasePlayer::GetAmmoIndex(name);}
+class CGameRules {
+public:
+    virtual ~CGameRules()=default;virtual BOOL CanHavePlayerItem(CBasePlayer*,CBasePlayerItem*);
+    BOOL CanHaveAmmo(CBasePlayer*,const char*,int);
+    void PlayerGotWeapon(CBasePlayer*,CBasePlayerItem*) {}
+    bool FShouldSwitchWeapon(CBasePlayer*,CBasePlayerItem*) {return false;}
+    Vector VecWeaponRespawnSpot(CBasePlayerItem*) {return Vector(9,8,7);}
+    float FlWeaponRespawnTime(CBasePlayerItem*) {return 42;}
+};
+class CHalfLifeMultiplay:public CGameRules {public:BOOL CanHavePlayerItem(CBasePlayer*,CBasePlayerItem*) override;};
+CGameRules rules;CGameRules* g_pGameRules=&rules;
+struct {float value=0;} weaponstay;
+int gEvilImpulse101=0;
+int MaxAmmoCarry(int);
+class CWeaponBox:public CBaseEntity {
+public:
+    int m_rgAmmo[MAX_AMMO_SLOTS]{};string_t m_rgiszAmmo[MAX_AMMO_SLOTS]{};CBasePlayerItem* m_rgpPlayerItems[MAX_ITEM_TYPES]{};
+    BOOL IsEmpty();void Touch(CBaseEntity*);
+};
+CBaseEntity* CreateEntityByName(char*);int DispatchSpawn(edict_t*);
+
+@PRODUCTION@
+
+static std::vector<std::unique_ptr<CBaseEntity>> created;
+CBaseEntity* CreateEntityByName(char* name) {
+    assert(!strcmp(name,"weapon_modular"));created.emplace_back(std::make_unique<CModularWeapon>());
+    created.back()->pev->classname=ALLOC_STRING(name);return created.back().get();
+}
+int DispatchSpawn(edict_t* e) {e->entity->Spawn();return e->entity->removed ? -1 : 0;}
+static void key(CModularWeapon& item,const char* name,const char* value) {
+    KeyValueData kv{const_cast<char*>(name),const_cast<char*>(value),FALSE};item.KeyValue(&kv);assert(kv.fHandled);
+}
+static CModularWeaponContext& context(CModularWeapon& item) {return *static_cast<CModularWeaponContext*>(item.m_pWeaponContext.get());}
+static void spawn(CModularWeapon& item,const char* cartridge=nullptr,int rounds=0) {
+    item.pev->classname=ALLOC_STRING("weapon_modular");key(item,"weapon_id","test_pistol");
+    if(cartridge) {key(item,"loaded_cartridge",cartridge);key(item,"loaded_rounds",std::to_string(rounds).c_str());}
+    item.Spawn();assert(!item.removed);
+}
+static void own(CBasePlayer& player,CModularWeapon& item) {
+    spawn(item,"test_fmj",0);assert(player.TryAddPlayerItem(&item)==ItemPickupResult::Attached);
+}
+static void pack(CWeaponBox& box,CBasePlayerItem& item) {
+    item.m_pNext=box.m_rgpPlayerItems[1];box.m_rgpPlayerItems[1]=&item;
+    item.pev->owner=box.edict();item.m_pPlayer=nullptr;item.pev->effects|=EF_NODRAW;
+    box.pev->flags|=FL_ONGROUND;
+}
+int main(int argc,char** argv) {
+    assert(argc==2);const std::string root=argv[1];
+    assert(modular::SharedRegistry().Load([&](const std::string& name,std::string& contents) {
+        std::ifstream file(root+"/"+name);if(!file)return false;std::ostringstream out;out<<file.rdbuf();contents=out.str();return true;
+    }));
+    const auto* def=modular::SharedRegistry().FindWeapon("test_pistol");assert(def);
+    CBaseWeaponContext::ItemInfoArray[def->runtimeId].iId=def->runtimeId;
+    const int limit=modular::SharedRegistry().AmmoReserveLimit("test_jhp");
+    {
+        CBasePlayer player;CModularWeapon owned,incoming;own(player,owned);spawn(incoming,"test_jhp",10);
+        player.m_rgAmmo[1]=modular::SharedRegistry().AmmoReserveLimit("test_fmj");
+        assert(rules.CanHavePlayerItem(&player,&incoming));assert(incoming.DuplicateAmmoCapacity(&player)==10);
+        assert(context(incoming).m_iClip==10 && player.m_rgAmmo[2]==0); // pure eligibility
+        incoming.DefaultTouch(&player);assert(player.m_rgAmmo[2]==10 && incoming.removed);
+        CModularWeapon blocked;spawn(blocked,"test_jhp",10);player.m_rgAmmo[2]=limit;
+        assert(!rules.CanHavePlayerItem(&player,&blocked));
+        player.pev->deadflag=1;assert(!rules.CanHavePlayerItem(&player,&blocked));player.pev->deadflag=DEAD_NO;
+        CHalfLifeMultiplay multiplayer;weaponstay.value=1;player.m_rgAmmo[2]=0;
+        assert(!multiplayer.CanHavePlayerItem(&player,&blocked));weaponstay.value=0;assert(multiplayer.CanHavePlayerItem(&player,&blocked));
+        CModularWeapon fmj;spawn(fmj,"test_fmj",10);player.m_rgAmmo[1]=0;player.m_rgAmmo[2]=limit;
+        assert(rules.CanHavePlayerItem(&player,&fmj));
+    }
+    for(int accepted:{0,3,10}) {
+        CBasePlayer player;CModularWeapon owned,incoming;CWeaponBox box;
+        own(player,owned);spawn(incoming,"test_jhp",10);pack(box,incoming);
+        player.m_rgAmmo[2]=limit-accepted;const int beforeSounds=sounds;
+        box.Touch(&player);assert(player.m_rgAmmo[2]==limit && context(incoming).m_iClip==10-accepted);
+        assert(sounds-beforeSounds==(accepted>0 ? 1 : 0));
+        if(accepted<10) {
+            assert(!box.removed && box.m_rgpPlayerItems[1]==&incoming && incoming.pev->owner==box.edict());
+            assert(!incoming.removed && incoming.m_pPlayer==nullptr);
+            // Explicit save-service adapter restores the saved context/recipe
+            // through the production Restore method before the next box touch.
+            const int savedClip=context(incoming).m_iClip,savedType=context(incoming).m_loadedCartridgeIndex;
+            const auto weaponUuid=incoming.m_weaponUuid,magUuid=incoming.m_magazineUuid;
+            CModularWeapon restored;CRestore state{[&](CBaseEntity*) {
+                restored.m_definitionId=incoming.m_definitionId;restored.m_spawnCartridge=incoming.m_spawnCartridge;
+                restored.m_spawnRounds=incoming.m_spawnRounds;restored.m_weaponUuid=weaponUuid;restored.m_magazineUuid=magUuid;
+                auto& c=context(restored);c.m_iId=def->runtimeId;c.m_iDefaultAmmo=0;c.m_iClip=savedClip;
+                c.m_loadedCartridgeIndex=c.m_selectedCartridgeIndex=savedType;
+            }};
+            assert(restored.Restore(state));assert(restored.m_weaponUuid==weaponUuid && context(restored).m_iDefaultAmmo==0);
+            box.m_rgpPlayerItems[1]=nullptr;pack(box,restored);
+            player.m_rgAmmo[2]=0;box.Touch(&player);assert(player.m_rgAmmo[2]==10-accepted && box.removed && restored.removed);
+        } else assert(box.removed && incoming.removed && box.m_rgpPlayerItems[1]==nullptr);
+    }
+    {
+        CBasePlayer player;CModularWeapon owned,incoming,rejected;CWeaponBox box;CBasePlayerItem fresh;
+        own(player,owned);spawn(incoming,"test_jhp",10);spawn(rejected,"test_fmj",10);
+        pack(box,incoming);pack(box,rejected);
+        fresh.pev->classname=ALLOC_STRING("weapon_legacy");pack(box,fresh);
+        player.m_rgAmmo[1]=modular::SharedRegistry().AmmoReserveLimit("test_fmj");player.m_rgAmmo[2]=limit-3;
+        box.Touch(&player);assert(box.m_rgpPlayerItems[1]==&rejected && rejected.m_pNext==&incoming);
+        assert(player.m_rgpPlayerItems[1]==&fresh && fresh.m_pNext==&owned && fresh.m_pPlayer==&player);
+        assert(context(incoming).m_iClip==7 && context(rejected).m_iClip==10 && !box.removed);
+        box.m_rgiszAmmo[1]=ALLOC_STRING("test_jhp");box.m_rgAmmo[1]=10;
+        player.m_rgAmmo[2]=limit-3;box.Touch(&player);assert(box.m_rgAmmo[1]==7 && !box.removed);
+        player.m_rgAmmo[2]=0;box.Touch(&player);assert(box.m_rgAmmo[1]==0 && player.m_rgAmmo[2]==14);
+        assert(box.m_rgpPlayerItems[1]==&rejected && rejected.m_pNext==nullptr && !box.removed);
+    }
+    {
+        CBasePlayer player;CModularWeapon incoming;spawn(incoming,"test_jhp",10);
+        player.m_rgAmmo[1]=250;player.m_rgAmmo[2]=limit;
+        assert(rules.CanHavePlayerItem(&player,&incoming));assert(player.AddPlayerItem(&incoming));assert(context(incoming).m_iClip==10);
+    }
+    for(bool configured:{false,true}) {
+        CModularWeapon original;spawn(original,configured ? "test_jhp" : nullptr,configured ? 10 : 0);
+        key(original,"paint_profile","blue");original.pev->spawnflags=123;original.pev->skin=4;original.pev->scale=2;
+        context(original).m_iClip=1;context(original).m_iDefaultAmmo=0;context(original).m_selectedCartridgeIndex=0;
+        auto* first=static_cast<CModularWeapon*>(original.Respawn());assert(first && !first->removed);
+        assert(first->m_definitionId==original.m_definitionId && first->m_paintProfile==original.m_paintProfile);
+        assert(first->pev->spawnflags==123 && first->pev->skin==4 && first->pev->scale==2);
+        assert(first->origin.x==9 && first->pev->nextthink==42 && !first->touchSet && first->thinkSet);
+        assert(strcmp(STRING(first->m_weaponUuid),STRING(original.m_weaponUuid)));
+        assert(strcmp(STRING(first->m_magazineUuid),STRING(original.m_magazineUuid)));
+        if(configured) {assert(context(*first).m_iClip==10 && context(*first).m_loadedCartridgeIndex==1);}
+        else assert(context(*first).m_iDefaultAmmo==def->defaultAmmo);
+        context(*first).m_iClip=0;context(*first).m_iDefaultAmmo=0;
+        CRestore saveRecipe{[&](CBaseEntity*) {}};assert(first->Restore(saveRecipe));
+        auto* second=static_cast<CModularWeapon*>(first->Respawn());assert(second && strcmp(STRING(second->m_weaponUuid),STRING(first->m_weaponUuid)));
+        assert(configured ? context(*second).m_iClip==10 : context(*second).m_iDefaultAmmo==def->defaultAmmo);
+    }
+    {
+        CModularWeapon missing;key(missing,"weapon_id","missing");assert(missing.Respawn()==nullptr);
+        CModularWeapon unregistered;spawn(unregistered);CBaseWeaponContext::ItemInfoArray[def->runtimeId].iId=0;
+        assert(unregistered.Respawn()==nullptr);CBaseWeaponContext::ItemInfoArray[def->runtimeId].iId=def->runtimeId;
+        CModularWeapon oldSave;CRestore state{[&](CBaseEntity*) {oldSave.m_definitionId=ALLOC_STRING("test_pistol");context(oldSave).m_iId=def->runtimeId;}};
+        assert(oldSave.Restore(state));oldSave.pev->classname=ALLOC_STRING("weapon_modular");assert(oldSave.Respawn());
+    }
+    std::cout<<"PASS J.10.6.2 actual inventory methods: typed gate, world pickup, 0/3/10 box transfers, second pickup, loose ammo, retained links, restore adapter, authored respawns and UUIDs\n";
+}

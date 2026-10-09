@@ -89,6 +89,8 @@ public:
 	virtual int	BuildCollisionTree( char *szMapName ) { return 0; }
 	virtual bool	UpdateEntityTransform( CBaseEntity *pEntity ) { return false; }
 	virtual void	UpdateEntityAABB( CBaseEntity *pEntity ) {}
+	virtual void	UpdateCollisionBodygroup( CBaseEntity *pEntity ) {}
+	virtual bool	ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end, Vector &impactPoint, Vector &impactNormal, uint32_t &materialHash ) { return false; }
 	virtual bool	UpdateActorPos( CBaseEntity *pEntity ) { return false; };
 	virtual void	SetupWorld( void ) {}
 	virtual void	FreeWorld( void ) {}
@@ -103,6 +105,29 @@ public:
 	virtual bool	IsBodySleeping( CBaseEntity *pEntity ) { return true; } // entity is always sleeping while physics is not installed
 	virtual void	*GetCookingInterface( void ) { return NULL; }
 	virtual void	*GetPhysicInterface( void ) { return NULL; }
+	virtual bool	CreatePhysicsAsset( CBaseEntity *pEntity ) { return false; }
+	virtual bool	HasPhysicsAsset( CBaseEntity *pEntity ) { return false; }
+	virtual void	UpdatePhysicsAssetPose( CBaseEntity *pEntity ) {}
+    virtual bool SetPhysicsPartMode( CBaseEntity *, const char *, PhysicsPartMode ) { return false; }
+    virtual bool GetPhysicsPartWorldPose( CBaseEntity *, const char *, matrix4x4 & ) { return false; }
+    virtual bool DamagePhysicsPart( CBaseEntity *, const char *, float ) { return false; }
+    virtual int CaptureInteractiveParts(CBaseEntity *,PhysicsPartSaveRecord *,int) { return 0; }
+    virtual void RestoreInteractiveParts(CBaseEntity *,const PhysicsPartSaveRecord *,int) {}
+	virtual bool GetRagdollWorldBounds( CBaseEntity *, Vector &, Vector & ) { return false; }
+	virtual bool	IsRagdoll( CBaseEntity *pEntity ) { return false; }
+	virtual void	SetRagdoll( CBaseEntity *pEntity, bool enabled ) {}
+	virtual bool SetRagdollBodyPhysicsWeight( CBaseEntity *, const char *, float, bool ) { return false; }
+	virtual bool IsRagdollFrozen( CBaseEntity * ) { return false; }
+	virtual bool BuildRagdollDecalAttachment( CBaseEntity *, const Vector &, const Vector &, int, int &, Vector &, Vector & ) { return false; }
+	virtual CollisionRepresentation ResolveCollisionRepresentation( CBaseEntity *, CollisionQueryPurpose ) { return CollisionRepresentation::Legacy; }
+	virtual bool TraceBulletPhysicsParts( const Vector &, const Vector &, edict_t *, TraceResult * ) { return false; }
+	virtual bool TraceBulletRagdolls( const Vector &, const Vector &, edict_t *, TraceResult *, int *bodyIndex ) { if( bodyIndex ) *bodyIndex = -1; return false; }
+	virtual bool TraceBallisticPhysicsExit( CBaseEntity *, int, const Vector &, const Vector &, float, Vector &, Vector & ) { return false; }
+	virtual bool ApplyPhysicsPartBulletImpact( CBaseEntity *, const Vector &, const Vector &, const Vector &, const Vector &, float ) { return false; }
+	virtual void AddPhysicsPartRadialImpulse( CBaseEntity *, const Vector &, float, float, float ) {}
+	virtual bool AddPhysicsAssetImpulse( CBaseEntity *, int, const Vector &, const Vector & ) { return false; }
+	virtual void QueuePhysicsAssetImpulse( CBaseEntity *, int, const Vector &, const Vector & ) {}
+	virtual void AddPhysicsAssetRadialImpulse( CBaseEntity *, const Vector &, float, float ) {}
 };
 
 CPhysicNull NullPhysic;

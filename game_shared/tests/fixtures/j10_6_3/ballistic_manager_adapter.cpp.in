@@ -1,0 +1,92 @@
+#include "ballistic_flight.h"
+#include "ballistic_path_cache.h"
+#include "ballistic_timing.h"
+#include "modular_weapons.h"
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <functional>
+#include <iostream>
+#include <limits>
+#include <vector>
+
+struct Vector {
+    float x=0,y=0,z=0;
+    Vector()=default;Vector(float a,float b,float c):x(a),y(b),z(c){}
+    Vector operator-(Vector b)const{return {x-b.x,y-b.y,z-b.z};}
+    Vector operator+(Vector b)const{return {x+b.x,y+b.y,z+b.z};}
+    Vector operator*(float s)const{return {x*s,y*s,z*s};}
+    Vector Normalize()const{float l=std::sqrt(x*x+y*y+z*z);return l>0?*this*(1/l):Vector();}
+};
+struct entvars_t {int solid=0,movetype=0,effects=0;float nextthink=0;};
+struct TraceResult {float flFraction=1;Vector vecEndPos;struct CBaseEntity* pHit=nullptr;};
+struct CBaseEntity {
+    entvars_t data;entvars_t* pev=&data;
+    static CBaseEntity* Instance(CBaseEntity* e){return e;}
+    CBaseEntity* edict(){return this;}std::function<void()> onDamage;
+    void TraceAttack(entvars_t*,float,Vector,TraceResult*,int){if(onDamage)onDamage();}
+};
+using EHANDLE=CBaseEntity*;
+struct Globals{float time=10;};Globals globals;Globals* gpGlobals=&globals;
+constexpr double kUnitsPerMeter=39.37007874015748,kCurveStep=.01,kSweepStep=.02,kMaxLifetime=10;
+constexpr int kMaxActive=256,kCurveSamples=1002,SOLID_NOT=0,MOVETYPE_NONE=0,EF_NODRAW=1,DMG_BULLET=2;
+float gravityScale=0,airDensity=0;
+float CVAR_GET_FLOAT(const char* n){return std::string(n)=="sv_ballistics_gravity_scale"?gravityScale:
+    std::string(n)=="sv_ballistics_air_density"?airDensity:0;}
+#define ALERT(...) ((void)0)
+bool UTIL_IsValidEntity(CBaseEntity* e){return e!=nullptr;}
+void ResolveBulletImpactEffects(const TraceResult* in,Vector,Vector,TraceResult* out){*out=*in;}
+struct {int type=0;} gMultiDamage;
+void ClearMultiDamage(){}void ApplyMultiDamage(entvars_t*,entvars_t*){}
+void ApplyPhysicsBulletImpulse(const TraceResult*,int,Vector,Vector,Vector,float){}
+void TEXTURETYPE_PlaySound(const TraceResult*,Vector,Vector,int){}void DecalGunshot(const TraceResult*,int,Vector,Vector){}
+struct Shot;
+struct PenetrationCandidate {};
+bool PreparePenetration(Shot&,const TraceResult&,int,const Vector&,const Vector&,
+    const modular::BallisticState&,PenetrationCandidate&){return false;}
+bool BeginPenetration(Shot&,const modular::BallisticState&,const Vector&,const PenetrationCandidate&){return false;}
+void Tracer(Shot&,const Vector&){}
+CBaseEntity* traceTarget=nullptr;int traceCalls=0;
+int BulletTrace(Vector from,Vector to,CBaseEntity*,TraceResult& out){++traceCalls;
+    out.flFraction=traceTarget?0.5f:1;out.pHit=traceTarget;out.vecEndPos=from+(to-from)*out.flFraction;return -1;}
+// Declare the manager after inserting Shot, before inserting its methods.
+@SHOT_DECLARATION@
+struct CModularBallisticManager:CBaseEntity {
+    float m_last=0;std::vector<Shot> m_shots;
+    void Spawn();bool Add(CBaseEntity*,const modular::Weapon&,const modular::Cartridge&,Vector,Vector,float);
+    void Update();int Count()const{return m_shots.size();}
+};
+CModularBallisticManager* g_manager=nullptr;
+@PRODUCTION@
+
+bool near(double a,double b){return std::fabs(a-b)<2e-4;}
+int main(){
+    modular::Weapon weapon;weapon.range=float(1000*kUnitsPerMeter);
+    modular::Cartridge cartridge;cartridge.massGrams=8;cartridge.diameterMm=9;cartridge.damage=18;cartridge.dragCoefficient=0;
+    CBaseEntity owner,target;
+    CModularBallisticManager manager;globals.time=10;manager.Spawn();
+    assert(manager.m_shots.capacity()>=kMaxActive&&manager.pev->nextthink==0);
+    assert(manager.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+    globals.time=10.02f;assert(manager.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));manager.Update();
+    assert(near(manager.m_shots[0].state.seconds,.02)&&manager.m_shots[1].state.seconds==0);
+    for(int i=manager.Count();i<256;++i)assert(manager.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+    assert(!manager.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+    for(int frame=1;frame<=100;++frame){globals.time=10.02f+frame*.01f;manager.Update();assert(manager.Count()==256);}
+    assert(near(manager.m_shots[1].state.seconds,1)&&near(manager.m_shots[1].state.position.x,100));
+    globals.time=11.52f;double before=manager.m_shots[1].state.seconds;manager.Update();
+    assert(near(manager.m_shots[1].state.seconds-before,.1));manager.Update();assert(near(manager.m_shots[1].state.seconds-before,.2));
+    std::cout<<"PASS production manager: 256 shots / 100 frames, range/birth clocks, cap, retained catch-up time\n";
+
+    CModularBallisticManager reentrant;globals.time=20;reentrant.Spawn();
+    assert(reentrant.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+    Shot* address=&reentrant.m_shots[0];const double energy=address->originalEnergy;
+    int damageCalls=0;target.onDamage=[&]{++damageCalls;traceTarget=nullptr;
+        for(int i=1;i<256;++i)assert(reentrant.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+        assert(&reentrant.m_shots[0]==address&&address->originalEnergy==energy);
+        assert(!reentrant.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));};
+    traceTarget=&target;globals.time=20.02f;reentrant.Update();assert(damageCalls==1&&reentrant.Count()==255);
+    for(const Shot& shot:reentrant.m_shots)assert(shot.state.seconds==0&&near(shot.lastSimulatedTime,globals.time));
+    globals.time=20.03f;reentrant.Update();for(const Shot& shot:reentrant.m_shots)assert(near(shot.state.seconds,.01));
+    reentrant.m_shots.front().owner=nullptr;reentrant.Update();assert(reentrant.Count()==254);
+    std::cout<<"PASS production manager: damage callback creates 255 shots, stable live reference, birth timing, owner cleanup\n";
+}

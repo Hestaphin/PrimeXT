@@ -19,9 +19,13 @@
 #include "effects.h"
 #include "item_info.h"
 #include "weapon_context.h"
+#include "item_pickup_result.h"
 #include <memory>
 
 class CBasePlayer;
+class CBasePlayerItem;
+// Distinguish data-driven weapon IDs sharing the same map entity classname.
+bool SameInventoryWeaponType(const CBasePlayerItem* a, const CBasePlayerItem* b);
 
 void DeactivateSatchels( CBasePlayer *pOwner );
 
@@ -60,6 +64,12 @@ public:
 
 	virtual int AddToPlayer( CBasePlayer *pPlayer );	// return TRUE if the item you want the item added to the player inventory
 	virtual int AddDuplicate( CBasePlayerItem *pItem ) { return FALSE; }	// return TRUE if you want your duplicate removed from world
+	virtual ItemPickupResult AddDuplicateResult(CBasePlayerItem *item) {
+		return AddDuplicate(item) ? ItemPickupResult::Consumed : ItemPickupResult::Rejected;
+	}
+	// -1 selects legacy ammo metadata. Modular items report the actual typed
+	// rounds that fit, without changing either the item or the player.
+	virtual int DuplicateAmmoCapacity(const CBasePlayer *player) const { return -1; }
 	void DestroyItem( void );
 	void DefaultTouch( CBaseEntity *pOther );	// default weapon touch
 	void FallThink ( void );// when an item is first spawned, this think is run to determine when the object has hit the ground.
@@ -191,6 +201,11 @@ extern void ClearMultiDamage(void);
 extern void ApplyMultiDamage(entvars_t* pevInflictor, entvars_t* pevAttacker );
 extern void AddMultiDamage( entvars_t *pevInflictor, CBaseEntity *pEntity, float flDamage, int bitsDamageType);
 
+extern bool ResolveBulletImpactEffects( const TraceResult *pCollisionTrace, const vec3_t &origin, const vec3_t &vecEnd, TraceResult *pEffectTrace );
+extern int ResolveRagdollBulletCollision( TraceResult *pTrace, const vec3_t &origin, const vec3_t &vecEnd, edict_t *pIgnore );
+// One dispatch for ragdoll and interactive-prop impulses, called ONCE per pellet.
+extern void ApplyPhysicsBulletImpulse( const TraceResult *pTrace, int ragdollBody,
+    const vec3_t &origin, const vec3_t &rayEnd, const vec3_t &direction, float damage );
 extern void DecalGunshot( TraceResult *pTrace, int iBulletType, const vec3_t &origin, const vec3_t &vecEnd );
 extern void SpawnBlood(Vector vecSpot, int bloodColor, float flDamage);
 extern const char* DamageDecal( CBaseEntity *pEntity, int bitsDamageType );

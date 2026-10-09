@@ -73,14 +73,25 @@ Vector CClientWeaponLayerImpl::FireBullets(int bullets, Vector origin, matrix3x3
 	return Vector( x * spread, y * spread, 0.0 );
 }
 
+int CClientWeaponLayerImpl::FindAmmoType(const char* name) {
+    // Client-side cartridge reserve synchronization is finalized in J.4.
+    // Use only indices the server has registered and announced through
+    // the ordinary ammo mapping; never predict unannounced reserves.
+    for (int i=1; i<MAX_AMMO_SLOTS; ++i) {
+        const char* candidate = CBaseWeaponContext::AmmoInfoArray[i].pszName;
+        if (candidate && !strcmp(candidate,name)) return i;
+    }
+    return 0;
+}
+
 int CClientWeaponLayerImpl::GetPlayerAmmo(int ammoType)
 {
-	return m_playerState.ammo[ammoType];
+	return ammoType > 0 && ammoType < MAX_AMMO_SLOTS ? m_playerState.ammo[ammoType] : 0;
 }
 
 void CClientWeaponLayerImpl::SetPlayerAmmo(int ammoType, int count)
 {
-	m_playerState.ammo[ammoType] = count;
+	if (ammoType > 0 && ammoType < MAX_AMMO_SLOTS) m_playerState.ammo[ammoType] = count;
 }
 
 void CClientWeaponLayerImpl::SetPlayerWeaponAnim(int anim)

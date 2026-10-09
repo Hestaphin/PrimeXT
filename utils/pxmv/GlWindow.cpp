@@ -32,6 +32,7 @@
 #include "stringlib.h"
 #include "cmdlib.h"
 #include "mdlviewer.h"
+#include "PhysicsAssetEditor.h"
 #include "app_info.h"
 #include "build.h"
 #include "muzzle1.h"
@@ -104,6 +105,9 @@ int GlWindow :: handleEvent( mxEvent *event )
 			if( !m_studioModel.AdvanceFrame( dt * m_settings.speedScale ))
 				d_cpl->resetPlayingSequence(); // hit the end of sequence
 		}
+
+		if( g_MDLViewer && g_MDLViewer->getPhysicsAssetEditor() )
+			g_MDLViewer->getPhysicsAssetEditor()->Update((float)dt);
 
 		if( !m_settings.pause )
 			redraw();
@@ -581,6 +585,9 @@ void GlWindow :: draw( void )
 	else glCullFace( GL_FRONT );
 
 	m_studioModel.DrawModel();
+
+	if( g_MDLViewer && g_MDLViewer->getPhysicsAssetEditor() )
+		g_MDLViewer->getPhysicsAssetEditor()->DrawOverlay();
 
 	//
 	// draw ground
