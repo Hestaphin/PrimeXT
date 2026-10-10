@@ -96,7 +96,8 @@ public:
 	virtual CBasePlayerWeapon* GetWeaponEntity() = 0;
 
 	// modifying/accessing player state
-	virtual int GetPlayerAmmo(int ammoType) = 0;
+    virtual int GetPlayerAmmo(int ammoType) = 0;
+    virtual int FindAmmoType(const char* name) = 0;
 	virtual void SetPlayerAmmo(int ammoType, int count) = 0;
 	virtual void SetPlayerWeaponAnim(int anim) = 0;
 	virtual void SetPlayerViewmodel(std::string_view model) = 0;

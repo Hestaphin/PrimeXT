@@ -13,6 +13,7 @@ list(APPEND DIR_SOURCES
 	"../../game_shared/matrix.cpp"
 	"../../game_shared/procbones.cpp"
 	"../../game_shared/stringlib.cpp"
+	"../../game_shared/physics_asset_format.cpp"
 	"../common/conprint.cpp"
 	"../common/file_system.cpp"
 	"../common/cmdlib.cpp"
@@ -23,6 +24,7 @@ list(APPEND DIR_SOURCES
     "GlWindow.cpp"
 	"ViewerSettings.cpp"
     "mdlviewer.cpp"
+    "PhysicsAssetEditor.cpp"
     "pakviewer.cpp"
     "studio_render.cpp"
     "studio_utils.cpp"
@@ -95,6 +97,22 @@ target_link_libraries(${PROJECT_NAME} PRIVATE RapidJSON rapidjson)
 
 find_package(fmt CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE fmt::fmt)
+
+# The Physics Asset Editor can author files without PhysX, but when PhysX is
+# enabled it also provides a live ragdoll simulation preview in pxmv.
+if(ENABLE_PHYSX)
+	include(FindPhysX)
+	find_package(PhysX REQUIRED)
+	target_link_libraries(${PROJECT_NAME} PRIVATE PhysX::PhysX)
+	find_path(PHYSX_HEADERS_DIR "PxPhysicsAPI.h")
+	target_include_directories(${PROJECT_NAME} PRIVATE
+		"${PHYSX_HEADERS_DIR}"
+		"${PHYSX_HEADERS_DIR}/cooking"
+		"${PHYSX_HEADERS_DIR}/geometry"
+		"${PHYSX_HEADERS_DIR}/foundation"
+	)
+	target_compile_definitions(${PROJECT_NAME} PRIVATE PHYSICS_ASSET_EDITOR_PHYSX=1)
+endif()
 
 if(MSVC)
 	target_link_libraries(${PROJECT_NAME} PRIVATE

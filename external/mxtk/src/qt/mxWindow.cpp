@@ -29,11 +29,14 @@ mxWindow::mxWindow (mxWindow *parent, int x, int y, int w, int h, const char
 		p = (QWidget *) parent->getHandle ();
 
 	d_this = new mxWindow_i (p, this);
+	const bool isDialog = style == Dialog || style == ModalDialog;
+	if (isDialog)
+		d_this->setWindowFlags (Qt::Dialog);
 
 	setHandle ((void *) d_this);
 	setParent (parent);
 
-	if (parent)
+	if (parent && !isDialog)
 	{
 		setVisible (true);
 	}
@@ -50,7 +53,7 @@ mxWindow::mxWindow (mxWindow *parent, int x, int y, int w, int h, const char
 	}
 	else
 	{
-		if (parent == d_mainWindow)
+		if (parent == d_mainWindow && !isDialog)
 			d_this->setParent (d_mainWindow->d_this->centralWidget ());
 	}
 }

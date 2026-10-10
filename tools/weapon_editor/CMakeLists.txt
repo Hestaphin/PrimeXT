@@ -1,0 +1,54 @@
+cmake_minimum_required(VERSION 3.19)
+cmake_policy(SET CMP0091 NEW)
+project(PrimeXTWeaponEditor LANGUAGES CXX)
+# Standalone application: no pxmv / game SDK / engine dependencies.
+option(PXWE_BUILD_TESTS "Build native weapon editor backend tests" OFF)
+add_library(pxwe_core STATIC pxwe_project.cpp
+    ../../game_shared/modular_weapons.cpp ../../game_shared/ballistic_flight.cpp)
+target_compile_features(pxwe_core PUBLIC cxx_std_17)
+target_include_directories(pxwe_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../../game_shared")
+
+if(WIN32)
+    enable_language(RC)
+    add_executable(pxwe WIN32 pxwe_win32.cpp pxwe.rc pxwe.manifest pxwe_resource.h)
+    target_compile_definitions(pxwe PRIVATE UNICODE _UNICODE NOMINMAX)
+    target_link_libraries(pxwe PRIVATE pxwe_core comctl32 shell32 ole32 user32 gdi32)
+    if(MSVC)
+        target_compile_options(pxwe PRIVATE /utf-8)
+        # The resource embeds the DPI/common-controls manifest; suppress the
+        # linker's second default manifest resource rather than merging IDs.
+        target_link_options(pxwe PRIVATE /MANIFEST:NO)
+    elseif(MINGW)
+        target_link_options(pxwe PRIVATE -municode -static-libgcc -static-libstdc++)
+    endif()
+else()
+    # Portable, headless validation interface; the GUI is a Windows application.
+    add_executable(pxwe pxwe_cli.cpp)
+    target_link_libraries(pxwe PRIVATE pxwe_core)
+endif()
+
+# Kept for existing developer tests/legacy Python workflows. pxwe itself never
+# invokes this process and needs only its own executable in the game directory.
+add_executable(primext-weapon-validate native_validate.cpp)
+target_link_libraries(primext-weapon-validate PRIVATE pxwe_core)
+add_custom_target(primext-weapon-editor DEPENDS pxwe)
+if(MSVC)
+    set_target_properties(pxwe_core pxwe primext-weapon-validate PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+if(PXWE_BUILD_TESTS)
+    enable_testing()
+    add_executable(pxwe-tests tests/native_project_tests.cpp)
+    target_link_libraries(pxwe-tests PRIVATE pxwe_core)
+    if(MSVC)
+        target_compile_options(pxwe-tests PRIVATE /utf-8)
+        set_property(TARGET pxwe-tests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+    add_test(NAME pxwe-native COMMAND pxwe-tests)
+endif()
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    # Standalone install prefix denotes a game/mod folder.
+    install(TARGETS pxwe RUNTIME DESTINATION devkit)
+else()
+    install(TARGETS pxwe RUNTIME DESTINATION "${GAMEDIR}/${UTILS_INSTALL_DIR}")
+endif()

@@ -36,6 +36,7 @@
 #include "game.h"
 #include "hltv.h"
 #include "user_messages.h"
+#include "modular_weapons.h"
 #include "ropes/CRope.h"
 #include "mathlib.h"
 #include "weapons/egon.h"
@@ -3417,8 +3418,12 @@ void CBasePlayer::SelectItem(const char *pstr)
 	
 			while (pItem)
 			{
-				if (FClassnameIs(pItem->pev, pstr))
-					break;
+                const auto* modularDef = modular::SharedRegistry().FindWeapon(pstr);
+                ItemInfo candidateInfo{};
+                const bool nameMatches = modularDef && pItem->GetItemInfo(&candidateInfo) &&
+                    candidateInfo.iId == modularDef->runtimeId;
+                if (FClassnameIs(pItem->pev, pstr) || nameMatches)
+                    break;
 				pItem = pItem->m_pNext;
 			}
 		}
@@ -3986,61 +3991,54 @@ void CBasePlayer::CheatImpulseCommands( int iImpulse )
 //
 // Add a weapon to the player (Item == Weapon == Selectable Object)
 //
-int CBasePlayer::AddPlayerItem( CBasePlayerItem *pItem )
+int CBasePlayer::AddPlayerItem(CBasePlayerItem *pItem)
 {
-	CBasePlayerItem *pInsert;
-	
-	pInsert = m_rgpPlayerItems[pItem->iItemSlot()];
-
-	while (pInsert)
-	{
-		if (FClassnameIs( pInsert->pev, STRING( pItem->pev->classname) ))
-		{
-			if( pItem->AddDuplicate( pInsert ))
-			{
-				g_pGameRules->PlayerGotWeapon ( this, pItem );
-				pItem->CheckRespawn();
-
-				// ugly hack to update clip w/o an update clip message
-				pInsert->UpdateItemInfo( );
-				if (m_pActiveItem)
-					m_pActiveItem->UpdateItemInfo( );
-
-				pItem->Kill( );
-			}
-			else if( gEvilImpulse101 )
-			{
-				pItem->Kill( );
-			}
-			return FALSE;
-		}
-		pInsert = pInsert->m_pNext;
-	}
-
-
-	if( pItem->AddToPlayer( this ))
-	{
-		g_pGameRules->PlayerGotWeapon ( this, pItem );
-		pItem->CheckRespawn();
-
-		pItem->m_pNext = m_rgpPlayerItems[pItem->iItemSlot()];
-		m_rgpPlayerItems[pItem->iItemSlot()] = pItem;
-
-		// should we switch to this item?
-		if ( g_pGameRules->FShouldSwitchWeapon( this, pItem ) )
-		{
-			SwitchWeapon( pItem );
-		}
-
-		return TRUE;
-	}
-	else if( gEvilImpulse101 )
-	{
-		pItem->Kill( );
-	}
-	return FALSE;
+    return TryAddPlayerItem(pItem) == ItemPickupResult::Attached;
 }
 
+ItemPickupResult CBasePlayer::TryAddPlayerItem(CBasePlayerItem *pItem)
+{
+    if (!pItem || pItem->iItemSlot() < 0 || pItem->iItemSlot() >= MAX_ITEM_TYPES)
+        return ItemPickupResult::Rejected;
+    for (CBasePlayerItem *owned = m_rgpPlayerItems[pItem->iItemSlot()]; owned; owned = owned->m_pNext)
+    {
+        if (!SameInventoryWeaponType(owned, pItem)) continue;
+        const ItemPickupResult result = pItem->AddDuplicateResult(owned);
+        if (result == ItemPickupResult::Consumed || result == ItemPickupResult::Retained)
+        {
+            g_pGameRules->PlayerGotWeapon(this, pItem);
+            owned->UpdateItemInfo();
+            if (m_pActiveItem) m_pActiveItem->UpdateItemInfo();
+            if (result == ItemPickupResult::Consumed)
+            {
+                pItem->CheckRespawn();
+                pItem->Kill();
+            }
+            return result;
+        }
+        if (gEvilImpulse101)
+        {
+            pItem->Kill();
+            return ItemPickupResult::Consumed;
+        }
+        return ItemPickupResult::Rejected;
+    }
+    if (pItem->AddToPlayer(this))
+    {
+        g_pGameRules->PlayerGotWeapon(this, pItem);
+        pItem->CheckRespawn();
+        pItem->m_pNext = m_rgpPlayerItems[pItem->iItemSlot()];
+        m_rgpPlayerItems[pItem->iItemSlot()] = pItem;
+        if (g_pGameRules->FShouldSwitchWeapon(this, pItem)) SwitchWeapon(pItem);
+        return ItemPickupResult::Attached;
+    }
+    if (gEvilImpulse101)
+    {
+        pItem->Kill();
+        return ItemPickupResult::Consumed;
+    }
+    return ItemPickupResult::Rejected;
+}
 
 
 int CBasePlayer::RemovePlayerItem( CBasePlayerItem *pItem )
@@ -4264,6 +4262,23 @@ void CBasePlayer :: UpdateClientData( void )
 			m_iStartMessage = 1; //send player init messages
 		}
 
+        // J.4: server definition fingerprint + authoritative ammo-name/index map.
+        // The engine's legacy weapon and ammo ID widths remain unchanged.
+        const auto& modularRegistry = modular::SharedRegistry();
+        if (modularRegistry.Valid() && gmsgModCfg) {
+            const auto fingerprint = modularRegistry.Fingerprint();
+            MESSAGE_BEGIN(MSG_ONE, gmsgModCfg, NULL, pev);
+                WRITE_BYTE(0); WRITE_LONG(static_cast<int>(fingerprint)); WRITE_STRING("");
+            MESSAGE_END();
+            for (const auto& cartridge : modularRegistry.Cartridges()) {
+                const int index = CBasePlayer::GetAmmoIndex(cartridge.id.c_str());
+                if (index <= 0 || index >= MAX_AMMO_SLOTS) continue;
+                MESSAGE_BEGIN(MSG_ONE, gmsgModCfg, NULL, pev);
+                    WRITE_BYTE(index); WRITE_LONG(static_cast<int>(fingerprint));
+                    WRITE_STRING(cartridge.id.c_str());
+                MESSAGE_END();
+            }
+        }
 		UTIL_FireTargets( "game_playerspawn", this, this, USE_TOGGLE, 0 );
 
 		InitStatusBar();
@@ -4982,7 +4997,7 @@ BOOL CBasePlayer::HasPlayerItem( CBasePlayerItem *pCheckItem )
 
 	while (pItem)
 	{
-		if (FClassnameIs( pItem->pev, STRING( pCheckItem->pev->classname) ))
+		if (SameInventoryWeaponType(pItem, pCheckItem))
 		{
 			return TRUE;
 		}
@@ -5006,7 +5021,10 @@ BOOL CBasePlayer::HasNamedPlayerItem( const char *pszItemName )
 		
 		while (pItem)
 		{
-			if ( !strcmp( pszItemName, STRING( pItem->pev->classname ) ) )
+            const auto* modularDef = modular::SharedRegistry().FindWeapon(pszItemName ? pszItemName : "");
+            ItemInfo candidateInfo{};
+            if ((modularDef && pItem->GetItemInfo(&candidateInfo) && candidateInfo.iId == modularDef->runtimeId) ||
+                (!modularDef && !strcmp( pszItemName, STRING( pItem->pev->classname ) )))
 			{
 				return TRUE;
 			}

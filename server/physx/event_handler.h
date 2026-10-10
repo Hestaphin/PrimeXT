@@ -39,6 +39,7 @@ public:
 	void onWorldShutdown();
 	TouchEventsQueue &getTouchEventsQueue();
 	std::vector<WaterContactPair> &getWaterContactPairs();
+	void purgeActorReferences(physx::PxActor *actor);
 
 	virtual void onConstraintBreak(physx::PxConstraintInfo* constraints, physx::PxU32 count) {};
 	virtual void onWake(physx::PxActor** actors, physx::PxU32 count) {};

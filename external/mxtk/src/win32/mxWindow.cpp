@@ -47,25 +47,39 @@ mxWindow::mxWindow (mxWindow *parent, int x, int y, int w, int h, const char *la
 
 	DWORD dwStyle;
 	DWORD dwStyleEx = 0;
+	const bool isDialog = style == Dialog || style == ModalDialog;
 	if (style == Normal)
 		dwStyle = WS_OVERLAPPEDWINDOW;
 	else if (style == Popup)
 		dwStyle = WS_POPUP;
 	else if (style == Dialog)
-		dwStyle = WS_DLGFRAME | WS_CAPTION;
+		dwStyle = WS_DLGFRAME | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
 	else if (style == ModalDialog)
-		 dwStyle = WS_DLGFRAME | WS_CAPTION;
+		 dwStyle = WS_DLGFRAME | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
 
 	void *parentHandle = 0;
 	if (parent)
 	{
 		parentHandle = parent->getHandle ();
-		dwStyle = WS_CHILD | WS_VISIBLE/* | WS_CLIPCHILDREN | WS_CLIPSIBLINGS*/ | WS_GROUP | WS_TABSTOP;
-		//dwStyleEx = WS_EX_CONTROLPARENT;
+		// A dialog's parent is its owner, not a clipping/rendering parent.
+		// Keep normal panels as child windows, including the OpenGL viewport.
+		if (!isDialog)
+			dwStyle = WS_CHILD | WS_VISIBLE | WS_GROUP | WS_TABSTOP;
 	}
 	else
 	{
 		x = y = CW_USEDEFAULT;
+	}
+	if (isDialog)
+	{
+		dwStyleEx = WS_EX_CONTROLPARENT;
+		// Dialog layouts specify client dimensions; account for title and borders.
+		RECT bounds = { 0, 0, w, h };
+		if (AdjustWindowRectEx (&bounds, dwStyle, FALSE, dwStyleEx))
+		{
+			w = bounds.right - bounds.left;
+			h = bounds.bottom - bounds.top;
+		}
 	}
 
 	void *handle = (void *) CreateWindowEx (dwStyleEx, CLASSNAME, label, dwStyle,

@@ -1,0 +1,11 @@
+# J.3 format v2: SI projectile properties and muzzle damage.
+version = 2
+id = test_fmj
+chamber = 9x19
+projectile = fmj
+mass_grams = 8.04
+diameter_mm = 9.02
+drag_coefficient = 0.30
+reference_velocity_mps = 360
+projectile_count = 1
+damage = 20

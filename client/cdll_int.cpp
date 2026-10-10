@@ -44,6 +44,15 @@ mobile_engfuncs_t gMobileAPI;
 render_api_t gRenderfuncs;
 static std::unique_ptr<CGameEventManager> g_pEventManager;
 static std::unique_ptr<CWeaponPredictingContext> g_pWeaponPredicting;
+// J.10.4: client-side registry entries are not safe to replace while
+// predicted modular contexts hold pointers into the old registry.
+void ResetClientWeaponPredictionForModularReload()
+{
+    g_pWeaponPredicting.reset();
+    g_pWeaponPredicting = std::make_unique<CWeaponPredictingContext>();
+}
+extern void ResetModularClientDefinitions();
+
 CHud gHUD;
 
 /*
@@ -188,6 +197,8 @@ the hud variables.
 */
 void DLLEXPORT HUD_Init( void )
 {
+    ResetClientWeaponPredictionForModularReload();
+    ResetModularClientDefinitions();
 	InitInput();
 	gHUD.Init();
 
@@ -206,9 +217,8 @@ void DLLEXPORT HUD_Shutdown( void )
 		g_pEventManager.reset();
 	}
 
-	if (g_pWeaponPredicting) {
-		g_pWeaponPredicting.reset();
-	}
+    g_pWeaponPredicting.reset();
+    ResetModularClientDefinitions();
 }
 
 /*
@@ -343,6 +353,8 @@ extern "C" int DLLEXPORT HUD_Key_Event( int down, int keynum, const char *pszCur
 extern "C" void DLLEXPORT HUD_PostRunCmd(local_state_t *from, local_state_t *to, usercmd_t *cmd, int runfuncs, double time, unsigned int random_seed)
 {
 	if (CVAR_GET_FLOAT("cl_lw") > 0.0f) {
+        if (!g_pWeaponPredicting)
+            g_pWeaponPredicting = std::make_unique<CWeaponPredictingContext>();
 		g_pWeaponPredicting->PostThink(from, to, cmd, runfuncs != 0, time, random_seed);
 	}
 }
@@ -416,11 +428,10 @@ void CL_NewMap()
 	// flush collision meshes cache on clientside
 	auto &meshDescFactory = CMeshDescFactory::Instance();
 	meshDescFactory.ClearCache();
+    HUD_ClearPhysCollisionCache();
 
-	if (g_pWeaponPredicting) {
-		g_pWeaponPredicting.reset();
-	}
-	g_pWeaponPredicting = std::make_unique<CWeaponPredictingContext>();
+    ResetClientWeaponPredictionForModularReload();
+    ResetModularClientDefinitions();
 }
 
 cldll_func_t cldll_func = 

@@ -229,6 +229,11 @@ int StudioModel :: SetFrame( int frame )
 	return frame;
 }
 
+const matrix3x4 &StudioModel::GetToolModelTransform() const
+{
+	return m_protationmatrix;
+}
+
 void StudioModel :: SetupTransform( bool bMirror )
 {
 	Vector origin, angles;
@@ -442,6 +447,33 @@ void StudioModel :: SetUpBones( bool bMirror )
 		else
 		{
 			m_pbonetransform[i] = m_pbonetransform[pbones[i].parent].ConcatTransforms( bonematrix );
+		}
+	}
+
+	// Physics Asset Editor preview can temporarily replace selected world-space bone
+	// transforms. Descendants without their own rigid body preserve their animated
+	// local transform under the overridden parent, so hands/fingers/attachments stay
+	// connected to a simulated arm instead of remaining behind in the animation pose.
+	if( m_hasToolBoneOverrides )
+	{
+		std::array<matrix3x4, MAXSTUDIOBONES> animated;
+		std::array<bool, MAXSTUDIOBONES> affected = { false };
+		for( i = 0; i < m_pstudiohdr->numbones; ++i ) animated[i] = m_pbonetransform[i];
+
+		for( i = 0; i < m_pstudiohdr->numbones; ++i )
+		{
+			if( m_toolBoneOverrideMask[i] )
+			{
+				m_pbonetransform[i] = m_toolBoneOverrides[i];
+				affected[i] = true;
+			}
+			else if( pbones[i].parent >= 0 && affected[pbones[i].parent] )
+			{
+				const int parent = pbones[i].parent;
+				const matrix3x4 local = animated[parent].Invert().ConcatTransforms( animated[i] );
+				m_pbonetransform[i] = m_pbonetransform[parent].ConcatTransforms( local );
+				affected[i] = true;
+			}
 		}
 	}
 

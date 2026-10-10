@@ -1,0 +1,18 @@
+#pragma once
+#define IDD_INPUT 101
+#define IDD_REPORT 102
+#define IDC_PROMPT 1001
+#define IDC_INPUT 1002
+#define IDC_REPORT 1003
+#define IDR_ACCEL 103
+#define CMD_OPEN 2001
+#define CMD_SAVE 2002
+#define CMD_EXIT 2003
+#define CMD_NEW_WEAPON 2004
+#define CMD_NEW_CARTRIDGE 2005
+#define CMD_DUPLICATE 2006
+#define CMD_DELETE 2007
+#define CMD_UNDO 2008
+#define CMD_REDO 2009
+#define CMD_VALIDATE 2010
+#define CMD_HELP 2011

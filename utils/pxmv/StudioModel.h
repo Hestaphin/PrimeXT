@@ -197,6 +197,14 @@ public:
 	edit_field_t	*editField( void ) { return m_pedit; }
 	const char	*getQCcode( void );
 
+	// Tool-only skeletal overrides used by the Physics Asset Editor preview.
+	// Runtime ragdoll networking uses a separate engine/client bridge.
+	const matrix3x4 &GetToolBoneTransform( int bone ) const;
+	const matrix3x4 &GetToolModelTransform() const;
+	bool GetBoneVertexBounds( int bone, Vector &mins, Vector &maxs );
+	void SetToolBoneOverride( int bone, const matrix3x4 &transform );
+	void ClearToolBoneOverrides();
+
 	float		m_prevGroundCycle;
 	CBaseBoneSetup	m_boneSetup;
 
@@ -249,6 +257,9 @@ private:
 	matrix3x4	m_pbonetransform[MAXSTUDIOBONES];	// bone transformation matrix
 	matrix3x4	m_plocaltransform[MAXSTUDIOBONES];
 	matrix3x4	m_pworldtransform[MAXSTUDIOBONES];
+	std::array<bool, MAXSTUDIOBONES> m_toolBoneOverrideMask = { false };
+	std::array<matrix3x4, MAXSTUDIOBONES> m_toolBoneOverrides;
+	bool m_hasToolBoneOverrides = false;
 
 	blend_sequence_t	m_seqblend[MAX_SEQBLENDS];
 	int		m_current_seqblend = 0;

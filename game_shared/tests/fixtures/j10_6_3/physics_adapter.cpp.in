@@ -1,0 +1,306 @@
+// Scoped service adapter. Production methods are inserted verbatim below.
+// No PhysX headers/libraries are substituted; this executable is a method test.
+#include "ballistic_shape_selection.h"
+#include "physics_asset_format.h"
+#include "physics_part_layout.h"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cfloat>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <vector>
+
+struct PxVec3 {
+    float x=0,y=0,z=0;
+    PxVec3(float a=0):x(a),y(a),z(a){}
+    PxVec3(float a,float b,float c):x(a),y(b),z(c){}
+    PxVec3 operator+(PxVec3 b)const{return {x+b.x,y+b.y,z+b.z};}
+    PxVec3 operator-(PxVec3 b)const{return {x-b.x,y-b.y,z-b.z};}
+    PxVec3 operator-()const{return {-x,-y,-z};}
+    PxVec3 operator*(float s)const{return {x*s,y*s,z*s};}
+    PxVec3& operator*=(float s){*this=*this*s;return *this;}
+    float dot(PxVec3 b)const{return x*b.x+y*b.y+z*b.z;}
+    float magnitudeSquared()const{return dot(*this);}
+    float magnitude()const{return std::sqrt(magnitudeSquared());}
+    bool isFinite()const{return std::isfinite(x)&&std::isfinite(y)&&std::isfinite(z);}
+};
+struct Vector:PxVec3 {
+    Vector()=default;Vector(float a,float b,float c):PxVec3(a,b,c){}
+    Vector(PxVec3 p):PxVec3(p){}
+    Vector Normalize()const {float l=magnitude();return l>0?Vector(*this*(1/l)):Vector();}
+    bool operator==(Vector b)const{return x==b.x&&y==b.y&&z==b.z;}
+};
+using vec3_t=Vector;
+const Vector g_vecZero{};
+struct PxQuat {
+    float x=0,y=0,z=0,w=1;
+    PxQuat()=default;PxQuat(float a,float b,float c,float d):x(a),y(b),z(c),w(d){}
+    PxQuat getConjugate()const{return {-x,-y,-z,w};}
+    void normalize(){float l=std::sqrt(x*x+y*y+z*z+w*w);x/=l;y/=l;z/=l;w/=l;}
+    PxQuat operator*(PxQuat b)const{return {w*b.x+x*b.w+y*b.z-z*b.y,
+        w*b.y-x*b.z+y*b.w+z*b.x,w*b.z+x*b.y-y*b.x+z*b.w,w*b.w-x*b.x-y*b.y-z*b.z};}
+};
+struct PxTransform {
+    PxVec3 p;PxQuat q;
+    bool isValid()const{return p.isFinite()&&std::isfinite(q.w);}
+    PxTransform operator*(PxTransform b)const{return {p+b.p,q*b.q};}
+};
+// Translation-only root-frame adapter; rotation/scale math is covered by the
+// separate real project matrix tests. Here the saved relation must stay intact.
+struct matrix4x4 {
+    PxVec3 position;
+    matrix4x4 Invert()const{return {-position};}
+    matrix4x4 ConcatTransforms(matrix4x4 b)const{return {position+b.position};}
+};
+matrix4x4 MatrixFromPxTransform(PxTransform p){return {p.p};}
+using PxU32=unsigned;
+namespace PxRigidBodyFlag {constexpr int eKINEMATIC=1;}
+namespace PxShapeFlag {constexpr int eSCENE_QUERY_SHAPE=1,eSIMULATION_SHAPE=2;}
+namespace PxForceMode {constexpr int eFORCE=0,eIMPULSE=1;}
+namespace PxHitFlag {constexpr int ePOSITION=1,eNORMAL=2;}
+using PxHitFlags=int;
+struct Flags {int bits=0;bool isSet(int b)const{return bits&b;}};
+struct PxShape;
+struct PxGeometryHolder {PxShape* shape;PxShape& any()const{return *shape;}};
+struct PxShape {
+    int flags=3;float low=0,high=2;bool failReverse=false;int forwardQueries=0,reverseQueries=0;
+    PxTransform local;
+    int getFlags()const{return flags;}
+    PxGeometryHolder getGeometry(){return {this};}
+    PxTransform getLocalPose()const{return local;}
+};
+struct PxRigidActor {
+    PxTransform pose;std::vector<PxShape*> shapes;
+    PxTransform getGlobalPose()const{return pose;}
+    PxU32 getNbShapes()const{return shapes.size();}
+    PxU32 getShapes(PxShape** out,PxU32 n){n=std::min(n,getNbShapes());std::copy_n(shapes.begin(),n,out);return n;}
+};
+struct PxActor:PxRigidActor {template<class T>T* is(){return static_cast<T*>(this);}};
+struct PxRigidDynamic:PxActor {
+    Flags bodyFlags{1};PxVec3 linear,angular;
+    int impulses=0,forces=0,torques=0,targets=0,wakes=0;
+    Flags getRigidBodyFlags()const{return bodyFlags;}
+    void setRigidBodyFlag(int b,bool on){if(on)bodyFlags.bits|=b;else bodyFlags.bits&=~b;}
+    void setLinearVelocity(PxVec3 v){linear=v;} void setAngularVelocity(PxVec3 v){angular=v;}
+    PxVec3 getLinearVelocity()const{return linear;} PxVec3 getAngularVelocity()const{return angular;}
+    void setGlobalPose(PxTransform v,bool){pose=v;} void setKinematicTarget(PxTransform){++targets;}
+    void wakeUp(){++wakes;}void addForce(PxVec3,int){++forces;}void addTorque(PxVec3,int){++torques;}
+};
+namespace PxRigidBodyExt {void addForceAtPos(PxRigidDynamic& actor,PxVec3 impulse,PxVec3,int){++actor.impulses;actor.linear=actor.linear+impulse;}}
+struct PxRaycastHit {PxVec3 position,normal;};
+namespace PxGeometryQuery {
+    // Analytic box slab along the test ray. No scene or solver is modeled.
+    unsigned raycast(PxVec3 origin,PxVec3 dir,PxShape& shape,PxTransform pose,
+                     float maximum,PxHitFlags,int,PxRaycastHit* out) {
+        const bool reverse=dir.x<0;
+        if(reverse){++shape.reverseQueries;if(shape.failReverse)return 0;}
+        else ++shape.forwardQueries;
+        if(std::fabs(dir.x)<0.99f)return 0;
+        const float face=(reverse?shape.high:shape.low)+pose.p.x;
+        const float distance=(face-origin.x)/dir.x;
+        if(!std::isfinite(distance)||distance<0||distance>maximum)return 0;
+        out->position=origin+dir*distance;out->normal={reverse?1.0f:-1.0f,0,0};return 1;
+    }
+}
+bool FiniteVec3(PxVec3 p){return p.isFinite();}
+struct Globals {float time=10;};Globals globals;Globals* gpGlobals=&globals;
+struct CBaseEntity;
+struct edict_t {CBaseEntity* entity=nullptr;int index=1;bool free=false;};
+struct entvars_t {int flags=1,iuser1=0,movetype=0,solid=1;float health=-1;edict_t* owner=nullptr;
+    edict_t* groundentity=nullptr;Vector mins,maxs;};
+constexpr int FL_MONSTER=1,FL_CLIENT=2,CF_RAGDOLL=4,MOVETYPE_TOSS=7;
+constexpr int FL_ONGROUND=8,SOLID_NOT=0,MOVETYPE_NONE=0;
+constexpr int GIB_ALWAYS=1,GIB_NORMAL=0,bits_MEMORY_KILLED=1,bits_COND_LIGHT_DAMAGE=2,MONSTERSTATE_DEAD=5;
+using BOOL=int;constexpr int FALSE=0,TRUE=1;
+#define ENTINDEX(e) ((e)->index)
+#define SetBits(value,bits) ((value)|=(bits))
+#define ClearBits(value,bits) ((value)&=~(bits))
+#define EMIT_SOUND(...) ((void)0)
+struct PhysicsAssetInstance;
+struct CPhysicPhysX;
+struct CBaseEntity {
+    entvars_t vars;entvars_t* pev=&vars;edict_t slot{this};PhysicsAssetInstance* asset=nullptr;
+    Vector origin,angles;PxActor* root=nullptr;
+    static CBaseEntity* Instance(edict_t* e){return e?e->entity:nullptr;}
+    edict_t* edict(){return &slot;}int entindex(){return slot.index;}
+    Vector GetAbsOrigin(){return origin;}Vector GetAbsAngles(){return angles;}
+    void SetAbsOrigin(Vector p){origin=p;}void SetAbsAngles(Vector p){angles=p;}
+    void SetAbsVelocity(Vector){}void SetAbsAvelocity(Vector){}
+    matrix4x4 EntityToWorldTransform()const{return {origin};}
+    void RelinkEntity(BOOL){}virtual void DeathNotice(entvars_t*){}
+    bool HasPhysicsAsset(){return asset!=nullptr;}void EnableRagdoll(bool);
+};
+struct CBaseMonster:CBaseEntity {
+    int memory=0,m_IdealMonsterState=0,notices=0,gibs=0,enableRequests=0;
+    bool HasMemory(int b){return memory&b;}void Remember(int b){memory|=b;}
+    BOOL ShouldGibMonster(int gib){return gib==GIB_ALWAYS;}
+    void CallGibMonster(){++gibs;}void SetConditions(int){}void SetTouch(void*){}
+    void BecomeDead(){pev->movetype=MOVETYPE_TOSS;}void Killed(entvars_t*,int);
+};
+struct BodyRuntime {
+    PxRigidDynamic* actor=nullptr;float physicsWeight=1;int boneIndex=0;
+    bool hasCurrentAnimationPose=true,hasAnimationVelocity=true,hasSimulationPose=false;
+    PxTransform currentAnimationPose;PxVec3 animationLinearVelocity{2,0,0},animationAngularVelocity{0,0,1};
+};
+struct PhysicsAssetInstance {
+    CBaseEntity* owner=nullptr;CBaseEntity* Owner()const{return owner;}
+    std::shared_ptr<physicsasset::AssetDef> m_def=std::make_shared<physicsasset::AssetDef>();
+    std::vector<BodyRuntime> m_bodies;std::vector<void*> joints;
+    bool m_ragdoll=false,m_actorsCreated=true,m_frozen=false,m_hasSimulationPose=false,m_hasSimulationBounds=false;
+    float m_sleepStartTime=0,m_currentSampleTime=10;int snaps=0,samples=0,captures=0,thaws=0;
+    bool MatchesOwnerModel()const{return true;}bool HasActors()const{return m_actorsCreated;}
+    bool IsRagdoll()const{return m_ragdoll;}const auto& Bodies()const{return m_bodies;}
+    const auto& Definition()const{return *m_def;}int RootBodyIndex()const{return 0;}
+    bool GetRootBonePose(PxTransform& out)const{out=m_bodies[0].actor->pose;return true;}
+    int FindBody(const char* name)const{for(size_t i=0;i<m_def->bodies.size();++i)if(m_def->bodies[i].name==name)return i;return -1;}
+    PxVec3 FallbackLinearVelocity()const{return PxVec3(0);}PxVec3 FallbackAngularVelocity()const{return PxVec3(0);}
+    PxTransform BoneWorldTransform(int i,const physicsasset::BodyDef&)const{return m_bodies[i].currentAnimationPose;}
+    void Thaw(){++thaws;m_frozen=false;}void UpdateAnimationPose(float){++samples;}
+    void SnapToAnimationPose(){++snaps;}void SetSimulationEnabled(bool){}
+    void CaptureSimulationPose(){++captures;}void InvalidateAnimationHistory(bool){}void FollowAnimation(){}
+    bool RaycastBodyExit(int,PxVec3,PxVec3,float,PxVec3&,PxVec3&){return false;}
+    bool NeedsAnimationControl()const;void SetBodyKinematicState(size_t,bool,bool);
+    bool IsBodyDescendantOf(size_t,int)const;bool SetBodyPhysicsWeight(const char*,float,bool);
+    void ApplyAnimationControl(float,float,float,float);bool AddImpulseToBody(int,const PxVec3&,const PxVec3&);
+    bool SetRagdoll(bool);
+};
+namespace PhysicsPartMode {constexpr int Driven=1;}
+struct PhysicsPartShape {PxShape* shape;};
+struct PhysicsPartRuntime {
+    PxRigidActor* actor;physicsasset::PartOwner owner=physicsasset::PartOwner::AnimatedProxy;
+    bool sampledPose=false;PxTransform latestAnimatedPose;std::vector<PhysicsPartShape> shapes;
+};
+struct CollisionState {edict_t* edict=nullptr;bool collisionRequested=true,articulatedOverride=false;std::vector<PhysicsPartRuntime> parts;};
+struct CPhysicPhysX {
+    struct RagdollEntityState {int solid=0,movetype=0;Vector mins,maxs,angles;matrix4x4 rootToEntity;bool hasRootRelation=false;};
+    struct PendingRagdollImpulse {edict_t* edict;Vector impulse,position;int hitGroup;float time;};
+    std::map<int,std::vector<PendingRagdollImpulse>> m_pendingRagdollImpulses;
+    std::map<int,RagdollEntityState> m_ragdollEntityState;std::map<int,CollisionState> m_physicsAssetCollisionStates;
+    std::vector<std::unique_ptr<PhysicsAssetInstance>> m_physicsAssets;
+    void* m_pScene=this;int creates=0,ownershipChanges=0,presentations=0;
+    bool creationSucceeds=true;
+    PhysicsAssetInstance* EnsurePhysicsAssetInstance(CBaseEntity* e){return e->asset;}
+    PhysicsAssetInstance* FindPhysicsAsset(CBaseEntity* e){return e->asset;}
+    bool HasPhysicsAsset(CBaseEntity* e){return e->asset!=nullptr;}
+    bool IsRagdoll(CBaseEntity* e){return e->asset&&e->asset->IsRagdoll();}
+    bool CreatePhysicsAsset(CBaseEntity* e){++creates;if(creationSucceeds)e->asset->m_actorsCreated=true;return creationSucceeds;}
+    PxActor* ActorFromEntity(CBaseEntity* e){return e->root;}
+    void SuspendLegacyCollisionForRagdoll(CBaseEntity*,PxRigidActor*){}
+    void RestoreLegacyCollisionAfterRagdoll(CBaseEntity*){}
+    void SetArticulatedCollisionOwnership(CBaseEntity*,bool){++ownershipChanges;}
+    void SuspendEntityForRagdoll(CBaseEntity*,PhysicsAssetInstance*);
+    void RestoreEntityAfterRagdoll(CBaseEntity* e){m_ragdollEntityState.erase(e->entindex());}
+    void UpdateRagdollPresentation(PhysicsAssetInstance*){++presentations;}
+    void ClearRagdollPose(CBaseEntity*){}
+    bool AddPhysicsAssetImpulse(CBaseEntity* e,int body,Vector impulse,Vector pos){return e->asset&&e->asset->AddImpulseToBody(body,impulse,pos);}
+    bool ApplyPhysicsPartBulletImpact(CBaseEntity*,Vector,Vector,Vector,Vector,float){return false;}
+    bool SetRagdollBodyPhysicsWeight(CBaseEntity*,const char*,float,bool);
+    void TransferPendingRagdollImpulses(CBaseEntity*,PhysicsAssetInstance*);
+    void SetRagdoll(CBaseEntity*,bool);void QueuePhysicsAssetImpulse(CBaseEntity*,int,const Vector&,const Vector&);
+    bool TraceBallisticPhysicsExit(CBaseEntity*,int,const Vector&,const Vector&,float,Vector&,Vector&);
+};
+CPhysicPhysX physics;CPhysicPhysX* WorldPhysic=&physics;
+float autoDeath=1;float CVAR_GET_FLOAT(const char*){return autoDeath;}
+void CBaseEntity::EnableRagdoll(bool on){static_cast<CBaseMonster*>(this)->enableRequests++;WorldPhysic->SetRagdoll(this,on);}
+struct Cvar {float value=1;};Cvar ragdoll_bullet_impulse_scale,prop_bullet_impulse_scale;
+struct TraceResult {edict_t* pHit;Vector vecEndPos;int iHitgroup=0;};
+bool UTIL_IsValidEntity(edict_t* e){return e&&!e->free;}
+
+@PRODUCTION@
+
+struct Scene {
+    CBaseMonster monster;PhysicsAssetInstance asset;std::array<PxRigidDynamic,3> actors;
+    Scene(){physics=CPhysicPhysX{};WorldPhysic=&physics;globals.time=10;autoDeath=1;monster.asset=&asset;
+        for(int i=0;i<3;++i){physicsasset::BodyDef def;def.name="body"+std::to_string(i);def.hitGroup=i+1;
+            asset.m_def->bodies.push_back(def);actors[i].pose.p=PxVec3(float(i*10),0,0);
+            BodyRuntime body;body.actor=&actors[i];body.boneIndex=i;body.currentAnimationPose=actors[i].pose;asset.m_bodies.push_back(body);}
+        asset.joints={&actors[0],&actors[1]};}
+    void partial(){asset.m_ragdoll=true;asset.m_bodies[0].physicsWeight=0;asset.m_bodies[1].physicsWeight=0.4f;asset.m_bodies[2].physicsWeight=1;
+        actors[1].bodyFlags.bits=0;actors[2].bodyFlags.bits=0;actors[1].linear=PxVec3(7,0,0);}
+    void bullet(int body){TraceResult tr{monster.edict(),Vector(float(body*10),0,0),body+1};
+        ApplyPhysicsBulletImpulse(&tr,body,{0,0,0},{50,0,0},{1,0,0},3);}
+    void full()const{assert(asset.IsRagdoll()&&!asset.NeedsAnimationControl());for(const auto& b:asset.m_bodies){assert(b.physicsWeight==1);assert(!b.actor->bodyFlags.isSet(1));}}
+};
+void deathCases(){
+    // Enter partial ownership through the real weight API, then exercise death
+    // with anchors and several drive weights without rebuilding actors/joints.
+    for(float weight:{0.0f,0.0005f,0.25f,0.998f}) {
+        Scene s;s.monster.origin={3,0,0};s.monster.pev->movetype=5;s.monster.pev->solid=2;
+        assert(physics.SetRagdollBodyPhysicsWeight(&s.monster,"body0",0,false));
+        assert(physics.SetRagdollBodyPhysicsWeight(&s.monster,"body1",weight,false));
+        assert(s.asset.NeedsAnimationControl()&&s.monster.pev->movetype==5);
+        const auto joints=s.asset.joints;const auto bodies=s.asset.m_bodies;
+        const int snaps=s.asset.snaps,creates=physics.creates;
+        s.monster.pev->flags|=FL_ONGROUND;s.monster.pev->groundentity=s.monster.edict();
+        s.bullet(0);assert(s.actors[0].impulses==0);
+        s.monster.Killed(nullptr,GIB_NORMAL);s.full();
+        assert(s.monster.pev->solid==SOLID_NOT&&s.monster.pev->movetype==MOVETYPE_NONE);
+        assert(!(s.monster.pev->flags&FL_ONGROUND)&&!s.monster.pev->groundentity);
+        assert(s.asset.joints==joints&&s.asset.snaps==snaps&&physics.creates==creates);
+        for(size_t i=0;i<bodies.size();++i)assert(bodies[i].actor==s.asset.m_bodies[i].actor);
+        assert(s.actors[0].impulses==1&&physics.m_pendingRagdollImpulses.empty());
+        std::array<int,3> forces,targets;
+        for(size_t i=0;i<3;++i){forces[i]=s.actors[i].forces;targets[i]=s.actors[i].targets;}
+        for(int step=0;step<3;++step)s.asset.ApplyAnimationControl(0.01f,100,10,1000);
+        for(size_t i=0;i<3;++i)assert(s.actors[i].forces==forces[i]&&s.actors[i].targets==targets[i]);
+        const auto saved=physics.m_ragdollEntityState.at(1);
+        physics.SetRagdoll(&s.monster,true);s.monster.Killed(nullptr,GIB_NORMAL);
+        assert(s.actors[0].impulses==1&&physics.m_ragdollEntityState.size()==1);
+        assert(physics.m_ragdollEntityState.at(1).rootToEntity.position.x==saved.rootToEntity.position.x);
+    }
+    {Scene s;s.bullet(-1);s.monster.Killed(nullptr,GIB_NORMAL);s.full();assert(s.monster.enableRequests==1&&physics.m_ragdollEntityState.size()==1);
+        assert(s.actors[0].impulses==1&&physics.m_pendingRagdollImpulses.empty());
+        s.monster.Killed(nullptr,GIB_NORMAL);physics.SetRagdoll(&s.monster,true);assert(s.monster.enableRequests==1&&s.actors[0].impulses==1);}
+    {Scene s;s.partial();const auto joints=s.asset.joints;const auto actors=s.asset.m_bodies;
+        s.asset.ApplyAnimationControl(0.01f,100,10,1000);assert(s.actors[1].forces==1);s.bullet(1);assert(s.actors[1].impulses==1);
+        s.bullet(0);assert(s.actors[0].impulses==0&&physics.m_pendingRagdollImpulses.size()==1);
+        s.monster.Killed(nullptr,GIB_NORMAL);s.full();assert(s.asset.joints==joints&&physics.creates==0&&s.asset.snaps==0);
+        for(size_t i=0;i<actors.size();++i)assert(actors[i].actor==s.asset.m_bodies[i].actor);
+        assert(s.actors[0].impulses==1&&s.actors[1].impulses==1&&s.actors[1].linear.x==10);
+        int forces=s.actors[1].forces,targets=s.actors[0].targets; s.asset.ApplyAnimationControl(0.01f,100,10,1000);
+        assert(s.actors[1].forces==forces&&s.actors[0].targets==targets);
+        physics.SetRagdoll(&s.monster,true);s.monster.Killed(nullptr,GIB_NORMAL);assert(physics.m_ragdollEntityState.size()==1&&s.actors[0].impulses==1);}
+    {Scene s;s.monster.origin={3,0,0};physics.SetRagdoll(&s.monster,true);
+        const auto saved=physics.m_ragdollEntityState.at(1);s.bullet(2);s.monster.Killed(nullptr,GIB_NORMAL);s.full();
+        assert(s.monster.pev->movetype==MOVETYPE_NONE&&s.monster.pev->solid==SOLID_NOT);
+        const auto after=physics.m_ragdollEntityState.at(1);assert(after.movetype==saved.movetype&&after.rootToEntity.position.x==saved.rootToEntity.position.x);
+        assert(physics.m_ragdollEntityState.size()==1&&s.actors[2].impulses==1);}
+    {Scene s;s.monster.asset=nullptr;s.monster.Killed(nullptr,GIB_NORMAL);assert(s.monster.enableRequests==0);}
+    {Scene s;s.partial();autoDeath=0;s.monster.Killed(nullptr,GIB_NORMAL);assert(s.asset.NeedsAnimationControl()&&s.monster.enableRequests==0);}
+    {Scene s;s.partial();s.monster.Killed(nullptr,GIB_ALWAYS);assert(s.monster.gibs==1&&s.monster.enableRequests==0&&s.asset.NeedsAnimationControl());}
+    {Scene s;s.monster.pev->flags=0;s.monster.Killed(nullptr,GIB_NORMAL);assert(s.monster.enableRequests==0);}
+    {Scene s;s.asset.m_actorsCreated=false;physics.creationSucceeds=false;s.bullet(-1);s.monster.Killed(nullptr,GIB_NORMAL);assert(!s.asset.IsRagdoll()&&physics.m_ragdollEntityState.empty());}
+    {Scene s;WorldPhysic=nullptr;s.monster.Killed(nullptr,GIB_NORMAL);assert(s.monster.enableRequests==0);}
+    {Scene s;s.partial();s.bullet(0);globals.time=10.3f;s.monster.Killed(nullptr,GIB_NORMAL);assert(s.actors[0].impulses==0&&physics.m_pendingRagdollImpulses.empty());}
+    {Scene s;s.bullet(-1);edict_t other;physics.m_pendingRagdollImpulses[1][0].edict=&other;s.monster.Killed(nullptr,GIB_NORMAL);assert(s.actors[0].impulses==0);}
+    {Scene s;s.bullet(-1);globals.time=9;s.monster.Killed(nullptr,GIB_NORMAL);assert(s.actors[0].impulses==0);}
+    {Scene s;for(int i=0;i<20;++i)s.bullet(-1);assert(physics.m_pendingRagdollImpulses[1].size()==16);s.monster.Killed(nullptr,GIB_NORMAL);assert(s.actors[0].impulses==16);}
+    std::cout<<"PASS production death/physics: weight-API promotion matrix, ordinary, partial, free, policies, ownership, drives, single impulses, expiry\n";
+}
+void shapeCases(){
+    std::array<int,3> order{{0,1,2}};int permutations=0;
+    do{Scene s;s.monster.asset=nullptr;PxActor root;PxShape a,b,c;a.low=.12f;b.low=.06f;c.low=0;
+        std::array<PxShape*,3> shapes{{&a,&b,&c}};for(int i:order)root.shapes.push_back(shapes[i]);s.monster.root=&root;
+        Vector exit,normal;assert(!physics.TraceBallisticPhysicsExit(&s.monster,-1,{0,0,0},{1,0,0},10,exit,normal));
+        assert(a.reverseQueries+b.reverseQueries+c.reverseQueries==0);++permutations;
+    }while(std::next_permutation(order.begin(),order.end()));assert(permutations==6);
+    {Scene s;s.monster.asset=nullptr;PxActor root,child;PxShape chosen,far;chosen.low=0;far.low=.3f;chosen.failReverse=true;
+        root.shapes={&far,&chosen};s.monster.root=&root;PhysicsPartRuntime part{&child};part.shapes={{&chosen},{&chosen}};
+        physics.m_physicsAssetCollisionStates[1]={s.monster.edict(),true,false,{part}};
+        Vector out,normal;assert(!physics.TraceBallisticPhysicsExit(&s.monster,-1,{0,0,0},{1,0,0},10,out,normal));
+        assert(chosen.forwardQueries==1&&chosen.reverseQueries==1&&far.reverseQueries==0);
+        chosen.failReverse=false;assert(physics.TraceBallisticPhysicsExit(&s.monster,-1,{0,0,0},{1,0,0},10,out,normal));assert(out.x==2&&normal.x==1);}
+    {Scene s;s.monster.asset=nullptr;PxActor root,child;PxShape a,b;b.low=.06f;root.shapes={&a};s.monster.root=&root;
+        PhysicsPartRuntime part{&child};part.shapes={{&b}};physics.m_physicsAssetCollisionStates[1]={s.monster.edict(),true,false,{part}};
+        Vector out,normal;assert(!physics.TraceBallisticPhysicsExit(&s.monster,-1,{0,0,0},{1,0,0},10,out,normal));
+        b.flags=0;assert(physics.TraceBallisticPhysicsExit(&s.monster,-1,{0,0,0},{1,0,0},10,out,normal));
+        physics.m_physicsAssetCollisionStates[1].collisionRequested=false;assert(!physics.TraceBallisticPhysicsExit(&s.monster,-1,{0,0,0},{1,0,0},10,out,normal));}
+    {Scene s;s.monster.asset=nullptr;PxActor root;PxShape a;root.shapes.assign(129,&a);s.monster.root=&root;Vector out,normal;
+        assert(!physics.TraceBallisticPhysicsExit(&s.monster,-1,{0,0,0},{1,0,0},10,out,normal));}
+    std::cout<<"PASS production shape query: six orders, root/child overlap, disabled shapes, deduplication, failed selected exit\n";
+}
+int main(){deathCases();shapeCases();}

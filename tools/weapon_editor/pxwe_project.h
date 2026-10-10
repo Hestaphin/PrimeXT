@@ -1,0 +1,76 @@
+// Native weapon editor backend. No engine, Python, or window-system dependencies.
+// Copyright (C) 2026 PrimeXT contributors. GPL-3.0-or-later.
+#pragma once
+#include "modular_weapons.h"
+#include "ballistic_flight.h"
+#include <array>
+#include <filesystem>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace pxwe {
+namespace fs = std::filesystem;
+enum class Kind { Cartridge, Weapon };
+using Fields = std::vector<std::pair<std::string, std::string>>;
+struct Asset {
+    Kind kind = Kind::Cartridge;
+    Fields fields, accepted;
+    std::string Get(const std::string& key) const;
+    std::string Id() const { return Get("id"); }
+    void Set(const std::string& key, const std::string& value);
+    std::string Serialize() const;
+};
+struct State { std::vector<Asset> cartridges, weapons; };
+struct Validation {
+    modular::Registry registry;
+    std::vector<std::string> errors;
+    bool Ok() const { return errors.empty(); }
+    std::string Message() const;
+};
+bool ValidId(const std::string& id);
+Asset Parse(const std::string& data, Kind kind);
+const std::vector<std::string>& FieldNames(Kind kind);
+// Explicit command-line folder wins. devkit/bin/tools installations use their
+// parent game folder; a directly installed executable uses its own directory.
+fs::path DiscoverRoot(const fs::path& executable, const fs::path& explicitRoot = {});
+
+class Project {
+public:
+    void Load(const fs::path& root); // structural errors leave this project untouched
+    const fs::path& Root() const { return root_; }
+    const State& Data() const { return state_; }
+    const Asset* Find(Kind kind, const std::string& id) const;
+    void Add(Kind kind, const std::string& id, const std::string& copyId = {});
+    void Remove(Kind kind, const std::string& id);
+    void SetField(Kind kind, const std::string& id, const std::string& key, const std::string& value);
+    void Allow(const std::string& weaponId, const std::string& cartridgeId, const std::string& velocity);
+    void Disallow(const std::string& weaponId, const std::string& cartridgeId);
+    void SetDefault(const std::string& weaponId, const std::string& cartridgeId);
+    bool Undo();
+    bool Redo();
+    bool Dirty() const;
+    Validation Validate() const; // the game's actual Registry, in process
+    void Save(); // stage, validate, replace owned files, roll back on ordinary I/O failure
+private:
+    struct File { bool exists = false; std::string contents; };
+    using Files = std::map<std::string, std::string>;
+    fs::path root_;
+    State state_;
+    std::vector<State> undo_, redo_;
+    std::map<std::string, File> baseline_;
+    std::string saved_;
+    Files ExportFiles() const;
+    void Commit(State state);
+};
+
+struct Sequence { std::string name; float fps = 0; int frames = 0; };
+struct ModelInfo {
+    std::string name;
+    std::array<float, 3> mins{}, maxs{};
+    std::vector<Sequence> sequences;
+};
+ModelInfo ReadModel(const fs::path& path); // bounded Studio v10 metadata reader
+std::vector<modular::BallisticState> Flight(const modular::Cartridge& cartridge, double velocity);
+} // namespace pxwe
