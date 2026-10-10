@@ -24,6 +24,7 @@
 #include	"util.h"
 #include	"cbase.h"
 #include	"saverestore.h"
+#include	"physic.h"
 #include	"client.h"
 #include	"game.h"
 #include	"gamerules.h"
@@ -211,6 +212,8 @@ int DispatchSpawn( edict_t *pent )
 
 		if( pEntity )
 		{
+			// .phys definitions are discovered lazily. Do not instantiate a full
+			// articulated PhysX ragdoll for every living model at spawn time.
 			if ( g_pGameRules && !g_pGameRules->IsAllowedToSpawn( pEntity ))
 				return -1; // return that this entity should be deleted
 			if ( pEntity->pev->flags & FL_KILLME )
@@ -539,6 +542,17 @@ void DispatchObjectCollsionBox( edict_t *pent )
 	{
 		pEntity->CalcAbsolutePosition();
 		pEntity->SetObjectCollisionBox();
+
+        // B6: for a rotated full ragdoll, pev->mins/maxs intentionally stay
+        // entity-local for the client renderer. Server abs bounds must instead
+        // match the simulated bodies in WORLD axes (and are consumed by Xash
+        // during spatial linking/PVS). Do not apply the entity rotation twice.
+        Vector physMins, physMaxs;
+        if( WorldPhysic && WorldPhysic->GetRagdollWorldBounds(pEntity, physMins, physMaxs) )
+        {
+            pent->v.absmin = physMins;
+            pent->v.absmax = physMaxs;
+        }
 	}
 }
 

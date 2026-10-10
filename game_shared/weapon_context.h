@@ -45,6 +45,8 @@ public:
 	virtual void SecondaryAttack() {}	// do "+ATTACK2"
 	virtual void Reload() {}			// do "+RELOAD"
 	virtual void WeaponIdle() {}		// called when no buttons pressed
+	virtual void OnPreItemPostFrame() {}
+	virtual void OnReloadFinished() {} // raw buttons before legacy ATTACK2 clearing
 
 	void ItemPostFrame();
 

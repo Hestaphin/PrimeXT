@@ -17,34 +17,61 @@ GNU General Public License for more details.
 
 using namespace physx;
 
-enum ColllisionFlags : PxU32
+enum CollisionFlags : PxU32
 {
-	ConveyorActor = (1 << 0),
+    ConveyorActor = (1u << 0),
+    PhysicsAssetBody = (1u << 1),
 };
 
 CollisionFilterData::CollisionFilterData() :
-	m_conveyorFlag(false)
+    m_conveyorFlag(false),
+    m_physicsAssetBody(false),
+    m_physicsAssetOwner(0)
 {
 }
 
 CollisionFilterData::CollisionFilterData(const physx::PxFilterData &data)
 {
-	m_conveyorFlag = data.word0 & ColllisionFlags::ConveyorActor;
+    m_conveyorFlag = (data.word0 & CollisionFlags::ConveyorActor) != 0;
+    m_physicsAssetBody = (data.word0 & CollisionFlags::PhysicsAssetBody) != 0;
+    m_physicsAssetOwner = data.word1;
 }
 
 bool CollisionFilterData::HasConveyorFlag() const
 {
-	return m_conveyorFlag;
+    return m_conveyorFlag;
 }
 
 void CollisionFilterData::SetConveyorFlag(bool state)
 {
-	m_conveyorFlag = state;
+    m_conveyorFlag = state;
+}
+
+bool CollisionFilterData::IsPhysicsAssetBody() const
+{
+    return m_physicsAssetBody;
+}
+
+void CollisionFilterData::SetPhysicsAssetBody(bool state)
+{
+    m_physicsAssetBody = state;
+}
+
+PxU32 CollisionFilterData::GetPhysicsAssetOwner() const
+{
+    return m_physicsAssetOwner;
+}
+
+void CollisionFilterData::SetPhysicsAssetOwner(PxU32 owner)
+{
+    m_physicsAssetOwner = owner;
 }
 
 PxFilterData CollisionFilterData::ToNativeType() const
 {
-	PxFilterData filterData;
-	filterData.word0 |= m_conveyorFlag ? ColllisionFlags::ConveyorActor : 0;
-	return filterData;
+    PxFilterData filterData(0, 0, 0, 0);
+    filterData.word0 |= m_conveyorFlag ? CollisionFlags::ConveyorActor : 0;
+    filterData.word0 |= m_physicsAssetBody ? CollisionFlags::PhysicsAssetBody : 0;
+    filterData.word1 = m_physicsAssetOwner;
+    return filterData;
 }

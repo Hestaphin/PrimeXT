@@ -1563,3 +1563,82 @@ void StudioModel::editPosition( float step, int type )
 		update_model = true;
 	else m_settings.numSourceChanges++;
 }
+
+const matrix3x4 &StudioModel::GetToolBoneTransform( int bone ) const
+{
+	static matrix3x4 identity;
+	identity.Identity();
+	if( !m_pstudiohdr || bone < 0 || bone >= m_pstudiohdr->numbones )
+		return identity;
+	return m_pbonetransform[bone];
+}
+
+void StudioModel::SetToolBoneOverride( int bone, const matrix3x4 &transform )
+{
+	if( !m_pstudiohdr || bone < 0 || bone >= m_pstudiohdr->numbones )
+		return;
+	m_toolBoneOverrides[bone] = transform;
+	m_toolBoneOverrideMask[bone] = true;
+	m_hasToolBoneOverrides = true;
+}
+
+void StudioModel::ClearToolBoneOverrides()
+{
+	m_toolBoneOverrideMask.fill( false );
+	m_hasToolBoneOverrides = false;
+}
+
+bool StudioModel::GetBoneVertexBounds( int bone, Vector &mins, Vector &maxs )
+{
+	if( !m_pstudiohdr || bone < 0 || bone >= m_pstudiohdr->numbones )
+		return false;
+
+	bool found = false;
+	mins = Vector( 999999.0f, 999999.0f, 999999.0f );
+	maxs = Vector( -999999.0f, -999999.0f, -999999.0f );
+	const matrix3x4 boneInverse = m_pbonetransform[bone].Invert();
+	mstudiobodyparts_t *bodyparts = (mstudiobodyparts_t *)((byte *)m_pstudiohdr + m_pstudiohdr->bodypartindex);
+
+	for( int bodypart = 0; bodypart < m_pstudiohdr->numbodyparts; ++bodypart )
+	{
+		mstudiomodel_t *models = (mstudiomodel_t *)((byte *)m_pstudiohdr + bodyparts[bodypart].modelindex);
+		for( int modelIndex = 0; modelIndex < bodyparts[bodypart].nummodels; ++modelIndex )
+		{
+			mstudiomodel_t &model = models[modelIndex];
+			if( model.numverts <= 0 ) continue;
+			Vector *vertices = (Vector *)((byte *)m_pstudiohdr + model.vertindex);
+			byte *vertexBones = (byte *)m_pstudiohdr + model.vertinfoindex;
+			mstudioboneweight_t *weights = model.blendvertinfoindex ? (mstudioboneweight_t *)((byte *)m_pstudiohdr + model.blendvertinfoindex) : nullptr;
+			const bool weighted = FBitSet( m_pstudiohdr->flags, STUDIO_HAS_BONEWEIGHTS ) && weights != nullptr;
+
+			for( int vertexIndex = 0; vertexIndex < model.numverts; ++vertexIndex )
+			{
+				Vector world;
+				if( weighted )
+				{
+					int strongestSlot = 0;
+					for( int slot = 1; slot < 4; ++slot )
+						if( weights[vertexIndex].weight[slot] > weights[vertexIndex].weight[strongestSlot] ) strongestSlot = slot;
+					if( (unsigned char)weights[vertexIndex].bone[strongestSlot] != bone || weights[vertexIndex].weight[strongestSlot] == 0 ) continue;
+					matrix3x4 skin;
+					ComputeSkinMatrix( &weights[vertexIndex], skin );
+					world = skin.VectorTransform( vertices[vertexIndex] );
+				}
+				else
+				{
+					if( vertexBones[vertexIndex] != bone ) continue;
+					world = m_pbonetransform[bone].VectorTransform( vertices[vertexIndex] );
+				}
+
+				const Vector local = boneInverse.VectorTransform( world );
+				for( int axis = 0; axis < 3; ++axis )
+				{
+					mins[axis] = Q_min( mins[axis], local[axis] );
+					maxs[axis] = Q_max( maxs[axis], local[axis] );
+				}
+				found = true;
+			}
+		}
+	}
+	return found;
+}

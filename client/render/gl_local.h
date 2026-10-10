@@ -737,6 +737,7 @@ extern ref_globals_t	tr;
 // gl_backend.cpp
 //
 void R_InitRefState(void);
+void R_RenderReport(void);
 void R_PushRefState(void);
 void R_PopRefState(void);
 void R_ResetRefState(void);

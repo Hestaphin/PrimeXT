@@ -31,7 +31,92 @@ GNU General Public License for more details.
 #include "weapons/rpg.h"
 #include "weapons/egon.h"
 #include "weapons/gauss.h"
+#include "weapons/modular.h"
+#include "modular_weapons.h"
+#include "parsemsg.h"
 #include <cstring>
+#include <array>
+
+extern void ResetClientWeaponPredictionForModularReload();
+
+// J.4: server sends its canonical definition fingerprint and each registered
+// cartridge ammo-slot mapping. Unverified/mismatched clients do not predict
+// custom attacks; the server still owns damage and bullet flight.
+namespace {
+bool g_modularDefinitionsLoaded = false;
+bool g_modularVerified = false;
+// Mapping pointers reference Registry::Cartridge strings. Clear these BEFORE
+// a registry reload destroys their backing storage.
+std::array<bool, MAX_AMMO_SLOTS> g_modularMappedSlots{};
+void ClearModularAmmoMappings()
+{
+    for (int slot = 1; slot < MAX_AMMO_SLOTS; ++slot)
+        if (g_modularMappedSlots[slot])
+            CBaseWeaponContext::AmmoInfoArray[slot].pszName = nullptr;
+    g_modularMappedSlots.fill(false);
+}
+
+void EnsureModularDefinitionsLoaded() {
+    if (g_modularDefinitionsLoaded) return;
+    g_modularDefinitionsLoaded = true;
+    modular::SharedRegistry().Load([](const std::string& path, std::string& text) -> bool {
+        int length = 0;
+        char* data = reinterpret_cast<char*>(gEngfuncs.COM_LoadFile(
+            const_cast<char*>(path.c_str()), 5, &length));
+        if (!data) return false;
+        const bool valid = length >= 0 && length <= 65536;
+        if (valid) text.assign(data, static_cast<size_t>(length));
+        gEngfuncs.COM_FreeFile(data);
+        return valid;
+    });
+}
+}
+bool ModularClientDefinitionsVerified() { return g_modularVerified; }
+// Called only after all prediction contexts containing definition pointers
+// have been destroyed. The next request reloads the virtual filesystem.
+void ResetModularClientDefinitions()
+{
+    ClearModularAmmoMappings();
+    // Weapon-selection metadata can also retain definition-owned c_str()
+    // pointers. Drop those entries while the old registry storage is alive.
+    for (const auto& weapon : modular::SharedRegistry().Weapons()) {
+        if (weapon.runtimeId >= 0 && weapon.runtimeId < MAX_LOCAL_WEAPONS)
+            CBaseWeaponContext::ItemInfoArray[weapon.runtimeId] = ItemInfo{};
+    }
+    g_modularDefinitionsLoaded = false;
+    g_modularVerified = false;
+}
+
+int __MsgFunc_ModCfg(const char* name, int size, void* buffer) {
+    BEGIN_READ(name, buffer, size);
+    const int slot = READ_BYTE();
+    const uint32_t digest = static_cast<uint32_t>(READ_LONG());
+    const std::string cartridge = READ_STRING();
+    END_READ();
+    if (slot == 0) {
+        // Every configuration header is a new verification epoch (also after
+        // reconnect without a client-DLL reload). Discard old weapon contexts
+        // before Registry::Load() replaces their definition pointers.
+        ResetClientWeaponPredictionForModularReload();
+        ResetModularClientDefinitions();
+    }
+    EnsureModularDefinitionsLoaded();
+    auto& registry = modular::SharedRegistry();
+    if (slot == 0) {
+        g_modularVerified = registry.Valid() && registry.Fingerprint() == digest;
+        if (!g_modularVerified)
+            gEngfuncs.Con_Printf("[modular] Server weapon/cartridge definitions differ; prediction disabled.\n");
+    } else if (g_modularVerified && slot > 0 && slot < MAX_AMMO_SLOTS) {
+        const auto* def = registry.FindCartridge(cartridge);
+        if (!def || registry.Fingerprint() != digest) {
+            g_modularVerified = false;
+        } else {
+            CBaseWeaponContext::AmmoInfoArray[slot].pszName = def->id.c_str();
+            g_modularMappedSlots[slot] = true;
+        }
+    }
+    return 1;
+}
 
 CWeaponPredictingContext::CWeaponPredictingContext()
 {
@@ -182,10 +267,20 @@ void CWeaponPredictingContext::ReadWeaponsState(const local_state_t *from)
 			weapon->m_flNextSecondaryAttack	= data.m_flNextSecondaryAttack;
 			weapon->m_flTimeWeaponIdle		= data.m_flTimeWeaponIdle;
 
-			weapon->m_iSecondaryAmmoType = static_cast<int>(from->client.vuser3.z);
-			weapon->m_iPrimaryAmmoType = static_cast<int>(from->client.vuser4.x);
-			m_playerState.ammo[weapon->m_iPrimaryAmmoType] = static_cast<int>(from->client.vuser4.y);
-			m_playerState.ammo[weapon->m_iSecondaryAmmoType] = static_cast<int>(from->client.vuser4.z);
+            // Only ACTIVE weapon ammo types are encoded in clientdata_t.
+            // Never overwrite reserve/ammo identity for every carried gun.
+            if (weapon->m_iId == from->client.m_iId) {
+                const int primary = static_cast<int>(from->client.vuser4.x);
+                const int secondary = static_cast<int>(from->client.vuser3.z);
+                if (primary > 0 && primary < MAX_AMMO_SLOTS) {
+                    weapon->m_iPrimaryAmmoType = primary;
+                    m_playerState.ammo[primary] = static_cast<int>(from->client.vuser4.y);
+                }
+                if (secondary > 0 && secondary < MAX_AMMO_SLOTS) {
+                    weapon->m_iSecondaryAmmoType = secondary;
+                    m_playerState.ammo[secondary] = static_cast<int>(from->client.vuser4.z);
+                }
+            }
 
 			ReadWeaponSpecificData(weapon, from);
 		}
@@ -250,6 +345,14 @@ void CWeaponPredictingContext::ReadWeaponSpecificData(CBaseWeaponContext *weapon
 		ctx->m_flNextAmmoBurn = data.fuser2;
 		ctx->m_fInAttack = data.iuser1;
 	}
+    else if (modular::SharedRegistry().FindWeaponByRuntimeId(weapon->m_iId))
+    {
+        auto *ctx = static_cast<CModularWeaponContext*>(weapon);
+        ctx->m_modularFlags = data.iuser1;
+        ctx->m_burstRemaining = data.iuser2;
+        ctx->m_loadedCartridgeIndex = data.iuser3;
+        ctx->m_selectedCartridgeIndex = data.iuser4;
+    }
 }
 
 void CWeaponPredictingContext::WriteWeaponSpecificData(CBaseWeaponContext *weapon, local_state_t *to)
@@ -284,6 +387,14 @@ void CWeaponPredictingContext::WriteWeaponSpecificData(CBaseWeaponContext *weapo
 		data.fuser2 = ctx->m_flNextAmmoBurn;
 		data.iuser1 = ctx->m_fInAttack;
 	}
+    else if (modular::SharedRegistry().FindWeaponByRuntimeId(weapon->m_iId))
+    {
+        auto *ctx = static_cast<CModularWeaponContext*>(weapon);
+        data.iuser1 = ctx->m_modularFlags;
+        data.iuser2 = ctx->m_burstRemaining;
+        data.iuser3 = ctx->m_loadedCartridgeIndex;
+        data.iuser4 = ctx->m_selectedCartridgeIndex;
+    }
 }
 
 void CWeaponPredictingContext::HandlePlayerSpawnDeath(local_state_t *to, CBaseWeaponContext *weapon)
@@ -318,6 +429,17 @@ CBaseWeaponContext* CWeaponPredictingContext::GetWeaponContext(uint32_t weaponID
 	}
 	else
 	{
+        // Generic data-authored weapons use the same context on client/server.
+        // The ordered virtual-filesystem manifests must match on both sides.
+        EnsureModularDefinitionsLoaded();
+        if (const auto* definition = modular::SharedRegistry().FindWeaponByRuntimeId(weaponID)) {
+            m_weaponsState[weaponID] = std::make_unique<CModularWeaponContext>(
+                std::make_unique<CClientWeaponLayerImpl>(m_playerState), definition);
+            ItemInfo itemInfo{};
+            m_weaponsState[weaponID]->GetItemInfo(&itemInfo);
+            CBaseWeaponContext::ItemInfoArray[weaponID] = itemInfo;
+            return m_weaponsState[weaponID].get();
+        }
 		switch (weaponID)
 		{
 			case WEAPON_GLOCK:  

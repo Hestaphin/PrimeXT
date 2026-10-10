@@ -38,7 +38,7 @@ typedef struct mvert_s
 
 namespace clipfile
 {
-	constexpr uint32_t kFormatVersion = 2;
+	constexpr uint32_t kFormatVersion = 3;
 	constexpr uint32_t kFileMagic = (('P' << 24) + ('I' << 16) + ('L' << 8) + 'C'); // little-endian "CLIP"
 
 	constexpr uint32_t kDataLumpFacets = 0;
@@ -82,6 +82,7 @@ namespace clipfile
 		int32_t body;
 		int32_t skin;
 		GeometryType geometryType;
+        uint64_t sourceFingerprint; // 0 for model-only; hash of .phys bytes otherwise
 	};
 
 	struct CacheTable

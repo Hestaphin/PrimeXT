@@ -29,6 +29,8 @@
 
 #include "hgrunt.h"
 #include "env_beam.h"
+#include "modular_npc.h"
+#include "modular_weapons.h"
 
 LINK_ENTITY_TO_CLASS( monster_human_grunt, CHGrunt );
 
@@ -41,6 +43,9 @@ BEGIN_DATADESC( CHGrunt )
 	DEFINE_FIELD( m_fStanding, FIELD_BOOLEAN ),
 	DEFINE_FIELD( m_fFirstEncounter, FIELD_BOOLEAN ),
 	DEFINE_FIELD( m_cClipSize, FIELD_INTEGER ),
+    DEFINE_FIELD(m_iszModularWeapon, FIELD_STRING),
+    DEFINE_FIELD(m_iszModularCartridge, FIELD_STRING),
+    DEFINE_FIELD(m_useModularWeapon, FIELD_BOOLEAN),
 	DEFINE_FIELD( m_voicePitch, FIELD_INTEGER ),
 	DEFINE_FIELD( m_iSentence, FIELD_INTEGER ),
 END_DATADESC()
@@ -114,7 +119,12 @@ void CHGrunt :: GibMonster ( void )
 		GetAttachment( 0, vecGunPos, vecGunAngles );
 		
 		CBaseEntity *pGun;
-		if( HasWeapon( HGRUNT_SHOTGUN ))
+        if (m_useModularWeapon) {
+            pGun = DropModularNpcWeapon(STRING(m_iszModularWeapon),
+                FStringNull(m_iszModularCartridge) ? "" : STRING(m_iszModularCartridge),
+                m_cAmmoLoaded, vecGunPos, vecGunAngles);
+        }
+		else if( HasWeapon( HGRUNT_SHOTGUN ))
 		{
 			pGun = DropItem( "weapon_shotgun", vecGunPos, vecGunAngles );
 		}
@@ -622,6 +632,13 @@ void CHGrunt :: Shoot ( void )
 
 	Vector vecShootOrigin = GetGunPosition();
 	Vector vecShootDir = ShootAtEnemy( vecShootOrigin );
+    if (m_useModularWeapon) {
+        const int consumed = FireModularNpcWeapon(this, STRING(m_iszModularWeapon),
+                FStringNull(m_iszModularCartridge) ? "" : STRING(m_iszModularCartridge),
+                vecShootOrigin, vecShootDir, m_cAmmoLoaded);
+        if (consumed > 0) m_cAmmoLoaded -= consumed;
+        return;
+    }
 
 	UTIL_MakeVectors ( GetAbsAngles() );
 
@@ -649,6 +666,13 @@ void CHGrunt :: Shotgun ( void )
 
 	Vector vecShootOrigin = GetGunPosition();
 	Vector vecShootDir = ShootAtEnemy( vecShootOrigin );
+    if (m_useModularWeapon) {
+        const int consumed = FireModularNpcWeapon(this, STRING(m_iszModularWeapon),
+                FStringNull(m_iszModularCartridge) ? "" : STRING(m_iszModularCartridge),
+                vecShootOrigin, vecShootDir, m_cAmmoLoaded);
+        if (consumed > 0) m_cAmmoLoaded -= consumed;
+        return;
+    }
 
 	UTIL_MakeVectors ( GetAbsAngles() );
 
@@ -690,7 +714,12 @@ void CHGrunt :: HandleAnimEvent( MonsterEvent_t *pEvent )
 			SetBodygroup( GUN_GROUP, GUN_NONE );
 
 			// now spawn a gun.
-			if (HasWeapon( HGRUNT_SHOTGUN ))
+            if (m_useModularWeapon) {
+                DropModularNpcWeapon(STRING(m_iszModularWeapon),
+                FStringNull(m_iszModularCartridge) ? "" : STRING(m_iszModularCartridge),
+                m_cAmmoLoaded, vecGunPos, vecGunAngles);
+            }
+			else if (HasWeapon( HGRUNT_SHOTGUN ))
 			{
 				 DropItem( "weapon_shotgun", vecGunPos, vecGunAngles );
 			}
@@ -809,6 +838,18 @@ void CHGrunt :: HandleAnimEvent( MonsterEvent_t *pEvent )
 //=========================================================
 // Spawn
 //=========================================================
+void CHGrunt::KeyValue(KeyValueData* data) {
+    if (!strcmp(data->szKeyName, "modular_weapon")) {
+        m_iszModularWeapon = ALLOC_STRING(data->szValue);
+        data->fHandled = TRUE;
+    } else if (!strcmp(data->szKeyName, "modular_cartridge")) {
+        m_iszModularCartridge = ALLOC_STRING(data->szValue);
+        data->fHandled = TRUE;
+    } else {
+        CSquadMonster::KeyValue(data);
+    }
+}
+
 void CHGrunt :: Spawn()
 {
 	Precache( );
@@ -860,6 +901,23 @@ void CHGrunt :: Spawn()
 	{
 		m_cClipSize		= GRUNT_CLIP_SIZE;
 	}
+    if (!FStringNull(m_iszModularWeapon)) {
+        const char* weaponId = STRING(m_iszModularWeapon);
+        const auto* weapon = modular::SharedRegistry().FindWeapon(weaponId);
+        const char* cartridgeId = FStringNull(m_iszModularCartridge) ?
+            (weapon ? weapon->defaultCartridgeId.c_str() : "") : STRING(m_iszModularCartridge);
+        bool compatible = false;
+        if (weapon && weapon->npcUsable &&
+            (weapon->primary.behavior == "ballistic" || weapon->primary.behavior == "hitscan"))
+            for (const auto& c : weapon->compatible)
+                if (c.cartridgeId == cartridgeId) compatible = true;
+        if (compatible) {
+            m_useModularWeapon = true;
+            m_cClipSize = weapon->clipSize;
+        } else {
+            ALERT(at_warning, "hgrunt: invalid modular_weapon or modular_cartridge %s\n", weaponId);
+        }
+    }
 	m_cAmmoLoaded		= m_cClipSize;
 
 	if ( HasWeapon( HGRUNT_SHOTGUN ))

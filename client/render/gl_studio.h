@@ -32,6 +32,7 @@ GNU General Public License for more details.
 #include "jigglebones.h"
 #include "tbnfile.h"
 #include "studio_material.h"
+#include "physics_collision_pose_freshness.h"
 #include <stdint.h>
 
 #define EVENT_CLIENT	5000		// less than this value it's a server-side studio events
@@ -189,9 +190,12 @@ private:
 
 	// Set up model bone positions
 	void StudioSetupBones( void );	
+	void StudioPublishCollisionPose( void );
 
 	// External simulation for bones
 	void StudioCalcBonesExternal( Vector pos[], Vector4D q[] );
+	void StudioApplyRagdollPose( void );
+	void StudioApplyPartPoses( void );
 
 	// Find final attachment points
 	void StudioCalcAttachments( matrix3x4 bones[] );
@@ -202,7 +206,7 @@ private:
 
 	void UpdateIKLocks( CIKContext *pIK );
 
-	void CalculateIKLocks( CIKContext *pIK );
+	void CalculateIKLocks(CIKContext* pIK, const Vector& origin, const Vector& angles);
 	
 	// Merge cached bones with current bones for model
 	void StudioMergeBones( matrix3x4 &transform, matrix3x4 bones[], matrix3x4 cached_bones[], model_t *pModel, model_t *pParentModel );
@@ -355,6 +359,16 @@ private:
 		Vector			origin;		// transformed origin
 
 		BoneCache_t		bonecache;	// just compare to avoid recalc bones every frame
+		physicsasset::CollisionPoseStamp m_collisionPoseStamp;
+        // Shared CPU bone result, separate from skinning/upload buffers.
+        // Drawing publishes this result to m_pbones; packets invalidate it.
+        physicsasset::CollisionPoseStamp m_predictionCollisionStamp;
+        matrix3x4 m_predictionCollisionBones[MAXSTUDIOBONES];
+        matrix3x4 m_cpuPoseRoot;
+        studiohdr_t* m_cpuModelHeader;
+        int m_cpuLastMessage;
+        bool m_cpuCompatible;
+        bool m_cpuSequenceBlends;
 
 		// attachments
 		StudioAttachment_t		attachment[MAXSTUDIOATTACHMENTS];
@@ -374,6 +388,7 @@ private:
 		// attached cubemaps
 		mcubemap_t		*cubemap[2];
 		float			lerpFactor;
+		bool			m_cubemapInitialized;
 
 		mstudiomaterial_t		*materials;	// shaders cache
 
@@ -397,6 +412,46 @@ private:
 		Vector		m_externalBonesOrigin[MAXSTUDIOBONES];
 		bool		m_bExternalBones;
 		float		m_flLastExternalBonesUpdate;
+
+		// Milestone C stores two sparse root-relative snapshots and interpolates
+		// them client-side. The root remains world-space; every simulated child is
+		// relative to it, which both preserves articulated structure and allows a
+		// 15-byte compressed wire record per body.
+		// Sparse physical-prop bone overrides (independent from full ragdoll).
+        bool        m_partPoseActive[MAXSTUDIOBONES];
+        bool        m_partPoseDetached[MAXSTUDIOBONES];
+        bool        m_partPosePending[MAXSTUDIOBONES];
+        uint32_t    m_partPoseSequence[MAXSTUDIOBONES];
+        float       m_partPoseReceived[MAXSTUDIOBONES];
+        float       m_partPoseStartTime[MAXSTUDIOBONES];
+        float       m_partPoseDuration[MAXSTUDIOBONES];
+        Vector      m_partPoseStartPos[MAXSTUDIOBONES];
+        Vector      m_partPoseTargetPos[MAXSTUDIOBONES];
+        Vector4D    m_partPoseStartQuat[MAXSTUDIOBONES];
+        Vector4D    m_partPoseTargetQuat[MAXSTUDIOBONES];
+		bool		m_bRagdollPose;
+		bool		m_bRagdollSleeping;
+		bool		m_bRagdollFrozen;
+		bool		m_bRagdollEntryBlendPending;
+		bool		m_bRagdollExitBlend;
+		bool		m_bRagdollExitPoseValid;
+		uint32_t	m_iRagdollSnapshotSequence;
+		float		m_flRagdollLastSnapshotTime;
+		float		m_flRagdollInterpStartTime;
+		float		m_flRagdollInterpDuration;
+		float		m_flRagdollExitBlendStartTime;
+		float		m_flRagdollExitBlendDuration;
+		int		m_iRagdollRootBone;
+		bool		m_ragdollBoneMask[MAXSTUDIOBONES];
+		Vector		m_ragdollStartRootOrigin;
+		Vector4D	m_ragdollStartRootQuat;
+		Vector		m_ragdollTargetRootOrigin;
+		Vector4D	m_ragdollTargetRootQuat;
+		Vector		m_ragdollStartRelOrigin[MAXSTUDIOBONES];
+		Vector4D	m_ragdollStartRelQuat[MAXSTUDIOBONES];
+		Vector		m_ragdollTargetRelOrigin[MAXSTUDIOBONES];
+		Vector4D	m_ragdollTargetRelQuat[MAXSTUDIOBONES];
+		matrix3x4	m_ragdollExitPose[MAXSTUDIOBONES];
 
 		// GLSL cached arrays
 		Vector4D			m_studioquat[MAXSTUDIOBONES];
@@ -478,7 +533,6 @@ private:
 	void FreeStudioMaterials( void );
 
 	void UpdateInstanceMaterials( void );
-	void ClearInstanceData( bool create );
 
 	// set uniforms data for specified shader
 	void DrawSingleMesh( CSolidEntry *mesh, bool force, bool specialPass );
@@ -537,6 +591,7 @@ private:
 	static mesh_loader_t	m_pfnMeshLoaderGL30[MESHLOADER_COUNT];
 
 	bool			m_fShootDecal;	// disable all interpolations and bonecache
+	bool			m_fRagdollDecalWorldSpace; // ragdoll decal input is reconstructed in world space
 	float			m_flViewmodelFov;	// custom fov for viewmodel
 	int			m_iDrawModelType;	// various modes of rendering
 
@@ -592,6 +647,15 @@ public:
 	void	DestroyAllModelInstances( void );
 
 	int	StudioGetBounds( cl_entity_t *e, Vector bounds[2] );
+    // On-demand per-entity CPU pose, available before first render submission.
+    bool StudioGetCollisionBonePose(const cl_entity_t *e, int bone, matrix3x4 &world);
+    ModelInstance_t* StudioEnsureCpuInstance(cl_entity_t* entity, model_t* model = nullptr, bool reset = false);
+    void StudioInitCpuInstance(ModelInstance_t& inst, cl_entity_t* entity, model_t* model, studiohdr_t* hdr, bool create);
+    bool StudioEvaluatePredictionBones(const cl_entity_t *e, ModelInstance_t &inst,
+        const physicsasset::CollisionPoseState &state, float queryTime);
+    bool StudioEvaluateCpuBones(const cl_entity_t* e, ModelInstance_t& inst,
+        const physicsasset::CollisionPoseState& state, const matrix3x4& root, float now,
+        bool sequenceBlends, bool interpolate = true);
 	int	StudioGetBounds( CSolidEntry *entry, Vector bounds[2] );
 	int	StudioGetBounds( CSolidEntry *entry, CBoundingBox &bounds );
 	CBoundingBox StudioGetMeshBounds( ModelInstance_t *inst, const vbomesh_t *mesh );
@@ -603,6 +667,7 @@ public:
 	void	EntityToModelState( modelstate_t *state, const cl_entity_t *ent );
 	void	ModelStateToEntity( cl_entity_t *ent, const modelstate_t *state );
 	void	StudioDecalShoot( const Vector &vecNorm, const Vector &vecEnd, const char *name, cl_entity_t *ent, int flags, modelstate_t *state );
+	void	StudioRagdollDecalShoot( int boneIndex, const Vector &localPosition, const Vector &localNormal, const char *name, cl_entity_t *ent, int flags );
 	void	StudioDecalShoot( struct pmtrace_s *tr, const char *name, bool visent = false );
 	int		StudioDecalList( decallist_t *pList, int count );
 	void	StudioClearDecals( void );
@@ -621,6 +686,8 @@ public:
 	int		StudioGetAttachmentNumber(const cl_entity_t *ent, const char *attachment);
 
 	void	StudioSetBonesExternal(const cl_entity_t *ent, const Vector pos[], const Radian ang[]);
+	void    StudioSetPartPose(const cl_entity_t *ent,int bone,bool clear,bool detached,uint32_t sequence,const Vector &position,const Vector4D &rotation);
+	void	StudioSetRagdollPose(const cl_entity_t *ent, bool clear, bool sleeping, bool frozen, uint32_t sequence, int rootBone, const Vector &rootPos, const Vector4D &rootQuat, int boneCount, const byte boneIndex[], const Vector relPos[], const Vector4D relQuat[]);
 
 	float	StudioSequenceDuration(const cl_entity_t *ent, int sequence);
 
@@ -677,6 +744,11 @@ inline int R_CreateStudioDecalList( decallist_t *pList, int count )
 inline void R_ClearStudioDecals( void )
 {
 	g_StudioRenderer.StudioClearDecals();
+}
+
+inline bool R_StudioGetCollisionBonePose(const cl_entity_t *e, int bone, matrix3x4 &world)
+{
+    return g_StudioRenderer.StudioGetCollisionBonePose(e, bone, world);
 }
 
 inline int R_StudioGetBounds( cl_entity_t *e, Vector bounds[2] )
@@ -775,6 +847,16 @@ inline void R_UpdateLatchedVars( cl_entity_t *e, qboolean reset )
 inline void R_StudioSetBonesExternal( const cl_entity_t *ent, const Vector pos[], const Radian ang[] )
 {
 	g_StudioRenderer.StudioSetBonesExternal( ent, pos, ang );
+}
+
+inline void R_StudioSetPartPose(const cl_entity_t *ent,int bone,bool clear,bool detached,uint32_t sequence,const Vector &position,const Vector4D &rotation)
+{
+    g_StudioRenderer.StudioSetPartPose(ent,bone,clear,detached,sequence,position,rotation);
+}
+
+inline void R_StudioSetRagdollPose( const cl_entity_t *ent, bool clear, bool sleeping, bool frozen, uint32_t sequence, int rootBone, const Vector &rootPos, const Vector4D &rootQuat, int boneCount, const byte boneIndex[], const Vector relPos[], const Vector4D relQuat[] )
+{
+	g_StudioRenderer.StudioSetRagdollPose( ent, clear, sleeping, frozen, sequence, rootBone, rootPos, rootQuat, boneCount, boneIndex, relPos, relQuat );
 }
 
 #endif// GL_STUDIO_H

@@ -1943,6 +1943,40 @@ void UTIL_RestoreCustomDecal(const Vector &vecPos, const Vector &vecNormal, int 
 	MESSAGE_END();
 }
 
+BOOL UTIL_RagdollStudioDecalTrace(TraceResult *pTrace, const char *name, int flags)
+{
+	if (!pTrace || !name || !name[0] || pTrace->flFraction == 1.0f || !pTrace->pHit || !gmsgRagdollDecal)
+		return FALSE;
+
+	CBaseEntity *pEntity = CBaseEntity::Instance(pTrace->pHit);
+	if (!pEntity || !WorldPhysic || !WorldPhysic->IsRagdoll(pEntity) || !GET_MODEL_PTR(pEntity->edict()))
+		return FALSE;
+
+	int boneIndex = -1;
+	Vector localPosition, localNormal;
+	if (!WorldPhysic->BuildRagdollDecalAttachment(pEntity, pTrace->vecEndPos, pTrace->vecPlaneNormal,
+		pTrace->iHitgroup, boneIndex, localPosition, localNormal))
+		return FALSE;
+	if (boneIndex < 0 || boneIndex > 255)
+		return FALSE;
+
+	SetBits(flags, FDECAL_DONTSAVE);
+	MESSAGE_BEGIN(MSG_BROADCAST, gmsgRagdollDecal);
+		WRITE_SHORT(ENTINDEX(pEntity->edict()));
+		WRITE_SHORT(pEntity->pev->modelindex);
+		WRITE_BYTE(boneIndex);
+		WRITE_COORD(localPosition.x);
+		WRITE_COORD(localPosition.y);
+		WRITE_COORD(localPosition.z);
+		WRITE_COORD(localNormal.x * 1000.0f);
+		WRITE_COORD(localNormal.y * 1000.0f);
+		WRITE_COORD(localNormal.z * 1000.0f);
+		WRITE_STRING(name);
+		WRITE_BYTE(flags);
+	MESSAGE_END();
+	return TRUE;
+}
+
 BOOL UTIL_StudioDecalTrace(TraceResult *pTrace, const char *name, int flags)
 {
 	short entityIndex;
