@@ -1,0 +1,55 @@
+// Real mxWindow constructor/declarations with explicit Qt widget service adapter.
+#include <cassert>
+#include <iostream>
+#include <string>
+#include "mx/mxWindow.h"
+namespace Qt { enum { Dialog=3 }; }
+class QWidget {
+public:
+    QWidget *parent=nullptr;
+    explicit QWidget(QWidget *p=nullptr):parent(p) {}
+    virtual ~QWidget()=default;
+};
+class mxWindow_i:public QWidget {
+public:
+    QWidget *central=nullptr;
+    int flags=0;
+    mxWindow_i(QWidget *p,mxWindow*):QWidget(p) {}
+    ~mxWindow_i() override {delete central;}
+    void setWindowFlags(int value) {flags=value;}
+    void setCentralWidget(QWidget *value) {central=value;}
+    QWidget *centralWidget() {return central;}
+    void setParent(QWidget *value) {parent=value;}
+};
+class mxWidget_i {public: void *handle=nullptr; mxWindow *parent=nullptr;};
+mxWidget::mxWidget(mxWindow *p,int,int,int,int,const char*):d_this(new mxWidget_i) {d_this->parent=p;}
+mxWidget::~mxWidget() {delete d_this;}
+void mxWidget::setHandle(void *value) {d_this->handle=value;}
+void *mxWidget::getHandle() const {return d_this->handle;}
+void mxWidget::setParent(mxWindow *value) {d_this->parent=value;}
+mxWindow *mxWidget::getParent() const {return d_this->parent;}
+void mxWidget::setVisible(bool) {}
+void mxWidget::setLabel(const char*) {}
+void mxWidget::setBounds(int,int,int,int) {}
+void mxWidget::setType(int) {}
+mxWindow *d_mainWindow=nullptr;
+@PRODUCTION@
+mxWindow::~mxWindow() {delete d_this;}
+int mxWindow::handleEvent(mxEvent*) {return 0;}
+void mxWindow::redraw() {}
+int main(int argc,char **argv) {
+    assert(argc==2); std::string test=argv[1];
+    mxWindow owner(nullptr,0,0,640,540,"Viewer",mxWindow::Normal);
+    const int style=test=="normal-child" ? mxWindow::Normal :
+                    test=="modal-dialog" ? mxWindow::ModalDialog : mxWindow::Dialog;
+    mxWindow editor(&owner,40,40,730,705,"Editor",style);
+    auto *record=static_cast<mxWindow_i*>(editor.getHandle());
+    auto *ownerRecord=static_cast<mxWindow_i*>(owner.getHandle());
+    assert(editor.getParent()==&owner);
+    if(style==mxWindow::Normal) {
+        assert(record->parent==ownerRecord->centralWidget()); assert(record->flags==0);
+    } else {
+        assert(record->flags==Qt::Dialog); assert(record->parent==ownerRecord);
+    }
+    std::cout<<"dialog remains owned window; normal panel stays embedded\n";
+}

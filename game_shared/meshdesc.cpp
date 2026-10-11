@@ -85,7 +85,7 @@ void CMeshDesc::SetGeometryType(clipfile::GeometryType geomType)
 	m_iGeometryType = geomType;
 }
 
-bool CMeshDesc::Matches(const std::string &name, int32_t body, int32_t skin, clipfile::GeometryType geomType)
+bool CMeshDesc::Matches(const std::string &name, int32_t body, int32_t skin, clipfile::GeometryType geomType, uint64_t fingerprint)
 {
 	if (!m_debugName || name.compare(m_debugName) != 0)
 		return false;
@@ -93,7 +93,7 @@ bool CMeshDesc::Matches(const std::string &name, int32_t body, int32_t skin, cli
 		return false;
 	if (m_iSkinNumber != skin)
 		return false;
-	if (m_iGeometryType != geomType)
+	if (m_iGeometryType != geomType || m_sourceFingerprint != fingerprint)
 		return false;
 
 	return true;
@@ -869,7 +869,7 @@ CMeshDesc::LoadStatus CMeshDesc::StudioLoadCache()
 	for (size_t i = 0; i < entriesCount; i++)
 	{
 		const clipfile::CacheEntry &entry = entriesList[i];
-		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType) {
+		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType && entry.sourceFingerprint == m_sourceFingerprint) {
 			desiredEntry = &entry;
 			break;
 		}
@@ -1042,6 +1042,7 @@ bool CMeshDesc::StudioSaveCache()
 	currentEntry.body = m_iBodyNumber;
 	currentEntry.skin = m_iSkinNumber;
 	currentEntry.geometryType = m_iGeometryType;
+    currentEntry.sourceFingerprint = m_sourceFingerprint;
 	currentEntry.dataOffset = cacheFile.Tell();
 	
 	// write lumps 
@@ -1111,6 +1112,7 @@ bool CMeshDesc :: StudioCreateCache()
 	table.entries[0].body = m_iBodyNumber;
 	table.entries[0].skin = m_iSkinNumber;
 	table.entries[0].geometryType = m_iGeometryType;
+    table.entries[0].sourceFingerprint = m_sourceFingerprint;
 	table.entries[0].dataOffset = file.Tell();
 	file.Write(&data, sizeof(data));
 
@@ -1640,6 +1642,9 @@ bool CMeshDesc::PresentInCache() const
 
 	// read header
 	cacheFile.Read(&hdr, sizeof(hdr));
+    // Never trust stale v2 .clip offsets/layout or the old MDL-only CRC.
+    if (hdr.id != clipfile::kFileMagic || hdr.version != clipfile::kFormatVersion ||
+        hdr.modelCRC != m_pModel->modelCRC) return false;
 
 	// read cache entries table
 	uint32_t entriesCount;
@@ -1658,7 +1663,7 @@ bool CMeshDesc::PresentInCache() const
 	for (size_t i = 0; i < entriesCount; i++)
 	{
 		const clipfile::CacheEntry &entry = entriesList[i];
-		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType) {
+		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType && entry.sourceFingerprint == m_sourceFingerprint) {
 			return true;
 		}
 	}

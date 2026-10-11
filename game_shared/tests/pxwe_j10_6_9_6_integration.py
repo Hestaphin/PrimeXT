@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Compile real step-7/8 controller methods using explicit Win32 OS adapters.
+
+This exercises production C++ editing, notifications, playback and previews.
+It does not certify native controls, GDI painting, sound output or SDK linking.
+"""
+from pathlib import Path
+import argparse
+import os
+import subprocess
+import tempfile
+from pose_j10_6_2_integration import function
+
+ROOT = Path(__file__).resolve().parents[2]
+EDITOR = ROOT/'tools/weapon_editor'
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ubsan', action='store_true')
+    args = parser.parse_args()
+    source = (EDITOR/'pxwe_win32.cpp').read_text()
+    signatures = ['HWND ControlWindow(', 'void Move(', 'int ActiveTab() const', 'void Layout()', 'void ShowPage()',
+        'void RefreshProperties()', 'void RefreshSelection()', 'void EditProperty(', 'void ActivateProperty(',
+        'void BrowseProperty()', 'void CommitEditor()', 'void NewAsset(', 'LRESULT Notify(',
+        'void RefreshCompatibility()', 'void CompatibilityCommand(', 'void RefreshFlight()',
+        'void RefreshResources()', 'void RefreshVariants()', 'std::string SelectedVariant()',
+        'void VariantCommand(', 'void EditCoefficient()', 'void EditOverrides()', 'void PlayWave(',
+        'void PlaySelectedSound()', 'void LoadSpritePath(', 'void LoadSprite()', 'void Tick()',
+        'void LoadModel()', 'void LoadModelPath(', 'COLORREF CurveColor(', 'LRESULT CurveCustomDraw(', 'void Command(']
+    methods = '\n\n'.join(function(source, s) for s in signatures)
+    fixture = (ROOT/'game_shared/tests/fixtures/j10_6_9_6/pxwe_ui_adapter.cpp.in').read_text()
+    unit = fixture.replace('@PRODUCTION@', methods).replace('@ENUM@', function(source, 'enum Control')+';')
+    with tempfile.TemporaryDirectory(prefix='pxwe_step78_', dir=ROOT) as directory:
+        directory = Path(directory); cpp = directory/'ui.cpp'; binary = directory/'ui'
+        environment = os.environ.copy(); environment['TMPDIR'] = str(directory)
+        cpp.write_text(unit)
+        command = [os.environ.get('CXX', 'c++'), '-std=c++17', '-O0', '-g', '-Wall', '-Wextra', '-Wpedantic', '-Werror',
+            '-I'+str(EDITOR), '-I'+str(EDITOR/'tests'), '-I'+str(ROOT/'game_shared')]
+        if args.ubsan: command += ['-fsanitize=undefined', '-fno-sanitize-recover=all']
+        command += [str(cpp), str(EDITOR/'pxwe_preview.cpp'), str(EDITOR/'pxwe_properties.cpp'),
+            str(EDITOR/'pxwe_project.cpp'), str(ROOT/'game_shared/modular_weapons.cpp'),
+            str(ROOT/'game_shared/ballistic_flight.cpp'), '-o', str(binary)]
+        build = subprocess.run(command, capture_output=True, text=True, env=environment)
+        if build.returncode: raise RuntimeError((build.stdout+build.stderr)[-18000:])
+        run = subprocess.run([str(binary)], capture_output=True, text=True, env=environment)
+        print(run.stdout+run.stderr, end='', flush=True)
+        return run.returncode
+
+if __name__ == '__main__': raise SystemExit(main())

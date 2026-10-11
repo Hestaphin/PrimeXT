@@ -1,0 +1,149 @@
+#include "ballistic_flight.h"
+#include "ballistic_path_cache.h"
+#include "ballistic_timing.h"
+#include "modular_weapons.h"
+#include "cartridge_damage.h"
+#include "modular_damage_scope.h"
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <functional>
+#include <iostream>
+#include <limits>
+#include <vector>
+#include <map>
+#include <fstream>
+#include <sstream>
+#include <cstring>
+using string_t=int;
+std::map<int,std::string> strings{{0,""}};
+int ALLOC_STRING(const char* text){int n=strings.size();strings[n]=text;return n;}
+const char* STRING(int n){return strings.at(n).c_str();}
+struct CSave{};struct CRestore{};
+#define DECLARE_CLASS(a,b) using BaseClass=b
+#define DECLARE_DATADESC()
+@DISK_VERSION@
+
+struct Vector {
+    float x=0,y=0,z=0;
+    Vector()=default;Vector(float a,float b,float c):x(a),y(b),z(c){}
+    Vector operator-(Vector b)const{return {x-b.x,y-b.y,z-b.z};}
+    Vector operator+(Vector b)const{return {x+b.x,y+b.y,z+b.z};}
+    Vector operator*(float s)const{return {x*s,y*s,z*s};}
+    Vector Normalize()const{float l=std::sqrt(x*x+y*y+z*z);return l>0?*this*(1/l):Vector();}
+};
+struct entvars_t {int solid=0,movetype=0,effects=0;float nextthink=0;};
+struct TraceResult {float flFraction=1;Vector vecEndPos;struct CBaseEntity* pHit=nullptr;};
+struct CBaseEntity {
+    entvars_t data;entvars_t* pev=&data;float damage=0;bool removed=false;
+    virtual ~CBaseEntity()=default;virtual void Spawn(){};virtual int Save(CSave&){return 1;}virtual int Restore(CRestore&){return 1;}
+    static CBaseEntity* Instance(CBaseEntity* e){return e;}
+    CBaseEntity* edict(){return this;}std::function<void()> onDamage;
+    void TraceAttack(entvars_t*,float value,Vector,TraceResult*,int){damage=value;if(onDamage)onDamage();}
+};
+using EHANDLE=CBaseEntity*;
+void UTIL_Remove(CBaseEntity* entity){entity->removed=true;}
+struct Globals{float time=10;};Globals globals;Globals* gpGlobals=&globals;
+constexpr double kUnitsPerMeter=39.37007874015748,kCurveStep=.01,kSweepStep=.02,kMaxLifetime=10;
+constexpr int kMaxActive=256,kCurveSamples=1002,kMaxPenetrations=4,SOLID_NOT=0,MOVETYPE_NONE=0,EF_NODRAW=1,DMG_BULLET=2;
+float gravityScale=0,airDensity=0;
+float CVAR_GET_FLOAT(const char* n){return std::string(n)=="sv_ballistics_gravity_scale"?gravityScale:
+    std::string(n)=="sv_ballistics_air_density"?airDensity:0;}
+#define ALERT(...) ((void)0)
+bool UTIL_IsValidEntity(CBaseEntity* e){return e!=nullptr;}
+void ResolveBulletImpactEffects(const TraceResult* in,Vector,Vector,TraceResult* out){*out=*in;}
+struct {int type=0;} gMultiDamage;
+void ClearMultiDamage(){}void ApplyMultiDamage(entvars_t*,entvars_t*){}
+void ApplyPhysicsBulletImpulse(const TraceResult*,int,Vector,Vector,Vector,float){}
+void TEXTURETYPE_PlaySound(const TraceResult*,Vector,Vector,int){}void DecalGunshot(const TraceResult*,int,Vector,Vector){}
+struct Shot;
+struct PenetrationCandidate {};
+bool PreparePenetration(Shot&,const TraceResult&,int,const Vector&,const Vector&,
+    const modular::BallisticState&,PenetrationCandidate&){return false;}
+bool BeginPenetration(Shot&,const modular::BallisticState&,const Vector&,const PenetrationCandidate&){return false;}
+void Tracer(Shot&,const Vector&){}
+CBaseEntity* traceTarget=nullptr;int traceCalls=0;
+int BulletTrace(Vector from,Vector to,CBaseEntity*,TraceResult& out){++traceCalls;
+    out.flFraction=traceTarget?0.5f:1;out.pHit=traceTarget;out.vecEndPos=from+(to-from)*out.flFraction;return -1;}
+// Declare the manager after inserting Shot, before inserting its methods.
+@SHOT_DECLARATION@
+@DISK_DECLARATION@
+@MANAGER_DECLARATION@
+CModularBallisticManager* g_manager=nullptr;
+@PRODUCTION@
+
+bool near(double a,double b){return std::fabs(a-b)<2e-4;}
+int main(int argc,char** argv){
+    assert(argc==2);
+    modular::Weapon weapon;weapon.range=float(1000*kUnitsPerMeter);
+    modular::Cartridge cartridge;cartridge.massGrams=8;cartridge.diameterMm=9;cartridge.damage=18;cartridge.dragCoefficient=0;
+    CBaseEntity owner,target;
+    CModularBallisticManager manager;globals.time=10;manager.Spawn();
+    assert(manager.m_shots.capacity()>=kMaxActive&&manager.pev->nextthink==0);
+    assert(manager.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+    globals.time=10.02f;assert(manager.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));manager.Update();
+    assert(near(manager.m_shots[0].state.seconds,.02)&&manager.m_shots[1].state.seconds==0);
+    for(int i=manager.Count();i<256;++i)assert(manager.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+    assert(!manager.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+    for(int frame=1;frame<=100;++frame){globals.time=10.02f+frame*.01f;manager.Update();assert(manager.Count()==256);}
+    assert(near(manager.m_shots[1].state.seconds,1)&&near(manager.m_shots[1].state.position.x,100));
+    globals.time=11.52f;double before=manager.m_shots[1].state.seconds;manager.Update();
+    assert(near(manager.m_shots[1].state.seconds-before,.1));manager.Update();assert(near(manager.m_shots[1].state.seconds-before,.2));
+    std::cout<<"PASS production manager: 256 shots / 100 frames, range/birth clocks, cap, retained catch-up time\n";
+
+    CModularBallisticManager reentrant;globals.time=20;reentrant.Spawn();
+    assert(reentrant.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+    Shot* address=&reentrant.m_shots[0];const double energy=address->originalEnergy;
+    int damageCalls=0;target.onDamage=[&]{++damageCalls;traceTarget=nullptr;
+        for(int i=1;i<256;++i)assert(reentrant.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));
+        assert(&reentrant.m_shots[0]==address&&address->originalEnergy==energy);
+        assert(!reentrant.Add(&owner,weapon,cartridge,{0,0,0},{1,0,0},100));};
+    traceTarget=&target;globals.time=20.02f;reentrant.Update();assert(damageCalls==1&&reentrant.Count()==255);
+    for(const Shot& shot:reentrant.m_shots)assert(shot.state.seconds==0&&near(shot.lastSimulatedTime,globals.time));
+    globals.time=20.03f;reentrant.Update();for(const Shot& shot:reentrant.m_shots)assert(near(shot.state.seconds,.01));
+    reentrant.m_shots.front().owner=nullptr;reentrant.Update();assert(reentrant.Count()==254);
+    std::cout<<"PASS production manager: damage callback creates 255 shots, stable live reference, birth timing, owner cleanup\n";
+    auto& registry=modular::SharedRegistry();
+    assert(registry.Load([&](const std::string& path,std::string& text){
+        std::ifstream file(std::string(argv[1])+"/"+path);if(!file)return false;
+        std::ostringstream buffer;buffer<<file.rdbuf();text=buffer.str();
+        if(path.find(".weapon")!=std::string::npos)text+="\nasset.kill.role = kill_sprite\nasset.kill.path = sprites/probe.spr\nasset.kill.when = default\n";
+        return true;}));
+    const auto& modern=*registry.FindWeapon("test_pistol");
+    const auto& ammo=*registry.FindCartridge("test_fmj");
+    CModularBallisticManager saved;globals.time=30;saved.Spawn();
+    const modular::AssetSelection selection{ammo.id,modern.primary.mode,0xffffffffu,modular::AssetAction::Primary};
+    assert(saved.Add(&owner,modern,ammo,{0,0,0},{1,0,0},360,&selection));
+    auto degraded=saved.m_shots[0].state;degraded.velocity.x*=.1;
+    TraceResult hit;hit.pHit=&target;
+    target.onDamage=[&]{assert(g_modularDamageSource&&g_modularDamageSource->weapon==&modern);
+        assert(g_modularDamageSource->killSprite=="sprites/probe.spr");};
+    Impact(saved.m_shots[0],hit,-1,{0,0,0},{1,0,0},degraded);
+    const float muzzle=float(modular::MuzzleDamage(ammo,360));
+    assert(std::abs(target.damage-muzzle*.01f)<.0001&&target.damage<muzzle*.05f&&!g_modularDamageSource);
+    CSave write;CRestore read;assert(saved.Save(write));
+    assert(saved.m_savedRecordVersion==3&&saved.m_savedDamageCoefficients[0]==ammo.damageCoefficient);
+    saved.m_shots.clear();globals.time=35;assert(saved.Restore(read)&&saved.Count()==1);
+    assert(saved.m_shots[0].damageCoefficient==ammo.damageCoefficient&&saved.m_shots[0].killSprite=="sprites/probe.spr");
+    assert(saved.m_shots[0].lastSimulatedTime==35);
+    // A version-2 save retains the old record layout and legacy damage semantics.
+    saved.m_savedRecordVersion=2;saved.m_savedDamageCoefficients[0]=std::numeric_limits<float>::quiet_NaN();
+    ShotDisk old;std::memcpy(&old,saved.m_savedRecords,sizeof(old));old.damage=20;
+    std::memcpy(saved.m_savedRecords,&old,sizeof(old));
+    assert(saved.Restore(read)&&saved.Count()==1&&saved.m_shots[0].damageCoefficient==0);
+    target.onDamage=nullptr;Impact(saved.m_shots[0],hit,-1,{0,0,0},{1,0,0},degraded);
+    assert(std::abs(target.damage-1)<.0001);
+    assert(saved.Save(write)&&saved.m_savedRecordVersion==3);
+    assert(saved.Restore(read)&&saved.Count()==1&&saved.m_shots[0].damageCoefficient==0);
+    // Bad new snapshots never inject NaN coefficients or undeclared kill paths.
+    saved.m_savedDamageCoefficients[0]=std::numeric_limits<float>::quiet_NaN();
+    assert(saved.Restore(read)&&saved.Count()==0);
+    saved.m_savedDamageCoefficients[0]=ammo.damageCoefficient;
+    old.damage=muzzle;std::memcpy(saved.m_savedRecords,&old,sizeof(old));
+    saved.m_savedWeaponIds[0]=ALLOC_STRING(modern.id.c_str());
+    saved.m_savedKillSprites[0]=ALLOC_STRING("sprites/unregistered.spr");
+    assert(saved.Restore(read)&&saved.Count()==0);
+    saved.m_savedRecordVersion=99;assert(saved.Restore(read)&&saved.removed);
+    std::cout<<"PASS production impact/save/restore: energy density below five-percent floor, pinned attribution, version-2 stride/behavior, version-3 coefficients/icons, corrupt snapshot rejection\n";
+
+}
