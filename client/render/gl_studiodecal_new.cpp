@@ -1349,6 +1349,39 @@ StudioDecalShoot
 NOTE: name is decalgroup
 ====================
 */
+void CStudioModelRenderer :: StudioRagdollDecalShoot( int boneIndex, const Vector &localPosition, const Vector &localNormal, const char *name, cl_entity_t *ent, int flags )
+{
+	if( !g_fRenderInitialized || !ent || !ent->model || ent->model->type != mod_studio || !name || !name[0] ) return;
+	if( !StudioSetEntity( ent ) || !m_pModelInstance || !m_pModelInstance->m_bRagdollPose ) return;
+	if( boneIndex < 0 || boneIndex >= m_pStudioHeader->numbones || boneIndex >= MAXSTUDIOBONES ) return;
+	const int rootBone = m_pModelInstance->m_iRagdollRootBone;
+	if( rootBone < 0 || rootBone >= m_pStudioHeader->numbones || !m_pModelInstance->m_ragdollBoneMask[boneIndex] ) return;
+
+	const float now = GET_CLIENT_TIME();
+	float alpha = 1.0f;
+	if( m_pModelInstance->m_flRagdollInterpDuration > 1e-6f )
+		alpha = bound( 0.0f, ( now - m_pModelInstance->m_flRagdollInterpStartTime ) / m_pModelInstance->m_flRagdollInterpDuration, 1.0f );
+	Vector rootPos = m_pModelInstance->m_ragdollStartRootOrigin * ( 1.0f - alpha ) + m_pModelInstance->m_ragdollTargetRootOrigin * alpha;
+	Vector4D rootQ;
+	QuaternionSlerp( m_pModelInstance->m_ragdollStartRootQuat, m_pModelInstance->m_ragdollTargetRootQuat, alpha, rootQ );
+	matrix3x4 boneWorld( rootPos, rootQ );
+	if( boneIndex != rootBone )
+	{
+		Vector relPos = m_pModelInstance->m_ragdollStartRelOrigin[boneIndex] * ( 1.0f - alpha ) + m_pModelInstance->m_ragdollTargetRelOrigin[boneIndex] * alpha;
+		Vector4D relQ;
+		QuaternionSlerp( m_pModelInstance->m_ragdollStartRelQuat[boneIndex], m_pModelInstance->m_ragdollTargetRelQuat[boneIndex], alpha, relQ );
+		boneWorld = boneWorld.ConcatTransforms( matrix3x4( relPos, relQ ));
+	}
+	const Vector worldPosition = boneWorld.VectorTransform( localPosition );
+	Vector worldNormal = boneWorld.VectorRotate( localNormal );
+	if( worldNormal.NormalizeLength() <= 1e-6f ) return;
+	modelstate_t state;
+	EntityToModelState( &state, ent );
+	m_fRagdollDecalWorldSpace = true;
+	StudioDecalShoot( worldNormal, worldPosition, name, ent, flags | FDECAL_LOCAL_SPACE | FDECAL_DONTSAVE, &state );
+	m_fRagdollDecalWorldSpace = false;
+}
+
 void CStudioModelRenderer :: StudioDecalShoot( const Vector &vecNormal, const Vector &vecEnd, const char *name, cl_entity_t *ent, int flags, modelstate_t *state )
 {
 	DecalBuildInfo_t buildInfo;
@@ -1385,21 +1418,27 @@ void CStudioModelRenderer :: StudioDecalShoot( const Vector &vecNormal, const Ve
 
 	if( FBitSet( flags, FDECAL_LOCAL_SPACE ))
 	{
-		if( FBitSet( ent->curstate.iuser1, CF_STATIC_ENTITY ))
+		if( !m_fRagdollDecalWorldSpace )
 		{
-			if( ent->curstate.startpos != g_vecZero )
+			if( FBitSet( ent->curstate.iuser1, CF_STATIC_ENTITY ))
 			{
-				flLocalScale = ent->curstate.startpos.Average();
-				flLocalScale = 1.0f / flLocalScale, 1.0f;
+				if( ent->curstate.startpos != g_vecZero )
+				{
+					flLocalScale = ent->curstate.startpos.Average();
+					flLocalScale = 1.0f / flLocalScale, 1.0f;
+				}
 			}
+			m_pModelInstance->bonecache.frame = -999.0f;
+			ent->curstate.startpos = g_vecZero;
+			ent->origin = g_vecZero;
+			ent->angles = g_vecZero;
 		}
-
-		// invalidate bonecache
-		m_pModelInstance->bonecache.frame = -999.0f;
-		// make sure what model is in local space
-		ent->curstate.startpos = g_vecZero;
-		ent->origin = g_vecZero;
-		ent->angles = g_vecZero;
+		else
+		{
+			// Bone-space ragdoll decals are reconstructed in world space. Keep the
+			// entity and physics-driven bone transforms intact while projecting.
+			m_pModelInstance->bonecache.frame = -999.0f;
+		}
 	}
 	else
 	{

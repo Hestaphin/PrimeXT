@@ -1,0 +1,10 @@
+version = 2
+id = j6_357_fmj
+chamber = 357mag
+projectile = fmj
+mass_grams = 10.24
+diameter_mm = 9.07
+drag_coefficient = 0.28
+reference_velocity_mps = 430
+projectile_count = 1
+damage = 45

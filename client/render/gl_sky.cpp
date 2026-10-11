@@ -331,7 +331,7 @@ void R_DrawSkyBox()
 	float	fogDenstity = tr.fogDensity;
 	word	hSkyShader = 0;
 
-	if (!FBitSet( RI->view.flags, RF_SKYVISIBLE ) || tr.ignore_2d_skybox)
+	if (!FBitSet( RI->view.flags, RF_SKYVISIBLE ) || RI->skyPortalRendered)
 		return;
 
 	GL_DEBUG_SCOPE();
@@ -360,7 +360,9 @@ void R_DrawSkyBox()
 		if( RI->view.skyMins[0][i] >= RI->view.skyMaxs[0][i] || RI->view.skyMins[1][i] >= RI->view.skyMaxs[1][i] )
 			continue;
 
-		GL_DrawSkySide( hSkyShader, i );
+		// A missing/unloaded sky side must not bind a stale engine handle.
+		if (tr.skyboxTextures[r_skyTexOrder[i]].Initialized())
+			GL_DrawSkySide( hSkyShader, i );
 	}
 
 	GL_ClipPlane( true );
@@ -371,15 +373,17 @@ void R_DrawSkyPortal(cl_entity_t *skyPortal)
 {
 	ZoneScoped;
 
-	ref_viewpass_t rvp;
+	ref_viewpass_t rvp{};
 	const float skyFov = skyPortal->curstate.fuser2;
 	const float skyScale = skyPortal->curstate.scale;
 
 	GL_DEBUG_SCOPE();
-	R_PushRefState();
-
+	// Push resets the child's params. Capture this view's pass flags first,
+	// so reflection/cubemap rules also apply while drawing its sky.
 	rvp.flags = RI->params | RP_SKYPORTALVIEW;
 	ClearBits(rvp.flags, RP_CLIPPLANE);
+	R_PushRefState();
+
 	rvp.viewentity = 0;
 	rvp.vieworigin = RI->view.origin;
 	rvp.viewangles = RI->view.angles + skyPortal->curstate.angles; // angle offset
@@ -402,7 +406,7 @@ void R_DrawSkyPortal(cl_entity_t *skyPortal)
 	if (skyFov)
 	{
 		rvp.fov_x = skyFov;
-		rvp.fov_y = V_CalcFov(RI->view.fov_x, RI->view.port.GetWidth(), RI->view.port.GetHeight());
+		rvp.fov_y = V_CalcFov(rvp.fov_x, RI->view.port.GetWidth(), RI->view.port.GetHeight());
 	}
 	else {
 		rvp.fov_x = RI->view.fov_x;
@@ -416,9 +420,9 @@ void R_DrawSkyPortal(cl_entity_t *skyPortal)
 
 void R_CheckSkyPortal(cl_entity_t *skyPortal)
 {
-	tr.ignore_2d_skybox = false;
+	RI->skyPortalRendered = false;
 
-	if (tr.sky_camera == NULL)
+	if (skyPortal == NULL)
 		return;
 
 	if (!CVAR_TO_BOOL(r_allow_3dsky))
@@ -442,6 +446,6 @@ void R_CheckSkyPortal(cl_entity_t *skyPortal)
 	if (FBitSet(RI->view.flags, RF_SKYVISIBLE))
 	{
 		R_DrawSkyPortal(skyPortal);
-		tr.ignore_2d_skybox = true;
+		RI->skyPortalRendered = true;
 	}
 }

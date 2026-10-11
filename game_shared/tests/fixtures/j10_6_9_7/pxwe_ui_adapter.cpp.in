@@ -1,0 +1,245 @@
+// Real Application methods, with Windows controls/dialogs adapted explicitly.
+// Does not certify Windows painting, SDK linking or native message ordering.
+#include "pxwe_properties.h"
+#include "pxwe_preview.h"
+#include "pxwe_resource.h"
+#include "cartridge_damage.h"
+#include "native_preview_fixtures.h"
+#include <cmath>
+#include <iomanip>
+#include <sstream>
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cwchar>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+
+using DWORD=unsigned long; using WPARAM=uintptr_t; using LPARAM=intptr_t; using LRESULT=intptr_t;
+using INT_PTR=intptr_t; using HMENU=void*;
+using ULONGLONG=uint64_t; using LPCWSTR=const wchar_t*; using COLORREF=uint32_t;
+constexpr int FALSE=0,TRUE=1,SW_SHOW=1,SW_HIDE=0,LVIS_SELECTED=2,LVIS_FOCUSED=1,LVNI_SELECTED=2,LVIF_STATE=8;
+constexpr DWORD WS_CHILD=1,WS_VISIBLE=2,WS_CLIPSIBLINGS=4,RDW_INVALIDATE=1,RDW_ERASE=2,RDW_ALLCHILDREN=4;
+constexpr int CB_RESETCONTENT=1,CB_ADDSTRING=2,CB_SETEDITSEL=3,WM_SETREDRAW=4,CB_GETCURSEL=5,CB_SETCURSEL=6,VK_RETURN=13,WM_CLOSE=7;
+constexpr unsigned TVN_SELCHANGINGW=1,TVN_SELCHANGEDW=2,LVN_ITEMCHANGING=3,LVN_ITEMCHANGED=4,NM_DBLCLK=5,TCN_SELCHANGING=6,TCN_SELCHANGE=7,LVN_KEYDOWN=8,NM_CUSTOMDRAW=9;
+constexpr int MB_OK=0,MB_ICONERROR=1,MB_YESNO=2,MB_ICONQUESTION=4,IDYES=6,IDOK=1;
+constexpr unsigned SND_MEMORY=1,SND_ASYNC=2,SND_NODEFAULT=4;
+constexpr unsigned CDDS_PREPAINT=1,CDDS_ITEMPREPAINT=2,CDDS_SUBITEM=4,CDRF_NOTIFYITEMDRAW=8,CDRF_NOTIFYSUBITEMDRAW=16,CDRF_DODEFAULT=0;
+#define RGB(r,g,b) (uint32_t(r)|(uint32_t(g)<<8)|(uint32_t(b)<<16))
+#define GetRValue(c) ((c)&255)
+#define GetGValue(c) (((c)>>8)&255)
+#define GetBValue(c) (((c)>>16)&255)
+#define MAKEINTRESOURCEW(i) (i)
+constexpr DWORD OFN_FILEMUSTEXIST=1,OFN_PATHMUSTEXIST=2,OFN_NOCHANGEDIR=4,OFN_EXPLORER=8;
+#define MAKELPARAM(a,b) (LPARAM((unsigned short)(a)) | (LPARAM((unsigned short)(b)) << 16))
+struct RECT { int left=0,top=0,right=1180,bottom=780; };
+struct Node { Node* parent=nullptr; LPARAM param=0; bool expanded=false; std::wstring label; };
+using HTREEITEM=Node*;
+struct Fake { std::vector<std::unique_ptr<Node>> nodes; HTREEITEM treeSelection=nullptr; DWORD style=0; bool enabled=true,visible=true,redraw=true; int invalidates=0,select=-1,selectAll=0; RECT rect; std::wstring text; std::vector<std::wstring> choices;std::map<int,bool> checks; std::vector<std::vector<std::wstring>> cells; };
+using HWND=Fake*;
+std::vector<std::unique_ptr<Fake>> windows;
+HWND focus=nullptr; void* gInstance=nullptr;
+HWND CreateWindowExW(int,const wchar_t*,const wchar_t* text,DWORD style,int,int,int,int,HWND,HMENU,void*,void*) {
+    windows.push_back(std::make_unique<Fake>()); auto w=windows.back().get(); w->style=style; w->text=text; return w;
+}
+LRESULT SendMessageW(HWND w,int msg,WPARAM parameter,LPARAM data) {
+    if(msg==CB_RESETCONTENT)w->choices.clear();
+    if(msg==CB_ADDSTRING)w->choices.push_back(reinterpret_cast<const wchar_t*>(data));
+    if(msg==CB_SETEDITSEL)++w->selectAll;
+    if(msg==CB_GETCURSEL)return w->select;
+    if(msg==CB_SETCURSEL)w->select=static_cast<int>(parameter);
+    if(msg==WM_SETREDRAW)w->redraw=parameter!=0;
+    return 0;
+}
+void EnableWindow(HWND w,int enabled){w->enabled=enabled!=0;}
+void SetWindowTextW(HWND w,const wchar_t* text){w->text=text;}
+void SetFocus(HWND w){focus=w;}
+std::wstring Text(HWND w){return w->text;}
+std::wstring Wide(const std::string& text){return {text.begin(),text.end()};}
+std::string Utf8(const std::wstring& text){return {text.begin(),text.end()};}
+void ShowWindow(HWND w,int show){w->visible=show==SW_SHOW;}
+void RedrawWindow(HWND w,void*,void*,DWORD){++w->invalidates;}
+void MoveWindow(HWND w,int x,int y,int width,int height,int){w->rect={x,y,x+width,y+height};}
+void GetClientRect(HWND w,RECT* rect){*rect={0,0,w->rect.right-w->rect.left,w->rect.bottom-w->rect.top};}
+int TabCtrl_GetCurSel(HWND w){return w->select;}
+void TabCtrl_AdjustRect(HWND,int,RECT* rect){rect->left+=4;rect->top+=28;rect->right-=4;rect->bottom-=4;}
+void ListView_DeleteAllItems(HWND w){w->cells.clear();w->checks.clear();w->select=-1;}
+void ListView_SetColumnWidth(HWND,int,int){}
+int ListView_GetNextItem(HWND w,int,int){return w->select;}
+void ListView_SetItemState(HWND w,int row,int,int){w->select=row;}
+void ListView_EnsureVisible(HWND,int,int){}
+void InvalidateRect(HWND w,void*,int){++w->invalidates;}
+int ListView_GetCheckState(HWND w,int row){return w->checks[row];}
+void ListView_SetCheckState(HWND w,int row,int checked){w->checks[row]=checked!=0;}
+HWND GetFocus(){return focus;}
+std::wstring Number(double value,int precision=2){std::wostringstream o;o<<std::fixed<<std::setprecision(precision)<<value;return o.str();}
+ULONGLONG now=0;ULONGLONG GetTickCount64(){return now;}
+int soundPlays=0;bool PlaySoundW(LPCWSTR data,void*,unsigned flags){if(data){++soundPlays; (void)flags;}return true;}
+void Cell(HWND w,int row,int col,const std::wstring& text){if(int(w->cells.size())<=row)w->cells.resize(row+1);if(int(w->cells[row].size())<=col)w->cells[row].resize(col+1);w->cells[row][col]=text;}
+struct NMHDR{HWND hwndFrom=nullptr;uintptr_t idFrom=0;unsigned code=0;};
+struct NMLISTVIEW{NMHDR hdr;int iItem=-1;unsigned uChanged=0,uNewState=0,uOldState=0;};
+struct NMCUSTOMDRAW{NMHDR hdr;unsigned dwDrawStage=0;uintptr_t dwItemSpec=0;};struct NMLVCUSTOMDRAW{NMCUSTOMDRAW nmcd;int iSubItem=0;COLORREF clrText=0;};
+struct NMITEMACTIVATE{NMHDR hdr;int iItem=-1,iSubItem=0;};
+struct NMTVKEYDOWN{NMHDR hdr;unsigned short wVKey=0;};
+struct NMLVKEYDOWN{NMHDR hdr;unsigned short wVKey=0;};
+constexpr unsigned TVIF_TEXT=1,TVIF_PARAM=2,TVIS_EXPANDED=32,TVE_EXPAND=2,TVHT_ONITEM=1;
+HTREEITEM const TVI_ROOT=nullptr,TVI_LAST=nullptr;
+struct TVITEMW { unsigned mask=0; HTREEITEM hItem=nullptr; wchar_t* pszText=nullptr; LPARAM lParam=-1; };
+struct NMTREEVIEWW {NMHDR hdr; TVITEMW itemNew;};
+struct TVINSERTSTRUCTW {HTREEITEM hParent=nullptr,hInsertAfter=nullptr; TVITEMW item;};
+struct POINT {int x=0,y=0;};struct TVHITTESTINFO {POINT pt;unsigned flags=0;};
+HTREEITEM hitItem=nullptr;
+void TreeView_DeleteAllItems(HWND w){w->nodes.clear();w->treeSelection=nullptr;}
+HTREEITEM TreeView_InsertItem(HWND w,TVINSERTSTRUCTW* in){auto n=std::make_unique<Node>();n->parent=in->hParent;n->param=in->item.lParam;n->label=in->item.pszText;const auto p=n.get();w->nodes.push_back(std::move(n));return p;}
+unsigned TreeView_GetItemState(HWND,HTREEITEM n,unsigned){return n->expanded?TVIS_EXPANDED:0;}
+void TreeView_Expand(HWND w,HTREEITEM n,unsigned){for(const auto& child:w->nodes)if(child->parent==n){n->expanded=true;return;}}
+void TreeView_SelectItem(HWND w,HTREEITEM n){w->treeSelection=n;}
+void TreeView_EnsureVisible(HWND,HTREEITEM n){for(n=n->parent;n;n=n->parent)n->expanded=true;}
+HTREEITEM TreeView_GetSelection(HWND w){return w->treeSelection;}
+void TreeView_GetItemRect(HWND,HTREEITEM,RECT* r,int){*r={5,5,100,25};}
+void ClientToScreen(HWND,POINT*){}void ScreenToClient(HWND,POINT*){}
+HTREEITEM TreeView_HitTest(HWND,TVHITTESTINFO* h){h->flags=hitItem?TVHT_ONITEM:0;return hitItem;}
+int TreeView_GetItem(HWND,TVITEMW* i){if(!i->hItem)return 0;i->lParam=i->hItem->param;return 1;}
+constexpr unsigned MF_STRING=1,MF_SEPARATOR=2,TPM_RETURNCMD=1,TPM_RIGHTBUTTON=2;
+struct FakeMenu {std::vector<int> commands;};std::vector<int> shownCommands;int popupCommand=0,destroyedMenus=0;
+HMENU CreatePopupMenu(){return new FakeMenu;}
+void AppendMenuW(HMENU m,unsigned,int command,const wchar_t*){if(command)static_cast<FakeMenu*>(m)->commands.push_back(command);}
+int TrackPopupMenu(HMENU m,unsigned,int,int,int,HWND,void*){shownCommands=static_cast<FakeMenu*>(m)->commands;return popupCommand;}
+void DestroyMenu(HMENU m){delete static_cast<FakeMenu*>(m);++destroyedMenus;}
+
+struct Input{std::wstring title,prompt,value;};
+std::vector<std::wstring> inputAnswers;int errors=0;
+bool Ask(HWND,Input& input){if(inputAnswers.empty())return false;input.value=inputAnswers.front();inputAnswers.erase(inputAnswers.begin());return true;}
+void Report(HWND,const std::string&){}
+int messageAnswer=0;int MessageBoxW(HWND,const wchar_t*,const wchar_t*,int){++errors;return messageAnswer;}
+struct OPENFILENAMEW{DWORD lStructSize=0;HWND hwndOwner=nullptr;const wchar_t* lpstrFilter=nullptr;wchar_t* lpstrFile=nullptr;DWORD nMaxFile=0;const wchar_t* lpstrInitialDir=nullptr;const wchar_t* lpstrTitle=nullptr;DWORD Flags=0;};
+pxwe::fs::path dialogFile;DWORD dialogError=0,dialogFlags=0;std::wstring dialogDirectory,dialogFilter;
+bool GetOpenFileNameW(OPENFILENAMEW* o){dialogFlags=o->Flags;dialogDirectory=o->lpstrInitialDir;dialogFilter=o->lpstrFilter;if(dialogFile.empty())return false;const auto path=dialogFile.wstring();if(path.size()>=o->nMaxFile)throw std::runtime_error("adapter file buffer");std::copy(path.begin(),path.end(),o->lpstrFile);o->lpstrFile[path.size()]=0;return true;}
+DWORD CommDlgExtendedError(){return dialogError;}
+struct VariantInput{pxwe::fs::path root;std::wstring title;std::string id,role,path,when;std::vector<std::string> roles,conditions;};
+struct OverrideInput{pxwe::fs::path root;std::wstring title;pxwe::Fields fields;};
+const char* const kOverrideRoles[]={"view_model","player_model","world_model","fire_sound","reload_sound","sprite","hud_sprite","kill_sprite"};
+constexpr int VariantProc=1,OverrideProc=2;
+struct Modal{int kind=0;std::string id,role,path,when;pxwe::Fields fields;};
+std::vector<Modal> modals;std::vector<std::string> seenRoles,seenConditions;
+INT_PTR DialogBoxParamW(void*,int resource,HWND,int,LPARAM ptr){
+    if(resource==IDD_VARIANT){auto* p=reinterpret_cast<VariantInput*>(ptr);seenRoles=p->roles;seenConditions=p->conditions;}
+    if(modals.empty())return 0;
+    const auto m=modals.front();modals.erase(modals.begin());
+    if(m.kind==0)return 0;
+    if(resource==IDD_VARIANT){auto* p=reinterpret_cast<VariantInput*>(ptr);if(m.kind==1){p->id=m.id;p->role=m.role;p->path=m.path;p->when=m.when;}else p->id=m.id;}
+    if(resource==IDD_OVERRIDES){auto* p=reinterpret_cast<OverrideInput*>(ptr);for(auto& f:p->fields)for(const auto& v:m.fields)if(f.first==v.first)f.second=v.second;}
+    return IDOK;
+}
+constexpr int WM_COMMAND=99;
+int PostMessageW(HWND,int,WPARAM,LPARAM){return TRUE;}
+constexpr unsigned TVN_KEYDOWN=77; constexpr int VK_F2=113;
+@ENUM@
+class Application{
+public:
+    pxwe::Project project;
+    HWND window=nullptr,tree=nullptr,tabs=nullptr,properties=nullptr,value=nullptr,apply=nullptr,browse=nullptr,hint=nullptr;
+    HWND compatibility=nullptr,allow=nullptr,disallow=nullptr,setDefault=nullptr,flight=nullptr;
+    HWND modelKind=nullptr,modelLoad=nullptr,modelOpen=nullptr,modelInfo=nullptr,sequences=nullptr,bounds=nullptr,status=nullptr;
+    HWND variants=nullptr,variantAdd=nullptr,variantEdit=nullptr,variantCopy=nullptr,variantRemove=nullptr,variantPreview=nullptr;
+    HWND play=nullptr,reset=nullptr,sound=nullptr,skin=nullptr,body=nullptr,coefficient=nullptr,overrides=nullptr;
+    HWND curvesList=nullptr,metric=nullptr,spriteKind=nullptr,spriteLoad=nullptr,spriteWindow=nullptr,spriteInfo=nullptr;
+    std::vector<std::string> variantIds,modelPaths,spritePaths,compatibilityIds;
+    pxwe::StudioPreview studio;pxwe::SpritePreview sprite;pxwe::Bytes soundData;
+    pxwe::fs::path modelPath;std::wstring modelText;bool hasSprite=false;double spriteSeconds=0;ULONGLONG lastTick=0;
+    pxwe::ModelInfo model;std::vector<pxwe::AmmoCurve> curves;std::set<std::string> hiddenCurves;
+    std::vector<modular::BallisticState> trajectory;std::wstring flightText;
+    bool hasModel=false,playing=false;int sequenceIndex=0;double animationSeconds=0;
+    void OpenFolder(){}void OpenModelViewer(){}
+    bool updating=false;pxwe::Kind selectionKind=pxwe::Kind::Weapon;std::string selectionId="pistol",editingKey,editingValue;
+    std::vector<std::string> propertyKeys;std::vector<pxwe::PropertyRow> propertyRows;std::set<std::string> collapsedSections;
+    std::vector<pxwe::Category> treeCategories; bool categorySelected=false,treeRefreshPending=false; std::string selectionCategory;
+    std::vector<HTREEITEM> treeCategoryItems;
+    std::vector<std::pair<pxwe::Kind,std::string>> treeAssets;int titles=0,refreshes=0,compatibilityCalls=0,flightCalls=0;
+    int Scale(int n)const{return n;}
+    void Title(){++titles;}
+@PRODUCTION@
+    void Setup(const pxwe::fs::path& root){
+        modals.clear();seenRoles.clear();seenConditions.clear();now=0;soundPlays=0;hitItem=nullptr;shownCommands.clear();popupCommand=0;destroyedMenus=0;messageAnswer=0;
+        windows.clear();focus=nullptr;inputAnswers.clear();errors=0;dialogFile.clear();dialogError=0;
+        window=ControlWindow(L"FRAME",L"",0,0);
+        HWND* controls[]={&tree,&tabs,&properties,&value,&apply,&browse,&hint,&compatibility,&allow,&disallow,&setDefault,&flight,&modelKind,&modelLoad,&modelOpen,&modelInfo,&sequences,&bounds,&status,&variants,&variantAdd,&variantEdit,&variantCopy,&variantRemove,&variantPreview,&play,&reset,&sound,&skin,&body,&coefficient,&overrides,&curvesList,&metric,&spriteKind,&spriteLoad,&spriteWindow,&spriteInfo};
+        for(auto c:controls)*c=ControlWindow(L"CONTROL",L"",0,0);
+        tabs->select=0;project.Load(root);project.Add(pxwe::Kind::Cartridge,"fmj");project.Add(pxwe::Kind::Weapon,"pistol");project.Save();
+        RefreshTree();
+    }
+    int Row(const std::string& key){
+        const auto* a=project.Find(selectionKind,selectionId);const auto page=pxwe::PageForProperty(*a,key);const int tab=page==pxwe::PropertyPage::Models?3:page==pxwe::PropertyPage::Sprites?4:0;
+        if(tabs->select!=tab){tabs->select=tab;RefreshProperties();}
+        for(size_t i=0;i<propertyRows.size();++i)if(propertyRows[i].key==key)return int(i);
+        throw std::runtime_error("missing row: "+key);}
+    int Heading(const std::string& section){
+        const auto* a=project.Find(selectionKind,selectionId);for(const auto& r:pxwe::PropertyRows(*a,{}))if(!r.Heading()&&r.section==section){const auto page=pxwe::PageForProperty(*a,r.key);const int tab=page==pxwe::PropertyPage::Models?3:page==pxwe::PropertyPage::Sprites?4:0;if(tabs->select!=tab){tabs->select=tab;RefreshProperties();}break;}
+        for(size_t i=0;i<propertyRows.size();++i)if(propertyRows[i].Heading()&&propertyRows[i].section==section)return int(i);
+        throw std::runtime_error("missing heading");}
+};
+void Check(bool v,const char* why){if(!v)throw std::runtime_error(why);}
+void Reject(const std::function<void()>& f){bool threw=false;try{f();}catch(const std::exception&){threw=true;}Check(threw,"expected rejection");}
+struct Temp{pxwe::fs::path path=pxwe::fs::temp_directory_path()/("pxwe-ui-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));Temp(){pxwe::fs::create_directory(path);}~Temp(){std::error_code ec;pxwe::fs::remove_all(path,ec);}};
+void Put(const pxwe::fs::path& path){pxwe::fs::create_directories(path.parent_path());std::ofstream out(path);out<<"resource";}
+int passed=0,failed=0;
+void Test(const char* name,const std::function<void(Application&,const pxwe::fs::path&)>& f){try{Temp t;Application a;a.Setup(t.path);f(a,t.path);++passed;std::cout<<"PASS "<<name<<'\n';}catch(const std::exception& e){++failed;std::cerr<<"FAIL "<<name<<": "<<e.what()<<'\n';}}
+namespace f=preview_fixture;
+bool HasRow(const Application& a,const std::string& key){return std::any_of(a.propertyRows.begin(),a.propertyRows.end(),[&](const auto& r){return r.key==key;});}
+void Tab(Application& a,int page){NMHDR changing;changing.idFrom=C_TAB;changing.code=TCN_SELCHANGING;a.Notify(&changing);a.tabs->select=page;NMHDR changed;changed.idFrom=C_TAB;changed.code=TCN_SELCHANGE;a.Notify(&changed);}
+HTREEITEM Folder(Application& a,pxwe::Kind kind,const std::string& path){for(size_t i=0;i<a.treeCategories.size();++i)if(a.treeCategories[i].kind==kind&&a.treeCategories[i].path==path)return a.treeCategoryItems[i];throw std::runtime_error("missing category node");}
+HTREEITEM AssetNode(Application& a,pxwe::Kind kind,const std::string& id){for(const auto& n:a.tree->nodes)if(n->param>=0){const auto& entry=a.treeAssets.at(size_t(n->param));if(entry.first==kind&&entry.second==id)return n.get();}throw std::runtime_error("missing asset node");}
+void Select(Application& a,HTREEITEM n){NMHDR h;h.idFrom=C_TREE;h.code=TVN_SELCHANGINGW;a.Notify(&h);TreeView_SelectItem(a.tree,n);NMTREEVIEWW change;change.hdr.idFrom=C_TREE;change.hdr.code=TVN_SELCHANGEDW;change.itemNew.lParam=n->param;a.Notify(&change.hdr);}
+bool MenuHas(int id){return std::find(shownCommands.begin(),shownCommands.end(),id)!=shownCommands.end();}
+int main(){
+    std::cout<<std::unitbuf;std::cerr<<std::unitbuf;
+    Test("page switches relocate controls and preserve pending general draft",[](auto& a,const auto&){Check(!HasRow(a,"view_model")&&!HasRow(a,"fire_sound")&&!HasRow(a,"sprite"),"resources remained on general page");a.EditProperty(a.Row("clip_size"));a.value->text=L"20";Tab(a,3);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("clip_size")=="20","tab lost pending edit");Check(HasRow(a,"view_model")&&HasRow(a,"primary_sound")&&HasRow(a,"secondary_animation")&&!HasRow(a,"clip_size"),"model controls missing");Check(a.properties->visible&&a.variants->visible&&a.bounds->visible&&!a.spriteWindow->visible,"model page visibility");Tab(a,4);Check(HasRow(a,"sprite")&&!HasRow(a,"view_model")&&a.spriteWindow->visible&&!a.bounds->visible,"sprite page routing");});
+    Test("model and sprite layout keeps preview away from editing controls",[](auto& a,const auto&){for(int tab:{3,4}){Tab(a,tab);Check(a.properties->rect.right<a.bounds->rect.left&&a.properties->rect.bottom<=a.hint->rect.top&&a.apply->rect.bottom<=a.variants->rect.top,"overlapping model/sprite controls");Check(a.variants->rect.bottom<=a.variantAdd->rect.top&&a.variantAdd->rect.bottom<=a.variantPreview->rect.top,"overlapping conditional controls");}Tab(a,1);Check(a.compatibility->rect.bottom<a.allow->rect.top&&a.allow->rect.bottom<a.coefficient->rect.top,"ammo buttons overlap");});
+    Test("add conditional entry upgrades once and exposes it on model page",[](auto& a,const auto&){Tab(a,3);modals={{1,"normal","view_model","models/normal.mdl","default",{}}};a.Command(C_VARIANT_ADD);Check(a.variantIds==std::vector<std::string>{"normal"}&&HasRow(a,"asset.normal.path")&&a.project.Validate().Ok(),"conditional add missing");Check(a.project.Undo()&&a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("version")=="2","conditional add split history");});
+    Test("duplicate default offers random condition and preserves source",[](auto& a,const auto&){a.project.PutVariant("pistol","normal","view_model","models/normal.mdl","default");Tab(a,3);a.variants->select=0;modals={{2,"copy","","","",{}}};a.Command(C_VARIANT_COPY);const auto* w=a.project.Find(pxwe::Kind::Weapon,"pistol");Check(w->Get("asset.normal.when")=="default"&&w->Get("asset.copy.when")=="random"&&w->Get("asset.copy.path")=="models/normal.mdl","duplicate damaged default");});
+    Test("conditional dialog retries bad condition and supports edit rename",[](auto& a,const auto&){Tab(a,3);modals={{1,"one","fire_sound","weapons/f.wav","ammo:unknown",{}},{1,"one","fire_sound","weapons/f.wav","ammo:fmj",{}}};a.Command(C_VARIANT_ADD);Check(errors==1&&a.variantIds.size()==1,"invalid condition not retried");Check(std::find(seenConditions.begin(),seenConditions.end(),"ammo:fmj")!=seenConditions.end()&&std::find(seenConditions.begin(),seenConditions.end(),"ammo:unknown")==seenConditions.end(),"conditions contain unallowed ammo");a.variants->select=0;modals={{1,"renamed","reload_sound","weapons/r.wav","mode:semi",{}}};a.Command(C_VARIANT_EDIT);const auto* w=a.project.Find(pxwe::Kind::Weapon,"pistol");Check(w->Get("asset.one.role").empty()&&w->Get("asset.renamed.path")=="weapons/r.wav","edit rename incomplete");});
+    Test("cancel conditional dialog leaves project and undo stack intact",[](auto& a,const auto&){Tab(a,3);a.Command(C_VARIANT_ADD);Check(!a.project.Dirty()&&a.variantIds.empty(),"cancel committed data");Check(a.project.Undo()&&a.project.Data().weapons.empty(),"cancel added history");});
+    Test("sprite dialog roles filter and model variants remain intact",[](auto& a,const auto&){a.project.PutVariant("pistol","model","view_model","models/a.mdl","random");Tab(a,4);modals={{1,"icon","hud_sprite","sprites/a.txt","ammo:fmj",{}}};a.Command(C_VARIANT_ADD);Check(seenRoles==std::vector<std::string>{"sprite","hud_sprite","kill_sprite"}&&a.variantIds==std::vector<std::string>{"icon"},"sprite dialog routing");Tab(a,3);Check(a.variantIds==std::vector<std::string>{"model"},"model variant lost");});
+    Test("remove conditional entry is undoable",[](auto& a,const auto&){a.project.PutVariant("pistol","one","reload_sound","weapons/r.wav","random");Tab(a,3);a.variants->select=0;a.Command(C_VARIANT_REMOVE);Check(a.variantIds.empty()&&a.project.Undo()&&a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("asset.one.role")=="reload_sound","remove history failed");});
+    Test("ammo table damage is computed for every allowed speed",[](auto& a,const auto&){a.project.Add(pxwe::Kind::Cartridge,"jhp","fmj");a.project.Allow("pistol","jhp","200");a.RefreshCompatibility();Check(a.compatibility->cells.size()==2&&a.compatibility->cells[0][4]!=L"—"&&a.compatibility->cells[1][4]!=L"—","allowed damage missing");a.project.Disallow("pistol","jhp");a.RefreshCompatibility();Check(a.compatibility->cells[1][4]==L"—","disallowed damage displayed");});
+    Test("coefficient handler converts cartridge atomically and refreshes curves",[](auto& a,const auto&){a.compatibility->select=0;inputAnswers={L"3"};a.Command(C_COEFFICIENT);const auto* c=a.project.Find(pxwe::Kind::Cartridge,"fmj");Check(c->Get("version")=="3"&&c->Get("damage").empty()&&c->Get("damage_coefficient")=="3","coefficient controller failed");Check(std::abs(std::stod(Utf8(a.compatibility->cells[0][4]))-a.curves[0].muzzleDamage)<.0001,"stale computed damage");a.project.Undo();Check(a.project.Find(pxwe::Kind::Cartridge,"fmj")->Get("version")=="2","conversion not atomic");});
+    Test("invalid or cancelled coefficient handler preserves cartridge",[](auto& a,const auto&){const auto before=a.project.Find(pxwe::Kind::Cartridge,"fmj")->Serialize();a.compatibility->select=0;a.Command(C_COEFFICIENT);Check(a.project.Find(pxwe::Kind::Cartridge,"fmj")->Serialize()==before,"cancel coefficient changed data");inputAnswers={L"0"};Reject([&]{a.Command(C_COEFFICIENT);});Check(a.project.Find(pxwe::Kind::Cartridge,"fmj")->Serialize()==before,"bad coefficient left mixed fields");});
+    Test("ammo override dialog applies and clears firing reload and sprite paths",[](auto& a,const auto&){a.compatibility->select=0;modals={{1,"","","","",{{"fire_sound","weapons/f.wav"},{"reload_sound","weapons/r.wav"},{"sprite","sprites/a.spr"}}}};a.Command(C_OVERRIDES);const auto* w=a.project.Find(pxwe::Kind::Weapon,"pistol");Check(w->Get("ammo.fmj.fire_sound")=="weapons/f.wav"&&a.compatibility->cells[0][5]==L"weapons/f.wav"&&a.spritePaths==std::vector<std::string>{"sprites/a.spr"},"override routing failed");a.compatibility->select=0;modals={{1,"","","","",{{"fire_sound",""},{"reload_sound",""}}}};a.Command(C_OVERRIDES);w=a.project.Find(pxwe::Kind::Weapon,"pistol");Check(w->Get("ammo.fmj.fire_sound").empty()&&w->Get("ammo.fmj.reload_sound").empty()&&w->Get("ammo.fmj.sprite")=="sprites/a.spr","clear override removed other data");});
+    Test("cancel ammo override dialog does not upgrade weapon",[](auto& a,const auto&){a.compatibility->select=0;a.Command(C_OVERRIDES);Check(!a.project.Dirty()&&a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("version")=="2","cancel upgraded weapon");});
+    Test("model load handler renders texture and selected sequence plays",[](auto& a,const auto& root){f::Put(root/"models/v_pistol.mdl",f::Model());Tab(a,3);a.Command(C_MODEL_LOAD);Check(a.hasModel&&a.model.sequences.size()==2&&a.playing&&a.sequences->cells.size()==2,"model not loaded");const auto idle=a.studio.Render(100,100,0,0,0,0).pixels;NMLISTVIEW change;change.hdr.idFrom=C_SEQUENCES;change.hdr.code=LVN_ITEMCHANGED;change.uChanged=LVIF_STATE;change.uNewState=LVIS_SELECTED;change.iItem=1;a.Notify(&change.hdr);Check(a.sequenceIndex==1&&a.animationSeconds==0&&a.playing,"sequence selection ignored");now=50;a.Tick();Check(a.animationSeconds>0&&a.bounds->invalidates,"playback timer inactive");Check(idle!=a.studio.Render(100,100,a.sequenceIndex,.5,0,0).pixels,"model did not animate");});
+    Test("pause restart and hidden page suspend model playback",[](auto& a,const auto& root){f::Put(root/"models/v_pistol.mdl",f::Model());Tab(a,3);a.Command(C_MODEL_LOAD);now=100;a.Tick();const auto before=a.animationSeconds;a.Command(C_PLAY);now=200;a.Tick();Check(a.animationSeconds==before&&!a.playing,"pause failed");a.Command(C_RESET);Check(a.animationSeconds==0,"restart failed");a.Command(C_PLAY);Tab(a,0);now=300;a.Tick();Check(a.animationSeconds==0,"hidden model keeps playing");});
+    Test("conditional and ammo model resources can load in native preview",[](auto& a,const auto& root){f::Put(root/"models/variant.mdl",f::Model());a.project.PutVariant("pistol","one","view_model","models/variant.mdl","random");a.project.SetAmmoOverrides("pistol","fmj",{{"world_model","models/variant.mdl"}});a.RefreshResources();Tab(a,3);a.variants->select=0;a.Command(C_VARIANT_PREVIEW);Check(a.hasModel&&a.modelPath==root/"models/variant.mdl"&&a.modelPaths.size()==5,"variant model load failed");});
+    Test("sprites preview frames and native timer advances animation",[](auto& a,const auto& root){f::Put(root/"sprites/test.spr",f::Sprite());a.project.SetSprite(pxwe::Kind::Weapon,"pistol","sprites/test.spr");a.RefreshResources();Tab(a,4);a.Command(C_SPRITE_LOAD);Check(a.hasSprite&&a.sprite.Frames().size()==2&&a.spriteInfo->text.find(L"2 frames")!=std::wstring::npos,"sprite controller failed");now=80;a.Tick();Check(a.spriteSeconds>0&&a.spriteWindow->invalidates,"sprite timer inactive");});
+    Test("sound control retains resource buffer for asynchronous playback",[](auto& a,const auto& root){f::Put(root/"sound/weapons/f.wav",std::string("RIFF fixture"));a.project.SetField(pxwe::Kind::Weapon,"pistol","fire_sound","weapons/f.wav");a.EditProperty(a.Row("fire_sound"));a.Command(C_SOUND);Check(soundPlays==1&&std::string(a.soundData.begin(),a.soundData.end())=="RIFF fixture","sound memory lifetime missing");});
+    Test("curve checkboxes hide one cartridge and retain selection after refresh",[](auto& a,const auto&){a.project.Add(pxwe::Kind::Cartridge,"jhp","fmj");a.project.Allow("pistol","jhp","250");a.RefreshFlight();Check(a.curves.size()==2&&a.curvesList->checks[0]&&a.curvesList->checks[1],"all curves not visible");a.curvesList->checks[1]=false;NMLISTVIEW change;change.hdr.idFrom=C_CURVES;change.hdr.code=LVN_ITEMCHANGED;change.uChanged=LVIF_STATE;change.iItem=1;a.Notify(&change.hdr);Check(a.hiddenCurves.count("jhp")&&a.flight->invalidates,"checkbox didn't hide");a.RefreshFlight();Check(a.curvesList->checks[0]&&!a.curvesList->checks[1],"refresh forgot visibility");});
+    Test("each comparison curve has a stable distinct color and metric changes redraw",[](auto& a,const auto&){std::set<COLORREF> colors;for(size_t i=0;i<24;++i)Check(colors.insert(a.CurveColor(i)).second,"duplicate curve color");for(int selected:{0,1,2}){a.metric->select=selected;const int before=a.flight->invalidates;a.Command(C_METRIC);Check(a.flight->invalidates>before,"metric change didn't redraw");}NMLVCUSTOMDRAW draw;draw.nmcd.hdr.idFrom=C_CURVES;draw.nmcd.hdr.code=NM_CUSTOMDRAW;draw.nmcd.dwDrawStage=CDDS_ITEMPREPAINT|CDDS_SUBITEM;draw.nmcd.dwItemSpec=1;draw.iSubItem=1;a.Notify(&draw.nmcd.hdr);Check(draw.clrText==a.CurveColor(1),"legend color mismatch");});
+    Test("committing a draft preserves selected entry and model role",[](auto& a,const auto&){a.project.PutVariant("pistol","one","view_model","models/one.mdl","random");Tab(a,3);a.modelKind->select=2;a.EditProperty(a.Row("fire_sound"));a.value->text=L"weapons/f.wav";a.variants->select=0;modals={{2,"copy","","","",{}}};a.Command(C_VARIANT_COPY);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("asset.copy.path")=="models/one.mdl"&&a.modelKind->select==2,"draft commit lost resource selection");});
+    Test("applying unchanged blank overrides preserves legacy weapon",[](auto& a,const auto&){a.compatibility->select=0;modals={{1,"","","","",{}}};a.Command(C_OVERRIDES);Check(!a.project.Dirty()&&a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("version")=="2","blank overrides upgraded weapon");});
+    Test("shared model paths keep the selected role after refresh",[](auto& a,const auto&){for(const auto* role:{"view_model","player_model","world_model"})a.project.SetField(pxwe::Kind::Weapon,"pistol",role,"models/shared.mdl");a.RefreshResources();a.modelKind->select=2;a.RefreshResources();Check(a.modelKind->select==2,"shared paths reset world role to view");});
+    Test("real tree nests assets under category ancestors and preserves selection",[](auto& a,const auto&){a.project.SetCategory(pxwe::Kind::Weapon,"pistol","arms/pistols/service");a.project.CreateCategory(pxwe::Kind::Weapon,"arms/empty");a.project.CreateCategory(pxwe::Kind::Cartridge,"9x19/empty");a.RefreshTree();const auto node=AssetNode(a,pxwe::Kind::Weapon,"pistol");Check(node->parent==Folder(a,pxwe::Kind::Weapon,"arms/pistols/service")&&node->parent->parent==Folder(a,pxwe::Kind::Weapon,"arms/pistols"),"flat or wrong tree");Check(a.tree->treeSelection==node&&a.selectionId=="pistol"&&!a.categorySelected&&a.tree->redraw,"selection/redraw lost");});
+    Test("tree refresh preserves unrelated collapsed folders",[](auto& a,const auto&){a.project.CreateCategory(pxwe::Kind::Weapon,"one/sub");a.project.CreateCategory(pxwe::Kind::Weapon,"two/sub");a.RefreshTree();Folder(a,pxwe::Kind::Weapon,"two")->expanded=false;a.RefreshTree();Check(!Folder(a,pxwe::Kind::Weapon,"two")->expanded,"collapsed state lost");});
+    Test("folder selection tracks kind and clears stale leaf properties",[](auto& a,const auto&){Select(a,Folder(a,pxwe::Kind::Cartridge,""));Check(a.categorySelected&&a.selectionKind==pxwe::Kind::Cartridge&&a.selectionId.empty()&&a.propertyRows.empty()&&!a.value->enabled,"folder edited prior weapon");Check(a.hint->text.find(L"Right-click")!=std::wstring::npos,"folder help missing");});
+    Test("category dialog retries invalid paths and selects created empty folder",[](auto& a,const auto&){inputAnswers={L"bad//path",L"arms/pistols"};a.Command(CMD_CATEGORY_NEW);Check(errors==1&&a.categorySelected&&a.selectionCategory=="arms/pistols"&&a.tree->treeSelection==Folder(a,pxwe::Kind::Weapon,"arms/pistols"),"create/retry routing");a.Command(CMD_UNDO);Check(a.project.Categories(pxwe::Kind::Weapon).empty()&&a.selectionCategory.empty(),"create undo fallback");a.Command(CMD_REDO);Check(a.project.Categories(pxwe::Kind::Weapon).size()==2,"create redo lost");});
+    Test("category dialog cancellation leaves history and values untouched",[](auto& a,const auto&){a.Command(CMD_CATEGORY_NEW);Check(!a.project.Dirty()&&a.project.Data().categories.empty(),"cancel wrote category");Check(a.project.Undo()&&a.project.Data().weapons.empty(),"cancel added history");});
+    Test("new asset command inherits selected folder in a single transaction",[](auto& a,const auto&){a.project.CreateCategory(pxwe::Kind::Weapon,"arms/pistols");a.RefreshTree();Select(a,Folder(a,pxwe::Kind::Weapon,"arms/pistols"));inputAnswers={L"second"};a.Command(CMD_NEW_WEAPON);Check(a.selectionId=="second"&&!a.categorySelected&&a.project.Find(pxwe::Kind::Weapon,"second")->Get("category")=="arms/pistols","new asset misplaced");Check(AssetNode(a,pxwe::Kind::Weapon,"second")->parent==Folder(a,pxwe::Kind::Weapon,"arms/pistols"),"tree stale");a.Command(CMD_UNDO);Check(!a.project.Find(pxwe::Kind::Weapon,"second"),"new asset split history");});
+    Test("creating other kind does not inherit a weapon folder",[](auto& a,const auto&){a.project.CreateCategory(pxwe::Kind::Weapon,"arms/pistols");a.RefreshTree();Select(a,Folder(a,pxwe::Kind::Weapon,"arms/pistols"));inputAnswers={L"new_round"};a.Command(CMD_NEW_CARTRIDGE);Check(a.project.Find(pxwe::Kind::Cartridge,"new_round")->Get("category").empty()&&a.selectionKind==pxwe::Kind::Cartridge,"cross-kind folder inherited");});
+    Test("asset move and blank root destination preserve identity and undo",[](auto& a,const auto&){inputAnswers={L"arms/service"};a.Command(CMD_MOVE);Check(a.selectionId=="pistol"&&a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("category")=="arms/service","asset move lost selection");inputAnswers={L""};a.Command(CMD_MOVE);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("category").empty()&&a.tree->treeSelection==AssetNode(a,pxwe::Kind::Weapon,"pistol"),"blank root failed");a.Command(CMD_UNDO);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("category")=="arms/service","move undo failed");});
+    Test("category property apply rebuilds hierarchy and converts legacy ammo atomically",[](auto& a,const auto&){a.EditProperty(a.Row("category"));a.value->text=L"arms/pistols";a.Command(C_APPLY);a.Command(CMD_REFRESH_TREE);Check(a.selectionId=="pistol"&&AssetNode(a,pxwe::Kind::Weapon,"pistol")->parent==Folder(a,pxwe::Kind::Weapon,"arms/pistols"),"property move tree stale");Select(a,AssetNode(a,pxwe::Kind::Cartridge,"fmj"));const auto old=a.project.Find(pxwe::Kind::Cartridge,"fmj")->Serialize();a.EditProperty(a.Row("category"));a.value->text=L"9x19/fmj";a.CommitEditor();a.Command(CMD_REFRESH_TREE);Check(a.project.Find(pxwe::Kind::Cartridge,"fmj")->Get("version")=="3"&&HasRow(a,"damage_coefficient")&&a.project.Find(pxwe::Kind::Cartridge,"fmj")->Get("damage").empty(),"property conversion UI stale");a.Command(CMD_UNDO);Check(a.project.Find(pxwe::Kind::Cartridge,"fmj")->Serialize()==old,"property conversion split history");});
+    Test("F2 rename updates a subtree and selects the renamed folder",[](auto& a,const auto&){a.project.SetCategory(pxwe::Kind::Weapon,"pistol","arms/pistols/service");a.RefreshTree();Select(a,Folder(a,pxwe::Kind::Weapon,"arms/pistols"));inputAnswers={L"arms/sidearms"};NMTVKEYDOWN key;key.hdr.idFrom=C_TREE;key.hdr.code=TVN_KEYDOWN;key.wVKey=VK_F2;a.Notify(&key.hdr);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("category")=="arms/sidearms/service"&&a.selectionCategory=="arms/sidearms","F2 did not rename");});
+    Test("folder move accepts destination parent and retains its own leaf",[](auto& a,const auto&){a.project.SetCategory(pxwe::Kind::Weapon,"pistol","arms/pistols/service");a.RefreshTree();Select(a,Folder(a,pxwe::Kind::Weapon,"arms/pistols"));inputAnswers={L"equipment"};a.Command(CMD_MOVE);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("category")=="equipment/pistols/service"&&a.selectionCategory=="equipment/pistols","category parent move wrong");});
+    Test("folder duplicate dialog allocates IDs and keeps originals",[](auto& a,const auto&){a.project.SetCategory(pxwe::Kind::Weapon,"pistol","arms/service");a.RefreshTree();Select(a,Folder(a,pxwe::Kind::Weapon,"arms"));inputAnswers={L"copies",L"trial"};a.Command(CMD_DUPLICATE);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")&&a.project.Find(pxwe::Kind::Weapon,"trial_pistol")->Get("category")=="copies/service"&&a.selectionCategory=="copies","folder duplicate failed");a.Command(CMD_UNDO);Check(!a.project.Find(pxwe::Kind::Weapon,"trial_pistol"),"folder duplicate split history");});
+    Test("cancel second duplicate dialog writes no copies or categories",[](auto& a,const auto&){a.project.SetCategory(pxwe::Kind::Weapon,"pistol","arms");a.project.Save();a.RefreshTree();Select(a,Folder(a,pxwe::Kind::Weapon,"arms"));inputAnswers={L"copies"};a.Command(CMD_CATEGORY_COPY);Check(!a.project.Dirty()&&a.project.Data().weapons.size()==1&&a.project.Categories(pxwe::Kind::Weapon)==std::vector<std::string>{"arms"},"duplicate cancel mutated");});
+    Test("folder removal cancellation and confirmation keep assets at parent",[](auto& a,const auto&){a.project.SetCategory(pxwe::Kind::Weapon,"pistol","arms/pistols/service");a.RefreshTree();Select(a,Folder(a,pxwe::Kind::Weapon,"arms/pistols"));a.Command(CMD_DELETE);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("category")=="arms/pistols/service","cancel removed folder");messageAnswer=IDYES;a.Command(CMD_DELETE);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("category")=="arms"&&a.categorySelected&&a.selectionCategory=="arms","keep assets removal failed");});
+    Test("explicit cartridge subtree deletion rejects referenced ammo atomically",[](auto& a,const auto&){a.project.SetCategory(pxwe::Kind::Cartridge,"fmj","ammo");a.RefreshTree();Select(a,Folder(a,pxwe::Kind::Cartridge,"ammo"));messageAnswer=IDYES;Reject([&]{a.Command(CMD_CATEGORY_DELETE_ASSETS);});Check(a.project.Find(pxwe::Kind::Cartridge,"fmj")&&a.selectionCategory=="ammo","referenced ammo deleted");});
+    Test("right-click selects clicked asset and commits previous pending value",[](auto& a,const auto&){a.EditProperty(a.Row("clip_size"));a.value->text=L"24";hitItem=AssetNode(a,pxwe::Kind::Cartridge,"fmj");a.TreeContext({20,20},false);Check(a.project.Find(pxwe::Kind::Weapon,"pistol")->Get("clip_size")=="24"&&a.selectionKind==pxwe::Kind::Cartridge&&a.selectionId=="fmj","context selected old asset/lost draft");Check(MenuHas(CMD_DUPLICATE)&&MenuHas(CMD_DELETE)&&MenuHas(CMD_MOVE)&&MenuHas(CMD_NEW_CARTRIDGE)&&!MenuHas(CMD_CATEGORY_RENAME)&&destroyedMenus==1,"asset popup routing/leak");});
+    Test("keyboard root context offers creation and excludes subtree operations",[](auto& a,const auto&){Select(a,Folder(a,pxwe::Kind::Cartridge,""));a.TreeContext({-1,-1},true);Check(MenuHas(CMD_NEW_CARTRIDGE)&&MenuHas(CMD_CATEGORY_NEW)&&!MenuHas(CMD_DELETE)&&!MenuHas(CMD_CATEGORY_COPY),"root popup offered destructive action");});
+    Test("category context offers separate keep-assets and delete-assets actions",[](auto& a,const auto&){a.project.CreateCategory(pxwe::Kind::Weapon,"empty");a.RefreshTree();hitItem=Folder(a,pxwe::Kind::Weapon,"empty");popupCommand=CMD_CATEGORY_REMOVE;messageAnswer=IDYES;a.TreeContext({20,20},false);Check(MenuHas(CMD_CATEGORY_REMOVE)&&MenuHas(CMD_CATEGORY_DELETE_ASSETS)&&MenuHas(CMD_CATEGORY_COPY)&&!MenuHas(CMD_DELETE)&&destroyedMenus==1&&a.project.Categories(pxwe::Kind::Weapon).empty(),"category popup did not run cleanly");});
+    Test("right-click outside an item has no side effects or popup",[](auto& a,const auto&){a.TreeContext({500,500},false);Check(!a.project.Dirty()&&shownCommands.empty()&&destroyedMenus==0&&a.selectionId=="pistol","empty space context changed data");});
+    Test("category commit defers tree deletion until selection notification finishes",[](auto& a,const auto&){const auto next=AssetNode(a,pxwe::Kind::Cartridge,"fmj");const auto param=next->param;const auto count=a.tree->nodes.size();a.EditProperty(a.Row("category"));a.value->text=L"arms/pistols";NMHDR changing;changing.idFrom=C_TREE;changing.code=TVN_SELCHANGINGW;a.Notify(&changing);Check(a.treeRefreshPending&&a.tree->nodes.size()==count&&next->param==param,"tree was destroyed inside notification");NMTREEVIEWW changed;changed.hdr.idFrom=C_TREE;changed.hdr.code=TVN_SELCHANGEDW;changed.itemNew.lParam=param;a.Notify(&changed.hdr);a.Command(CMD_REFRESH_TREE);Check(a.selectionKind==pxwe::Kind::Cartridge&&a.selectionId=="fmj"&&!a.treeRefreshPending&&AssetNode(a,pxwe::Kind::Weapon,"pistol")->parent==Folder(a,pxwe::Kind::Weapon,"arms/pistols"),"deferred refresh lost new selection");});
+    Test("context menu on current asset preserves its loaded preview",[](auto& a,const auto& root){f::Put(root/"models/preview.mdl",f::Model());a.LoadModelPath("models/preview.mdl");a.playing=true;hitItem=AssetNode(a,pxwe::Kind::Weapon,"pistol");a.TreeContext({20,20},false);Check(a.hasModel&&a.playing,"context reset current preview");});
+    Test("initial native tree roots expand after their children are inserted",[](auto& a,const auto&){Check(Folder(a,pxwe::Kind::Weapon,"")->expanded&&Folder(a,pxwe::Kind::Cartridge,"")->expanded,"root expanded before children existed");});
+    std::cout<<passed<<" passed, "<<failed<<" failed\n";return failed?1:0;
+}

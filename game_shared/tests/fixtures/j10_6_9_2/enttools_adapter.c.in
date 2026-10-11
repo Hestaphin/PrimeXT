@@ -1,0 +1,170 @@
+// Exact engine allocation, drop-to-floor and entity-tool methods. Engine
+// services/game factories are adapters, using the real edict/eiface structures.
+#include <assert.h>
+#include <ctype.h>
+#include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "xash3d_types.h"
+#include "const.h"
+#include "edict.h"
+#include "eiface.h"
+#define S_ERROR "Error: "
+#define VectorCopy(a,b) memcpy((b),(a),sizeof(vec3_t))
+#define Vec3(a) { (a)[0], (a)[1], (a)[2] }
+#define DEG2RAD(a) ((a) * 0.017453292519943295)
+#define Q_snprintf snprintf
+#define Q_strcmp strcmp
+#define Q_tolower tolower
+#define MOVE_NORMAL 0
+enum { svc_stufftext = 9 };
+static char output[8192], packets[8192], pool[64][256];
+static int poolSize = 1, packetCount, thinkCalls, spawnCalls, linkCalls;
+static const char* test;
+static char* arguments[32]; static int argumentCount;
+static edict_t entities[16];
+static vec3_t localOrigin[16];
+static char weaponId[16][128];
+typedef struct { int unused; } sizebuf_t;
+typedef struct { edict_t* edict; int userid; char name[32]; struct { sizebuf_t message; } netchan; } sv_client_t;
+static struct {
+    DLL_FUNCTIONS dllFuncs;
+    struct {
+        int (*SV_CreateEntity)(edict_t*, const char*);
+        void (*pfnCreateEntitiesInRestoreList)(SAVERESTOREDATA*, int, qboolean);
+    } physFuncs;
+} svgame;
+typedef void (*LINK_ENTITY_FUNC)(entvars_t*);
+static int NUM_FOR_EDICT(edict_t* entity) { return (int)(entity - entities); }
+static qboolean SV_IsValidEdict(edict_t* entity) { return entity && !entity->free; }
+static void Print(const char* format, va_list args) { vsnprintf(output + strlen(output), sizeof(output) - strlen(output), format, args); }
+static void Con_Printf(const char* format, ...) { va_list args; va_start(args, format); Print(format, args); va_end(args); }
+static void SV_ClientPrintf(sv_client_t* cl, const char* format, ...) { va_list args; va_start(args, format); Print(format, args); va_end(args); }
+static void Q_strncpy(char* out, const char* in, size_t size) { snprintf(out, size, "%s", in); }
+static void Q_strnlwr(const char* in, char* out, size_t size) { size_t i; for(i = 0; i + 1 < size && in[i]; ++i) out[i] = tolower((unsigned char)in[i]); out[i] = 0; }
+static string_t SV_AllocString(const char* text) { assert(poolSize < 64); Q_strncpy(pool[poolSize], text, 256); return poolSize++; }
+static const char* SV_GetString(string_t id) { assert(id >= 0 && id < poolSize); return pool[id]; }
+static int Cmd_Argc(void) { return argumentCount; }
+static const char* Cmd_Argv(int i) { return i >= 0 && i < argumentCount ? arguments[i] : ""; }
+static void MSG_WriteByte(sizebuf_t* b, int v) { assert(v == svc_stufftext); ++packetCount; }
+static void MSG_WriteString(sizebuf_t* b, const char* text) { strncat(packets, text, sizeof(packets) - strlen(packets) - 1); }
+static void MSG_WriteStringf(sizebuf_t* b, const char* format, ...) {
+    char text[512]; va_list args; va_start(args, format); vsnprintf(text, sizeof(text), format, args); va_end(args); MSG_WriteString(b, text);
+}
+static void SV_InitEdict(edict_t* entity) {
+    int serial = entity->serialnumber;
+    memset(entity, 0, sizeof(*entity)); entity->serialnumber = serial;
+    memset(localOrigin[NUM_FOR_EDICT(entity)], 0, sizeof(vec3_t)); weaponId[NUM_FOR_EDICT(entity)][0] = 0;
+}
+static edict_t* SV_AllocEdict(void) {
+    for(int i = 2; i < 16; ++i) if(entities[i].free) { SV_InitEdict(&entities[i]); return &entities[i]; }
+    assert(0); return NULL;
+}
+static void SV_FreeEdict(edict_t* entity) { assert(!entity->free); entity->free = true; entity->pvPrivateData = NULL; ++entity->serialnumber; }
+static void LegacyFactory(entvars_t* v) { v->pContainingEntity->pvPrivateData = v->pContainingEntity; }
+static LINK_ENTITY_FUNC SV_GetEntityClass(const char* name) { return strcmp(name, "weapon_9mmhandgun") ? NULL : LegacyFactory; }
+static int ExtensionFactory(edict_t* entity, const char* name) { if(strcmp(name, "weapon_extension")) return -1; entity->pvPrivateData = entity; return 0; }
+static void RestoreFactory(SAVERESTOREDATA* data, int mask, qboolean world) {
+    ENTITYTABLE* table = data->pTable;
+    if(!strcmp(SV_GetString(table->classname), "weapon_modular")) {
+        table->pent = SV_AllocEdict(); table->pent->v.classname = table->classname;
+        table->pent->v.pContainingEntity = table->pent; table->pent->pvPrivateData = table->pent;
+    }
+}
+static void KeyValue(edict_t* entity, KeyValueData* kvd) {
+    assert(!entity->free); const int index = NUM_FOR_EDICT(entity);
+    if(!strcmp(kvd->szKeyName, "origin")) {
+        assert(sscanf(kvd->szValue, "%f %f %f", &entity->v.origin[0], &entity->v.origin[1], &entity->v.origin[2]) == 3);
+        VectorCopy(entity->v.origin, localOrigin[index]); kvd->fHandled = true;
+    } else if(!strcmp(kvd->szKeyName, "weapon_id")) { Q_strncpy(weaponId[index], kvd->szValue, 128); kvd->fHandled = true; }
+    else if(!strcmp(kvd->szKeyName, "targetname")) { entity->v.targetname = SV_AllocString(kvd->szValue); kvd->fHandled = true; }
+    else if(!strcmp(kvd->szKeyName, "remove")) SV_FreeEdict(entity);
+}
+static void SV_LinkEdict(edict_t* entity, qboolean touch) {
+    assert(!entity->free); ++linkCalls;
+    if(FBitSet(entity->v.flags, 1 << 17)) {
+        VectorCopy(localOrigin[NUM_FOR_EDICT(entity)], entity->v.origin); ClearBits(entity->v.flags, 1 << 17);
+    }
+    for(int i = 0; i < 3; ++i) { entity->v.absmin[i] = entity->v.origin[i] - 24; entity->v.absmax[i] = entity->v.origin[i] + 24; }
+}
+static trace_t SV_Move(const vec3_t from, const vec3_t mins, const vec3_t maxs,
+        const vec3_t end, int type, edict_t* entity, qboolean clip) {
+    assert(!entity->free); trace_t trace = {0}; trace.fraction = .5f;
+    VectorCopy(from, trace.endpos); trace.endpos[2] = 4; trace.ent = &entities[0]; return trace;
+}
+static int Spawn(edict_t* entity) {
+    assert(!entity->free); ++spawnCalls;
+    if(!strcmp(test, "spawn-reject")) return -1;
+    if(!strcmp(test, "spawn-kill")) { SetBits(entity->v.flags, FL_KILLME); return 0; }
+    if(!strcmp(test, "spawn-free")) { SV_FreeEdict(entity); return 0; }
+    if(!strcmp(test, "spawn-recycle")) {
+        SV_FreeEdict(entity); edict_t* replacement = SV_AllocEdict(); assert(replacement == entity);
+        replacement->v.classname = SV_AllocString("replacement"); return 0;
+    }
+    if(!strcmp(SV_GetString(entity->v.classname), "weapon_modular")) assert(!strcmp(weaponId[NUM_FOR_EDICT(entity)], "test_pistol"));
+    entity->v.solid = SOLID_BBOX; entity->v.movetype = MOVETYPE_TOSS;
+    entity->v.model = SV_AllocString("models/w_9mmhandgun.mdl"); return 0;
+}
+static void Think(edict_t* entity) {
+    assert(!entity->free && !FBitSet(entity->v.flags, FL_KILLME)); ++thinkCalls;
+    if(!strcmp(test, "think-free")) { SV_FreeEdict(entity); return; }
+    if(FBitSet(entity->v.flags, FL_ONGROUND)) {
+        if(svgame.dllFuncs.pfnKeyValue) SetBits(entity->v.flags, 1 << 17);
+        entity->v.solid = SOLID_TRIGGER; SV_LinkEdict(entity, false);
+    }
+}
+@PRODUCTION@
+int main(int argc, char** argv) {
+    assert(argc == 2); test = argv[1];
+    for(int i = 0; i < 16; ++i) entities[i].free = true;
+    entities[0].free = entities[1].free = false;
+    entities[1].v.origin[0] = -192; entities[1].v.origin[1] = 2; entities[1].v.origin[2] = 61;
+    sv_client_t cl = {0}; cl.edict = &entities[1]; cl.userid = 7; strcpy(cl.name, "Tester");
+    svgame.dllFuncs.pfnKeyValue = KeyValue; svgame.dllFuncs.pfnSpawn = Spawn; svgame.dllFuncs.pfnThink = Think;
+    svgame.physFuncs.pfnCreateEntitiesInRestoreList = RestoreFactory;
+    arguments[argumentCount++] = "ent_create";
+    const char* classname = !strcmp(test, "legacy") || !strcmp(test, "no-keyvalue") ? "weapon_9mmhandgun" : "weapon_modular";
+    if(!strcmp(test, "extension")) { classname = "weapon_extension"; svgame.physFuncs.SV_CreateEntity = ExtensionFactory; }
+    if(!strcmp(test, "unknown") || !strcmp(test, "normal-error")) classname = "not_a_class";
+    arguments[argumentCount++] = (char*)classname;
+    if(!strcmp(classname, "weapon_modular")) { arguments[argumentCount++] = "weapon_id"; arguments[argumentCount++] = "test_pistol"; }
+    if(!strcmp(test, "named")) { arguments[argumentCount++] = "targetname"; arguments[argumentCount++] = "my_pistol"; }
+    if(!strcmp(test, "pre-key-free")) { arguments[argumentCount++] = "remove"; arguments[argumentCount++] = "1"; }
+    if(!strcmp(test, "post-key-free") || !strcmp(test, "post-origin")) {
+        arguments[argumentCount++] = "|";
+        arguments[argumentCount++] = !strcmp(test, "post-origin") ? "origin" : "remove";
+        arguments[argumentCount++] = !strcmp(test, "post-origin") ? "20 30 40" : "1";
+    }
+    if(!strcmp(test, "no-think")) svgame.dllFuncs.pfnThink = NULL;
+    if(!strcmp(test, "no-keyvalue")) svgame.dllFuncs.pfnKeyValue = NULL;
+    if(!strcmp(test, "normal-error")) {
+        assert(!SV_CreateNamedEntity(NULL, SV_AllocString(classname)));
+        assert(strstr(output, "No spawn function")); return 0;
+    }
+    qboolean result = SV_EntCreate_f(&cl);
+    const qboolean failure = !strcmp(test, "unknown") || !strncmp(test, "spawn-", 6) ||
+        !strcmp(test, "think-free") || !strcmp(test, "pre-key-free") || !strcmp(test, "post-key-free");
+    if(failure) {
+        assert(!result); assert(!strstr(output, "Created ")); assert(packetCount == 0);
+        assert(strstr(output, !strcmp(test, "unknown") ? "No spawn function" : "Failed to initialize"));
+        if(!strcmp(test, "spawn-recycle")) assert(!entities[2].free && !strcmp(SV_GetString(entities[2].v.classname), "replacement"));
+        else assert(entities[2].free);
+        if(!strncmp(test, "spawn-", 6)) assert(thinkCalls == 0);
+    } else {
+        assert(result && strstr(output, "Created ")); assert(!strstr(output, "No spawn function"));
+        assert(packetCount == 6 && strstr(packets, "ent_getvars_cb\n")); assert(spawnCalls == 1);
+        assert(entities[2].v.model && entities[2].v.movetype == MOVETYPE_TOSS);
+        if(!strcmp(test, "named")) assert(strstr(packets, "set ent_last_name \"my_pistol\""));
+        if(!strcmp(test, "post-origin")) {
+            assert(entities[2].v.origin[0] == 20 && entities[2].v.origin[1] == 30 && entities[2].v.origin[2] == 40);
+            assert(entities[2].v.absmin[0] == -4 && strstr(packets, "20.000000 30.000000 40.000000"));
+        } else {
+            assert(entities[2].v.origin[0] == -92 && entities[2].v.origin[1] == 2 && entities[2].v.origin[2] == 4);
+            assert(strstr(packets, "-92.000000 2.000000 4.000000"));
+        }
+        if(strcmp(test, "no-think")) assert(entities[2].v.solid == SOLID_TRIGGER && thinkCalls == 1);
+        else assert(thinkCalls == 0);
+    }
+}

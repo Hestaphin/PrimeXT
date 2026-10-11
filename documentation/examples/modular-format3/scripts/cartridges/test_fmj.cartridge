@@ -1,0 +1,13 @@
+version = 3
+# J.10.6.9.3 format 3: SI projectile properties and energy-density coefficient.
+id = test_fmj
+chamber = 9x19
+projectile = fmj
+mass_grams = 8.04
+diameter_mm = 9.02
+drag_coefficient = 0.30
+reference_velocity_mps = 360
+projectile_count = 1
+damage_coefficient = 2.45302457
+category = 9x19/fmj
+sprite = sprites/640hud7.spr

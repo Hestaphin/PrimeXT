@@ -30,6 +30,11 @@
 #include "weapons.h"
 #include "func_break.h"
 #include "monster_satchel.h"
+#include "physic.h"
+#include "game.h"
+
+#include <algorithm>
+#include <cmath>
 
 extern DLL_GLOBAL Vector		g_vecAttackDir;
 extern DLL_GLOBAL int		g_iSkillLevel;
@@ -636,6 +641,12 @@ void CBaseMonster :: Killed( entvars_t *pevAttacker, int iGib )
 	{
 		SetTouch( NULL );
 		BecomeDead();
+        // J.10.6.3: request full death physics even when this asset already
+        // owns a partial/animation-controlled ragdoll. The physics layer
+        // promotes existing bodies and consumes pending impulses once.
+        if( CVAR_GET_FLOAT( "sv_auto_death_ragdoll" ) > 0.0f &&
+            WorldPhysic && HasPhysicsAsset() )
+            EnableRagdoll( true );
 	}
 	
 	// don't let the status bar glitch for players.with <0 health.
@@ -1083,6 +1094,49 @@ void RadiusDamage( Vector vecSrc, entvars_t *pevInflictor, entvars_t *pevAttacke
 	// iterate on all entities in the vicinity.
 	while ((pEntity = UTIL_FindEntityInSphere( pEntity, vecSrc, flRadius )) != NULL)
 	{
+		// Ragdoll reaction is independent from takedamage: a dead corpse should
+		// still be pushed by an explosion. Reuse the same coarse visibility/water
+		// rules as RadiusDamage, then distribute one total impulse across its
+		// articulated bodies by mass and per-body distance.
+		if( WorldPhysic && WorldPhysic->IsRagdoll( pEntity ))
+		{
+			const bool waterCompatible = !((bInWater && pEntity->pev->waterlevel == 0) || (!bInWater && pEntity->pev->waterlevel == 3));
+			if( waterCompatible )
+			{
+				const Vector ragdollSpot = pEntity->BodyTarget( vecSrc );
+				TraceResult ragdollLOS;
+				UTIL_TraceLine( vecSrc, ragdollSpot, dont_ignore_monsters, ENT(pevInflictor), &ragdollLOS );
+				if( ragdollLOS.flFraction == 1.0f || ragdollLOS.pHit == pEntity->edict() )
+				{
+					const float distance = (vecSrc - ragdollSpot).Length();
+					const float adjusted = std::max( 0.0f, flDamage - distance * falloff );
+					const float configuredScale = ragdoll_blast_impulse_scale.value;
+					const float impulseScale = std::isfinite( configuredScale ) ? std::clamp( configuredScale, 0.0f, 100.0f ) : 0.0f;
+					WorldPhysic->AddPhysicsAssetRadialImpulse( pEntity, vecSrc, flRadius, adjusted * impulseScale );
+				}
+			}
+		}
+
+		// An indestructible prop can still have a free or bullet-activatable
+		// hinge. Apply exactly one blast event per entity, independently from
+		// the entity's damage state, using the existing explosion visibility
+		// rules. The physics layer distributes this ONE budget among parts.
+		if( WorldPhysic && !WorldPhysic->IsRagdoll(pEntity) &&
+			!((bInWater && pEntity->pev->waterlevel == 0) || (!bInWater && pEntity->pev->waterlevel == 3)) )
+		{
+			const Vector targetSpot = pEntity->BodyTarget(vecSrc);
+			TraceResult partLOS;
+			UTIL_TraceLine(vecSrc, targetSpot, dont_ignore_monsters, ENT(pevInflictor), &partLOS);
+			if( partLOS.flFraction == 1.0f || partLOS.pHit == pEntity->edict() )
+			{
+				const float adjusted = std::max(0.0f, flDamage - (vecSrc - targetSpot).Length() * falloff);
+				const float configured = prop_blast_impulse_scale.value;
+				const float scale = std::isfinite(configured) ? std::clamp(configured, 0.0f, 100.0f) : 0.0f;
+				if( adjusted > 0.0f && scale > 0.0f )
+					WorldPhysic->AddPhysicsPartRadialImpulse(pEntity, vecSrc, flRadius, adjusted * scale, adjusted);
+			}
+		}
+
 		if ( pEntity->pev->takedamage != DAMAGE_NO )
 		{
 			// UNDONE: this should check a damage mask, not an ignore
@@ -1118,6 +1172,24 @@ void RadiusDamage( Vector vecSrc, entvars_t *pevInflictor, entvars_t *pevAttacke
 				if ( flAdjustedDamage < 0 )
 				{
 					flAdjustedDamage = 0;
+				}
+
+				// Preserve the impulse from an explosion that causes ragdoll. The
+				// character is still animation-driven here, so queue a short-lived
+				// impulse and transfer it if the damage below activates its .phys
+				// asset. Survivors simply let the pending entry expire.
+				if( flAdjustedDamage > 0.0f && WorldPhysic && !WorldPhysic->IsRagdoll( pEntity ) && WorldPhysic->HasPhysicsAsset( pEntity ))
+				{
+					const float configuredScale = ragdoll_blast_impulse_scale.value;
+					const float impulseScale = std::isfinite( configuredScale ) ? std::clamp( configuredScale, 0.0f, 100.0f ) : 0.0f;
+					if( impulseScale > 0.0f )
+					{
+						Vector impulseDir = tr.vecEndPos - vecSrc;
+						if( impulseDir.Length() <= 0.001f ) impulseDir = pEntity->BodyTarget( vecSrc ) - vecSrc;
+						if( impulseDir.Length() <= 0.001f ) impulseDir = Vector( 0.0f, 0.0f, 1.0f );
+						else impulseDir = impulseDir.Normalize();
+						WorldPhysic->QueuePhysicsAssetImpulse( pEntity, tr.iHitgroup, impulseDir * ( flAdjustedDamage * impulseScale ), tr.vecEndPos );
+					}
 				}
 			
 				// ALERT( at_console, "hit %s\n", STRING( pEntity->pev->classname ) );
@@ -1398,7 +1470,7 @@ Go to the trouble of combining multiple pellets into a single damage call.
 This version is used by Monsters.
 ================
 */
-void CBaseEntity::FireBullets(ULONG cShots, Vector vecSrc, Vector vecDirShooting, Vector vecSpread, float flDistance, int iBulletType, int iTracerFreq, int iDamage, entvars_t *pevAttacker )
+void CBaseEntity::FireBullets(ULONG cShots, Vector vecSrc, Vector vecDirShooting, Vector vecSpread, float flDistance, int iBulletType, int iTracerFreq, float iDamage, entvars_t *pevAttacker )
 {
 	static int tracerCount;
 	int tracer;
@@ -1428,9 +1500,10 @@ void CBaseEntity::FireBullets(ULONG cShots, Vector vecSrc, Vector vecDirShooting
 		Vector vecEnd;
 
 		vecEnd = vecSrc + vecDir * flDistance;
-		SetBits(gpGlobals->trace_flags, FTRACE_MATERIAL_TRACE);
+		SetBits(gpGlobals->trace_flags, FTRACE_MATERIAL_TRACE | FTRACE_BULLET_PHYSICS);
 		UTIL_TraceLine(vecSrc, vecEnd, dont_ignore_monsters, ENT(pev)/*pentIgnore*/, &tr);
-		ClearBits(gpGlobals->trace_flags, FTRACE_MATERIAL_TRACE);
+		ClearBits(gpGlobals->trace_flags, FTRACE_MATERIAL_TRACE | FTRACE_BULLET_PHYSICS);
+		const int ragdollBody = ResolveRagdollBulletCollision( &tr, vecSrc, vecEnd, ENT(pev) );
 
 		tracer = 0;
 		if (iTracerFreq != 0 && (tracerCount++ % iTracerFreq) == 0)
@@ -1470,88 +1543,99 @@ void CBaseEntity::FireBullets(ULONG cShots, Vector vecSrc, Vector vecDirShooting
 		if (tr.flFraction != 1.0)
 		{
 			CBaseEntity *pEntity = CBaseEntity::Instance(tr.pHit);
+			TraceResult impactTrace;
+			ResolveBulletImpactEffects( &tr, vecSrc, vecEnd, &impactTrace );
 
 			if ( iDamage )
 			{
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, vecSrc, vecEnd, vecDir, iDamage );
 				pEntity->TraceAttack(pevAttacker, iDamage, vecDir, &tr, DMG_BULLET | ((iDamage > 16) ? DMG_ALWAYSGIB : DMG_NEVERGIB) );
 				
-				TEXTURETYPE_PlaySound(&tr, vecSrc, vecEnd, iBulletType);
-				DecalGunshot(&tr, iBulletType, vecSrc, vecEnd);
+				TEXTURETYPE_PlaySound(&impactTrace, vecSrc, vecEnd, iBulletType);
+				DecalGunshot(&impactTrace, iBulletType, vecSrc, vecEnd);
 			} 
 			else switch(iBulletType)
 			{
 			default:
 			case BULLET_MONSTER_9MM:
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, vecSrc, vecEnd, vecDir, gSkillData.monDmg9MM );
 				pEntity->TraceAttack(pevAttacker, gSkillData.monDmg9MM, vecDir, &tr, DMG_BULLET);
 				if ( !tracer )
 				{
-					TEXTURETYPE_PlaySound(&tr, vecSrc, vecEnd, iBulletType);
-					DecalGunshot(&tr, iBulletType, vecSrc, vecEnd);
+					TEXTURETYPE_PlaySound(&impactTrace, vecSrc, vecEnd, iBulletType);
+					DecalGunshot(&impactTrace, iBulletType, vecSrc, vecEnd);
 				}
 				break;
 
 			case BULLET_MONSTER_MP5:
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, vecSrc, vecEnd, vecDir, gSkillData.monDmgMP5 );
 				pEntity->TraceAttack(pevAttacker, gSkillData.monDmgMP5, vecDir, &tr, DMG_BULLET);
 				if ( !tracer )
 				{
-					TEXTURETYPE_PlaySound(&tr, vecSrc, vecEnd, iBulletType);
-					DecalGunshot(&tr, iBulletType, vecSrc, vecEnd);
+					TEXTURETYPE_PlaySound(&impactTrace, vecSrc, vecEnd, iBulletType);
+					DecalGunshot(&impactTrace, iBulletType, vecSrc, vecEnd);
 				}
 				break;
 
 			case BULLET_MONSTER_12MM:		
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, vecSrc, vecEnd, vecDir, gSkillData.monDmg12MM );
 				pEntity->TraceAttack(pevAttacker, gSkillData.monDmg12MM, vecDir, &tr, DMG_BULLET); 
 				if ( !tracer )
 				{
-					TEXTURETYPE_PlaySound(&tr, vecSrc, vecEnd, iBulletType);
-					DecalGunshot(&tr, iBulletType, vecSrc, vecEnd);
+					TEXTURETYPE_PlaySound(&impactTrace, vecSrc, vecEnd, iBulletType);
+					DecalGunshot(&impactTrace, iBulletType, vecSrc, vecEnd);
 				}
 				break;
 
 			case BULLET_PLAYER_357:
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, vecSrc, vecEnd, vecDir, gSkillData.plrDmg357 );
 				pEntity->TraceAttack(pevAttacker, gSkillData.plrDmg357, vecDir, &tr, DMG_BULLET);
 				if ( !tracer )
 				{
-					TEXTURETYPE_PlaySound(&tr, vecSrc, vecEnd, iBulletType);
-					DecalGunshot(&tr, iBulletType, vecSrc, vecEnd);
+					TEXTURETYPE_PlaySound(&impactTrace, vecSrc, vecEnd, iBulletType);
+					DecalGunshot(&impactTrace, iBulletType, vecSrc, vecEnd);
 				}
 				break;
 
 			case BULLET_PLAYER_9MM:		
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, vecSrc, vecEnd, vecDir, gSkillData.plrDmg9MM );
 				pEntity->TraceAttack(pevAttacker, gSkillData.plrDmg9MM, vecDir, &tr, DMG_BULLET); 
 				if ( !tracer )
 				{
-					TEXTURETYPE_PlaySound(&tr, vecSrc, vecEnd, iBulletType);
-					DecalGunshot(&tr, iBulletType, vecSrc, vecEnd);
+					TEXTURETYPE_PlaySound(&impactTrace, vecSrc, vecEnd, iBulletType);
+					DecalGunshot(&impactTrace, iBulletType, vecSrc, vecEnd);
 				}
 				break;
 
 			case BULLET_PLAYER_MP5:		
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, vecSrc, vecEnd, vecDir, gSkillData.plrDmgMP5 );
 				pEntity->TraceAttack(pevAttacker, gSkillData.plrDmgMP5, vecDir, &tr, DMG_BULLET); 
 				if ( !tracer )
 				{
-					TEXTURETYPE_PlaySound(&tr, vecSrc, vecEnd, iBulletType);
-					DecalGunshot(&tr, iBulletType, vecSrc, vecEnd);
+					TEXTURETYPE_PlaySound(&impactTrace, vecSrc, vecEnd, iBulletType);
+					DecalGunshot(&impactTrace, iBulletType, vecSrc, vecEnd);
 				}
 				break;
 
 			case BULLET_PLAYER_BUCKSHOT:	
 				 // make distance based!
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, vecSrc, vecEnd, vecDir, gSkillData.plrDmgBuckshot );
 				pEntity->TraceAttack(pevAttacker, gSkillData.plrDmgBuckshot, vecDir, &tr, DMG_BULLET); 
 				if ( !tracer )
 				{
-					TEXTURETYPE_PlaySound(&tr, vecSrc, vecEnd, iBulletType);
-					DecalGunshot(&tr, iBulletType, vecSrc, vecEnd);
+					TEXTURETYPE_PlaySound(&impactTrace, vecSrc, vecEnd, iBulletType);
+					DecalGunshot(&impactTrace, iBulletType, vecSrc, vecEnd);
 				}
 				break;
 			
 			case BULLET_NONE: // FIX 
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, vecSrc, vecEnd, vecDir, 50.0f );
 				pEntity->TraceAttack(pevAttacker, 50, vecDir, &tr, DMG_CLUB);
-				TEXTURETYPE_PlaySound(&tr, vecSrc, vecEnd, iBulletType);
+				TEXTURETYPE_PlaySound(&impactTrace, vecSrc, vecEnd, iBulletType);
 				// only decal glass
 				if ( !FNullEnt(tr.pHit) && VARS(tr.pHit)->rendermode != 0)
 				{
-					UTIL_DecalTrace( &tr, "{break1" );
+					UTIL_DecalTrace( &impactTrace, "{break1" );
 				}
 
 				break;

@@ -159,6 +159,7 @@ float ComputePixelWidthOfSphere(const Vector &vecOrigin, float flRadius);
 bool UTIL_IsPlayer( int idx );
 bool UTIL_IsLocal( int idx );
 void Physic_SweepTest(cl_entity_t *pTouch, const Vector &start, const Vector &mins, const Vector &maxs, const Vector &end, trace_t *tr);
+void HUD_ClearPhysCollisionCache();
 
 //extern int HUD_AddEntity( int type, struct cl_entity_s *ent, const char *modelname );
 //extern void HUD_TxferLocalOverrides( struct entity_state_s *state, const struct clientdata_s *client );

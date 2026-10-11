@@ -587,6 +587,14 @@ Init common textures for renderer that size
 based on screen size
 ==================
 */
+void R_SyncSkyboxTextures( void )
+{
+	// The engine can replace/unload the sky after VidInit, on map changes or
+	// sky-name updates. Engine indices are borrowed: never free them here.
+	for (int i = 0; i < 6; ++i)
+		tr.skyboxTextures[i] = TextureHandle::GetSkyboxTextures(i);
+}
+
 void R_InitCommonTextures( void )
 {
 	int	i;
@@ -616,8 +624,7 @@ void R_InitCommonTextures( void )
 	}
 
 	// setup the skybox sides
-	for( i = 0; i < 6; i++ )
-		tr.skyboxTextures[i] = TextureHandle::GetSkyboxTextures(i);
+	R_SyncSkyboxTextures();
 
 	tr.num_framebuffers = 0;
 	tr.num_subview_used = 0;

@@ -69,6 +69,7 @@ void CTurret::Precache()
 
 void CTurret::Shoot(Vector &vecSrc, Vector &vecDirToEnemy)
 {
+	if (TryModularShoot(vecSrc, vecDirToEnemy)) return;
 	FireBullets( 1, vecSrc, vecDirToEnemy, TURRET_SPREAD, TURRET_RANGE, BULLET_MONSTER_12MM, 1 );
 	EMIT_SOUND(ENT(pev), CHAN_WEAPON, "turret/tu_fire1.wav", 1, 0.6);
 	pev->effects |= EF_MUZZLEFLASH;

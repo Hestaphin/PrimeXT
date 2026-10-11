@@ -1,0 +1,187 @@
+// Real modular context class/methods; engine presentation and services adapted.
+#include "modular_asset_state.h"
+#include "modular_ammo_policy.h"
+#include "cartridge_damage.h"
+#include "modular_damage_scope.h"
+#include <algorithm>
+#include <cassert>
+#include <cstring>
+#include <cmath>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <sstream>
+#include <utility>
+
+constexpr int MAX_AMMO_SLOTS=32,ITEM_FLAG_NOAUTORELOAD=1,PLAYER_ATTACK1=1,EF_MUZZLEFLASH=2;
+constexpr int TRUE=1,FALSE=0;
+constexpr int IN_ATTACK=1,IN_ATTACK2=2,CHAN_WEAPON=1,CHAN_ITEM=2,ATTN_NORM=0,HUD_PRINTCENTER=0;
+using BOOL=int;
+#define Q_min(a,b) std::min(a,b)
+struct Vector {float x=0,y=0,z=0;Vector()=default;Vector(float a,float b,float c):x(a),y(b),z(c){}
+    Vector Normalize()const{float length=std::sqrt(x*x+y*y+z*z);return length?Vector(x/length,y/length,z/length):Vector();}
+    bool operator==(Vector b)const{return x==b.x&&y==b.y&&z==b.z;}};
+const Vector g_vecZero{};
+Vector UTIL_VecToAngles(Vector){return {};}
+struct matrix3x3 {matrix3x3()=default;explicit matrix3x3(Vector){};Vector GetAngles() const {return {};}};
+struct ItemInfo {const char* pszName=nullptr;const char* pszAmmo1=nullptr;int iMaxAmmo1=0,iMaxAmmo2=0,iMaxClip=0,iSlot=0,iPosition=0,iFlags=0,iId=0,iWeight=0;};
+std::map<int,std::string> pool{{0,""}};
+int ALLOC_STRING(const char* p) {int id=int(pool.size());pool[id]=p;return id;}
+const char* STRING(int id) {return pool.at(id).c_str();}
+#define MAKE_STRING ALLOC_STRING
+struct entvars_t {int model=0,weaponmodel=0,effects=0;};
+struct CBaseEntity {entvars_t vars;entvars_t* pev=&vars;float damage=0;int bullets=0;
+    void* edict(){return this;}
+    void FireBullets(int n,Vector,Vector,Vector,float,int,int,float d=0){bullets+=n;damage=d;}};
+struct CBasePlayer:CBaseEntity {char m_szAnimExtention[64]{};void SetAnimation(int){};void* edict(){return this;}};
+struct CBasePlayerWeapon:CBaseEntity {CBasePlayer player;CBasePlayer* m_pPlayer=&player;void* edict(){return this;}};
+std::string lastSound;int sounds=0;
+void EMIT_SOUND(void*,int,const char* path,float,int){lastSound=path;++sounds;}
+void SET_MODEL(void* e,const char* path){static_cast<CBasePlayerWeapon*>(e)->pev->model=ALLOC_STRING(path);}
+void ClientPrint(entvars_t*,int,const char*){}
+const char* UTIL_VarArgs(const char*,const char*){return "";}
+bool verified=true;
+bool ModularClientDefinitionsVerified(){return verified;}
+struct SpriteResource {std::string hud,ammo;int changes=0;
+    void SetModularSprites(int,const char* h,const char* a){if(hud!=h||ammo!=a)++changes;hud=h;ammo=a;}} gWR;
+enum class WeaponEventFlags {NotHost};
+struct WeaponEventParams {WeaponEventFlags flags;int eventindex=0;Vector origin,angles;};
+struct IWeaponLayer {
+    CBasePlayerWeapon gun; std::string view,viewAtAnimation;uint32_t seed=1;int seedReads=0;
+    int ammo[32]{},buttons=0,water=0,shots=0,events=0,animation=-1;float lastDamage=0,nextAttack=0,now=1;
+    bool run=true;
+    int FindAmmoType(const char* id){return std::string(id)=="test_jhp"?2:1;}
+    int PrecacheEvent(const char*){return 1;}
+    int GetPlayerAmmo(int i){return ammo[i];}
+    int GetPlayerWaterlevel(){return water;}
+    uint32_t GetRandomSeed(){++seedReads;return seed;}
+    Vector GetGunPosition(){return {};}
+    matrix3x3 GetCameraOrientation(){return {};}
+    CBasePlayerWeapon* GetWeaponEntity(){return &gun;}
+    Vector FireBullets(int count,Vector,matrix3x3,float,float,int,uint32_t,float damage=0){shots+=count;lastDamage=damage;return {};}
+    void SetPlayerViewmodel(std::string_view path){view=path;}
+    void DisablePlayerViewmodel(){view.clear();}
+    void SetPlayerWeaponAnim(int anim){animation=anim;viewAtAnimation=view;}
+    void SetPlayerNextAttackTime(float time){nextAttack=time;}
+    void AddPlayerPunchangle(float,float,float){}
+    bool ShouldRunFuncs(){return run;}
+    void PlaybackWeaponEvent(const WeaponEventParams&){++events;}
+    float GetWeaponTimeBase(bool){return now;}
+    bool CheckPlayerButtonFlag(int mask){return buttons&mask;}
+};
+class CBaseWeaponContext {
+public:
+    std::unique_ptr<IWeaponLayer> m_pLayer;
+    int m_iId=0,m_iDefaultAmmo=0,m_iClip=0,m_iPrimaryAmmoType=1,m_iSecondaryAmmoType=1,m_fInReload=0;
+    int m_fFireOnEmpty=0;
+    float m_flNextPrimaryAttack=0,m_flNextSecondaryAttack=0,m_flTimeWeaponIdle=0,m_flLastFireTime=0;
+    explicit CBaseWeaponContext(std::unique_ptr<IWeaponLayer>&& layer):m_pLayer(std::move(layer)){}
+    virtual ~CBaseWeaponContext()=default;
+    virtual int GetItemInfo(ItemInfo*)const{return 0;}virtual bool Deploy(){return true;}
+    virtual bool CanDeploy(){return true;}virtual bool IsUseable(){return true;}
+    virtual void Holster(){m_fInReload=0;m_pLayer->DisablePlayerViewmodel();}
+    virtual void PrimaryAttack(){}virtual void SecondaryAttack(){}virtual void Reload(){}virtual void WeaponIdle(){}
+    virtual void OnPreItemPostFrame(){}virtual void OnReloadFinished(){}
+    virtual bool ShouldWeaponIdle(){return false;}virtual int iItemSlot(){return 0;}
+    bool UsePredicting(){return true;}
+    bool DefaultDeploy(char*,char*,int,char*,int body=0);
+    int DefaultReload(int,int,float,int body=0);
+    void SendWeaponAnim(int anim,int=0){m_pLayer->SetPlayerWeaponAnim(anim);}
+    void ResetEmptySound(){}void PlayEmptySound(){}
+    float GetNextPrimaryAttackDelay(float delay){return m_pLayer->now+delay;}
+    bool CanAttack(float time){return time <= m_pLayer->now;}
+};
+using ModularAttackHandler=bool(*)(IWeaponLayer&,const modular::Weapon&,const modular::Attack&,uint32_t);
+@CONTEXT_DECLARATION@
+bool ballistics=true,admit=true;int launched=0;modular::AssetSelection launchedSelection;
+float CVAR_GET_FLOAT(const char*){return ballistics?1.f:0.f;}
+bool SpawnModularBallisticShot(CBaseEntity*,const modular::Weapon&,const modular::Cartridge&,float,int count,
+    const Vector&,const matrix3x3&,float,uint32_t,const modular::AssetSelection* selection){
+    if(!admit)return false;launched+=count;launchedSelection=*selection;return true;
+}
+@BASE_METHODS@
+@PRODUCTION@
+int RANDOM_LONG(int,int){return 123;}
+@NPC_PRODUCTION@
+
+int main(int argc,char** argv){
+    assert(argc==2);
+    auto& registry=modular::SharedRegistry();
+    assert(registry.Load([&](const std::string& path,std::string& text){
+        std::ifstream file(std::string(argv[1])+"/"+path);if(!file)return false;
+        std::ostringstream output;output<<file.rdbuf();text=output.str();
+        if(path.find(".cartridge")!=std::string::npos) {
+            const auto start=text.find("damage_coefficient =");
+            const auto end=text.find('\n',start);
+            text.replace(start,end-start,"damage_coefficient = 0.01");
+        }
+        if(path.find(".weapon")!=std::string::npos)text+="\nnpc_usable = 1\n";
+        return true;}));
+    auto w=*registry.FindWeapon("test_pistol");
+    w.primary.event="events/probe.sc";
+    w.assets.push_back({"auto_view","view_model","auto.mdl","auto",modular::AssetCondition::FireMode});
+    w.ammoOverrides[0].viewModel="jhp.mdl";w.ammoOverrides[0].playerModel="jhp_player.mdl";
+    w.ammoOverrides[0].worldModel="jhp_world.mdl";w.ammoOverrides[0].fireSound="jhp.wav";
+    auto layer=std::make_unique<IWeaponLayer>();auto* io=layer.get();
+    io->ammo[1]=30;io->ammo[2]=30;
+    CModularWeaponContext context(std::move(layer),&w);context.m_iClip=3;
+    assert(context.Deploy());assert(context.m_assetAction==int(modular::AssetAction::Deploy));
+    const auto deployed=io->view;const auto deploySeed=context.m_assetSeed;
+    for(int i=0;i<30;++i){++io->seed;context.OnPreItemPostFrame();assert(io->view==deployed&&context.m_assetSeed==deploySeed);}
+    assert(context.CycleCartridge());assert(context.m_loadedCartridgeIndex==0&&context.m_selectedCartridgeIndex==1);
+    context.m_selectedCartridgeIndex=-1;assert(!context.CycleCartridge());context.m_selectedCartridgeIndex=1;
+    assert(io->view==deployed); // selecting next ammo does not replace the loaded magazine
+    const auto before=context.m_assetSeed;context.Reload();assert(!context.m_fInReload&&context.m_assetSeed==before);
+    context.m_iClip=0;context.Reload();assert(context.m_fInReload&&io->view=="jhp.mdl"&&io->viewAtAnimation=="jhp.mdl");
+#ifndef CLIENT_DLL
+    assert(lastSound=="weapons/357_reload1.wav"&&std::string(STRING(io->gun.player.pev->weaponmodel))=="jhp_player.mdl");
+#endif
+    const auto reloadSeed=context.m_assetSeed;
+    for(int i=0;i<30;++i){++io->seed;context.OnPreItemPostFrame();assert(context.m_assetSeed==reloadSeed&&io->view=="jhp.mdl");}
+    context.m_fInReload=0;context.m_iClip=5;context.OnReloadFinished();assert(context.m_loadedCartridgeIndex==1);
+    ballistics=false;assert(context.FireAction(w.primary,false));assert(io->view=="jhp.mdl");
+#ifndef CLIENT_DLL
+    const auto* cartridge=registry.FindCartridge("test_jhp");
+    assert(io->lastDamage>0&&io->lastDamage<1);
+    assert(io->shots==1&&std::abs(io->lastDamage-modular::MuzzleDamage(*cartridge,335))<.0001);
+    assert(lastSound=="jhp.wav");
+#endif
+    const auto shotSeed=context.m_assetSeed;const auto shotAction=context.m_assetAction;
+    io->seed+=99;context.m_iClip=0;assert(!context.FireAction(w.primary,false));
+    assert(context.m_assetSeed==shotSeed&&context.m_assetAction==shotAction);
+    context.m_iClip=4;context.m_loadedCartridgeIndex=context.m_selectedCartridgeIndex=0;
+    auto secondary=w.primary;secondary.behavior="hitscan";secondary.mode="auto";w.secondary=secondary;
+    assert(context.FireAction(w.secondary,true));assert(io->view=="auto.mdl"&&io->viewAtAnimation=="auto.mdl");
+    w.assets.push_back({"r1","world_model","random_a.mdl","",modular::AssetCondition::Random});
+    w.assets.push_back({"r2","world_model","random_b.mdl","",modular::AssetCondition::Random});
+    assert(context.FireAction(w.secondary,true));
+    float f1,f2,f3;modular::EncodeAssetState(context.m_assetSeed,context.m_assetAction,f1,f2,f3);
+    uint32_t restoredSeed;int restoredAction;assert(modular::DecodeAssetState(f1,f2,f3,restoredSeed,restoredAction));
+    const auto chosen=modular::SelectAsset(w,context.AssetsFor(modular::AssetAction(restoredAction),restoredSeed),"world_model");
+    context.m_assetSeed=restoredSeed;context.m_assetAction=restoredAction;
+    for(int i=0;i<50;++i){++io->seed;context.OnPreItemPostFrame();
+        assert(modular::SelectAsset(w,context.AssetsFor(modular::AssetAction(restoredAction),context.m_assetSeed),"world_model")==chosen);}
+#ifndef CLIENT_DLL
+    ballistics=true;admit=false;const int clip=context.m_iClip;const auto seed=context.m_assetSeed;
+    assert(!context.FireAction(w.primary,false)&&context.m_iClip==clip&&context.m_assetSeed==seed);
+    admit=true;assert(context.FireAction(w.primary,false));
+    assert(launched==1&&launchedSelection.cartridgeId=="test_fmj"&&launchedSelection.seed==context.m_assetSeed);
+    assert(!g_modularDamageSource);
+    CBaseEntity npc;ballistics=false;
+    assert(FireModularNpcWeapon(&npc,"test_pistol","test_jhp",{},{1,0,0},10)==1);
+    assert(npc.bullets==1&&std::abs(npc.damage-modular::MuzzleDamage(*registry.FindCartridge("test_jhp"),335))<.0001);
+    assert(FireModularNpcWeapon(&npc,"test_pistol","unaccepted",{},{1,0,0},10)==0);
+    ballistics=true;admit=false;
+    assert(FireModularNpcWeapon(&npc,"test_pistol","test_fmj",{},{1,0,0},10)==0);
+    assert(!g_modularDamageSource);
+#else
+    verified=false;const auto seed=context.m_assetSeed;
+    assert(!context.FireAction(w.secondary,true)&&context.m_assetSeed==seed);
+    assert(!context.Deploy()&&context.m_assetSeed==seed);
+    context.m_iClip=0;context.Reload();assert(!context.m_fInReload&&context.m_assetSeed==seed);
+    verified=true;assert(!gWR.hud.empty()&&!gWR.ammo.empty());
+#endif
+    context.Holster();assert(io->view.empty());assert(context.Deploy());
+    std::cout<<"PASS real context: deploy, typed cycle/reload, action models/sounds, damage, refusal, prediction replay and switch\n";
+}

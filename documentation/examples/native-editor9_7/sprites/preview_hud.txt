@@ -1,0 +1,5 @@
+4
+weapon 640 preview 0 0 2 2
+weapon_s 640 cool 0 0 2 2
+ammo 640 warm 0 0 2 2
+crosshair 640 preview 0 0 2 2
