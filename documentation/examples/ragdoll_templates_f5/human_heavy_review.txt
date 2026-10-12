@@ -1,0 +1,12 @@
+Actual SHA-checked Barney MDL; native solver/game acceptance pending.
+AXIS REVIEW left_forearm: bind bend plane; confirm positive flexion, or use explicit frame.
+AXIS REVIEW right_forearm: bind bend plane; confirm positive flexion, or use explicit frame.
+AXIS REVIEW left_calf: bind bend plane; confirm positive flexion, or use explicit frame.
+AXIS REVIEW right_calf: bind bend plane; confirm positive flexion, or use explicit frame.
+Resolved self collision=selective; configured allow pairs=73. Off suppresses the matrix.
+OVERLAP Bip01 Pelvis / Bip01 L Leg depth estimate=4.026234; trim/offset colliders before enabling contact.
+OVERLAP Bip01 Pelvis / Bip01 R Leg depth estimate=3.989297; trim/offset colliders before enabling contact.
+OVERLAP Bip01 Spine3 / Bip01 L Arm depth estimate=1.334069; trim/offset colliders before enabling contact.
+OVERLAP Bip01 L Leg / Bip01 R Leg depth estimate=0.352775; trim/offset colliders before enabling contact.
+OVERLAP Bip01 L Leg1 / Bip01 R Leg1 depth estimate=0.808824; trim/offset colliders before enabling contact.
+F2 candidate: inspect axes, overlaps and live drops. No solver or visual stability certification.

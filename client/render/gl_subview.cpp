@@ -250,7 +250,9 @@ texFlags_t R_SetupScreenView(msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &v
 	CViewport	viewport;
 
 	viewmat.Identity();
-	if (camera->player && UTIL_IsLocal(camera->curstate.number))
+	rvp->viewentity = camera->curstate.number;
+	const bool localPlayerView = camera->player && UTIL_IsLocal(camera->curstate.number);
+	if (localPlayerView)
 	{
 		ref_params_t viewparams;
 		memcpy(&viewparams, &tr.viewparams, sizeof(viewparams));
@@ -259,18 +261,20 @@ texFlags_t R_SetupScreenView(msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &v
 		if (tr.viewparams.viewentity > tr.viewparams.maxclients)
 			V_CalcFirstPersonRefdef(&viewparams);
 
-		rvp->flags = RP_SCREENVIEW | RP_FORCE_NOPLAYER;
-		RI->view.pvspoint = viewparams.vieworg;
-		return TF_NOMIPMAP;
+		origin = viewparams.vieworg;
+		angles = viewparams.viewangles;
+	}
+	else
+	{
+		origin = camera->origin;
+		angles = camera->angles;
 	}
 
-	origin = camera->origin;
-	angles = camera->angles;
-
-	studiohdr_t *viewmonster = (studiohdr_t *)IEngineStudio.Mod_Extradata(camera->model);
+	studiohdr_t *viewmonster = camera->model && camera->model->type == mod_studio
+		? (studiohdr_t *)IEngineStudio.Mod_Extradata(camera->model) : NULL;
 
 	// it's monster
-	if (viewmonster && FBitSet(camera->curstate.eflags, EFLAG_SLERP))
+	if (!localPlayerView && viewmonster && FBitSet(camera->curstate.eflags, EFLAG_SLERP))
 	{
 		Vector forward;
 		AngleVectors(angles, forward, NULL, NULL);
@@ -286,7 +290,7 @@ texFlags_t R_SetupScreenView(msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &v
 	// lasttime goes into ent->latched.sequencetime
 	// oldz goes into ent->latched.prevanimtime
 	// HACKHACK we store interpolate values into func_monitor entity to avoid broke lerp
-	if (origin[2] - ent->latched.prevanimtime > 0.0f)
+	if (!localPlayerView && origin[2] - ent->latched.prevanimtime > 0.0f)
 	{
 		float steptime;
 
@@ -354,7 +358,7 @@ texFlags_t R_SetupScreenView(msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &v
 	rvp->viewangles[1] = anglemod(angles[1]);
 	rvp->viewangles[2] = anglemod(angles[2]);
 	rvp->vieworigin = origin;
-	RI->view.pvspoint = camera->origin;
+	RI->view.pvspoint = localPlayerView ? origin : camera->origin;
 
 	rvp->flags = RP_SCREENVIEW;
 	if (camera->player) {
@@ -374,10 +378,12 @@ Allocate the screen texture and make copy
 int R_AllocateSubviewTexture(const CViewport &viewport, texFlags_t texFlags)
 {
 	int	i;
+	if(viewport.GetWidth() <= 0 || viewport.GetHeight() <= 0) return 0;
 
 	// first, search for available mirror texture
 	for ( i = 0; i < tr.num_subview_used; i++ )
 	{
+		if(!tr.subviewTextures[i].texturenum.Initialized()) continue;
 		if( tr.subviewTextures[i].texframe == tr.realframecount )
 			continue;	// already used for this frame
 
@@ -410,12 +416,30 @@ int R_AllocateSubviewTexture(const CViewport &viewport, texFlags_t texFlags)
 			texFlags = static_cast<texFlags_t>(texFlags | TF_ARB_FLOAT | TF_ARB_16BIT);
 		}
 
-		// create new mirror texture
-		tr.subviewTextures[i].texturenum = CREATE_TEXTURE( va( "*subview%i", i ), viewport.GetWidth(), viewport.GetHeight(), NULL, texFlags ); 
-		tr.subviewTextures[i].texframe = tr.realframecount; // now used
-		if( GL_Support( R_FRAMEBUFFER_OBJECT ))
-			tr.subviewTextures[i].framebuffer = R_AllocFrameBuffer( viewport );
-		tr.num_subview_used++; // allocate new one
+		// Commit the slot only after both driver allocations and attachments work.
+		TextureHandle texture = CREATE_TEXTURE(va("*subview%i", i), viewport.GetWidth(), viewport.GetHeight(), NULL, texFlags);
+		if(!texture.Initialized()) return 0;
+		if(!texture.GetGlHandle()) { FREE_TEXTURE(texture); return 0; }
+		int framebuffer = -1;
+		if(GL_Support(R_FRAMEBUFFER_OBJECT))
+		{
+			const GLuint previous = glState.frameBuffer;
+			framebuffer = R_AllocFrameBuffer(viewport);
+			if(framebuffer < 0) { FREE_TEXTURE(texture); return 0; }
+			GL_BindFrameBuffer(framebuffer, texture);
+			if(pglCheckFramebufferStatus(GL_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT)
+			{
+				GL_BindFBO(previous);
+				R_FreeFrameBuffer(framebuffer);
+				if(framebuffer == tr.num_framebuffers - 1) --tr.num_framebuffers;
+				FREE_TEXTURE(texture);
+				return 0;
+			}
+		}
+		tr.subviewTextures[i].texturenum = texture;
+		tr.subviewTextures[i].framebuffer = framebuffer;
+		tr.subviewTextures[i].texframe = tr.realframecount;
+		tr.num_subview_used++;
 	}
 
 	if( GL_Support( R_FRAMEBUFFER_OBJECT ))
@@ -497,6 +521,10 @@ bool R_CheckPortalSource(msurface_t *surf, msurface_t *check)
 		return false;
 
 	if (!check->info->subtexture[glState.stack_position - 1])
+		return false;
+
+	// The source transform is part of the portal view, even for one camera.
+	if (surf->info->parent != check->info->parent)
 		return false;
 
 	// different cameras
@@ -597,6 +625,23 @@ bool R_CheckOutside( void )
 	return false;
 }
 
+static cl_entity_t *R_GetSubviewCamera( msurface_t *surf )
+{
+	if( !surf || !surf->info )
+		return NULL;
+	cl_entity_t *parent = surf->info->parent;
+	if( !parent || !parent->model || parent->curstate.messagenum != r_currentMessageNum )
+		return NULL;
+	if( FBitSet( surf->flags, SURF_REFLECT|SURF_REFLECT_PUDDLE ))
+		return parent;
+	if( parent->curstate.sequence <= 0 )
+		return NULL;
+	cl_entity_t *camera = GET_ENTITY( parent->curstate.sequence );
+	if( !camera || camera->curstate.messagenum != r_currentMessageNum )
+		return NULL;
+	return camera;
+}
+
 /*
 ================
 R_RenderSubview
@@ -612,7 +657,6 @@ void R_RenderSubview()
 
 	ref_instance_t *prevRI;
 	unsigned int oldFBO;
-	ref_viewpass_t rvp;
 	matrix4x4 viewmatrix;
 	bool has_mirrors = FBitSet(world->features, WORLD_HAS_MIRRORS);
 	bool has_screens = FBitSet(world->features, WORLD_HAS_SCREENS);
@@ -646,10 +690,18 @@ void R_RenderSubview()
 	for( int i = 0; i < prevRI->frame.num_subview_faces; i++ )
 	{
 		msurface_t *surf = prevRI->frame.subview_faces[i];
+		if( !surf || !surf->info )
+			continue;
+		// A missing/stale camera must not display the previous camera's frame.
+		surf->info->subtexture[glState.stack_position-1] = 0;
+		cl_entity_t *camera = R_GetSubviewCamera( surf );
+		if( !camera )
+			continue;
+		ref_viewpass_t rvp = {};
+		rvp.viewentity = prevRI->view.entity;
 		cl_entity_t *e = RI->currententity = surf->info->parent;
 		mextrasurf_t *es = surf->info;
 		texFlags_t texFlags = TF_COLORMAP;
-		cl_entity_t *camera;
 		int subview = 0;
 		RI->currentmodel = e->model;
 
@@ -658,18 +710,6 @@ void R_RenderSubview()
 
 		ASSERT( RI->currententity != NULL );
 		ASSERT( RI->currentmodel != NULL );
-
-		if (!FBitSet(surf->flags, SURF_REFLECT | SURF_REFLECT_PUDDLE))
-		{
-			if (e->curstate.sequence <= 0)
-				continue;	// target is missed
-			camera = GET_ENTITY(e->curstate.sequence);
-		}
-		else camera = e; // mirror camera is himself
-
-		// NOTE: we can do additionaly culling here by PVS
-		if( !e || e->curstate.messagenum != r_currentMessageNum )
-			continue; // bad camera, ignore
 
 		// setup view apropriate by type
 		if (FBitSet(surf->flags, SURF_REFLECT | SURF_REFLECT_PUDDLE))
@@ -694,7 +734,10 @@ void R_RenderSubview()
 		if( GL_Support( R_FRAMEBUFFER_OBJECT ))
 		{
 			if(( subview = R_AllocateSubviewTexture(viewport, texFlags )) == 0 )
+			{
+				R_ResetRefState();
 				continue;
+			}
 			R_CalcSubviewMatrix(rvp, surf, subview, viewmatrix, camera);
 		}
 
@@ -707,7 +750,8 @@ void R_RenderSubview()
 		if (!GL_Support(R_FRAMEBUFFER_OBJECT)) 
 		{
 			subview = R_AllocateSubviewTexture(viewport, texFlags);
-			R_CalcSubviewMatrix(rvp, surf, subview, viewmatrix, camera);
+			if( subview > 0 )
+				R_CalcSubviewMatrix(rvp, surf, subview, viewmatrix, camera);
 		}
 
 		surf->info->subtexture[glState.stack_position-1] = subview; // now it's valid

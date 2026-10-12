@@ -11,6 +11,9 @@
 // 1-4-99	fixed file texture load and file read bug
 
 ////////////////////////////////////////////////////////////////////////
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1081,89 +1084,30 @@ void StudioModel::ComputeWeightColor( mstudioboneweight_t *boneweights, Vector &
 
 void StudioModel::ComputeSkinMatrix( mstudioboneweight_t *boneweights, matrix3x4 &result )
 {
-	float	flWeight0, flWeight1, flWeight2, flWeight3;
-	int	numbones = 0;
-
-	for( int i = 0; i < MAXSTUDIOBONEWEIGHTS; i++ )
-	{
-		if( boneweights->bone[i] != -1 )
-			numbones++;
-	}
-
-	if( !m_settings.studio_blendweights )
-		numbones = 1;
-
-	if( numbones == 4 )
-	{
-		matrix3x4 &boneMat0 = m_pworldtransform[boneweights->bone[0]];
-		matrix3x4 &boneMat1 = m_pworldtransform[boneweights->bone[1]];
-		matrix3x4 &boneMat2 = m_pworldtransform[boneweights->bone[2]];
-		matrix3x4 &boneMat3 = m_pworldtransform[boneweights->bone[3]];
-		flWeight0 = boneweights->weight[0] / 255.0f;
-		flWeight1 = boneweights->weight[1] / 255.0f;
-		flWeight2 = boneweights->weight[2] / 255.0f;
-		flWeight3 = boneweights->weight[3] / 255.0f;
-
-		result[0][0] = boneMat0[0][0] * flWeight0 + boneMat1[0][0] * flWeight1 + boneMat2[0][0] * flWeight2 + boneMat3[0][0] * flWeight3;
-		result[0][1] = boneMat0[0][1] * flWeight0 + boneMat1[0][1] * flWeight1 + boneMat2[0][1] * flWeight2 + boneMat3[0][1] * flWeight3;
-		result[0][2] = boneMat0[0][2] * flWeight0 + boneMat1[0][2] * flWeight1 + boneMat2[0][2] * flWeight2 + boneMat3[0][2] * flWeight3;
-		result[1][0] = boneMat0[1][0] * flWeight0 + boneMat1[1][0] * flWeight1 + boneMat2[1][0] * flWeight2 + boneMat3[1][0] * flWeight3;
-		result[1][1] = boneMat0[1][1] * flWeight0 + boneMat1[1][1] * flWeight1 + boneMat2[1][1] * flWeight2 + boneMat3[1][1] * flWeight3;
-		result[1][2] = boneMat0[1][2] * flWeight0 + boneMat1[1][2] * flWeight1 + boneMat2[1][2] * flWeight2 + boneMat3[1][2] * flWeight3;
-		result[2][0] = boneMat0[2][0] * flWeight0 + boneMat1[2][0] * flWeight1 + boneMat2[2][0] * flWeight2 + boneMat3[2][0] * flWeight3;
-		result[2][1] = boneMat0[2][1] * flWeight0 + boneMat1[2][1] * flWeight1 + boneMat2[2][1] * flWeight2 + boneMat3[2][1] * flWeight3;
-		result[2][2] = boneMat0[2][2] * flWeight0 + boneMat1[2][2] * flWeight1 + boneMat2[2][2] * flWeight2 + boneMat3[2][2] * flWeight3;
-		result[3][0] = boneMat0[3][0] * flWeight0 + boneMat1[3][0] * flWeight1 + boneMat2[3][0] * flWeight2 + boneMat3[3][0] * flWeight3;
-		result[3][1] = boneMat0[3][1] * flWeight0 + boneMat1[3][1] * flWeight1 + boneMat2[3][1] * flWeight2 + boneMat3[3][1] * flWeight3;
-		result[3][2] = boneMat0[3][2] * flWeight0 + boneMat1[3][2] * flWeight1 + boneMat2[3][2] * flWeight2 + boneMat3[3][2] * flWeight3;
-	}
-	else if( numbones == 3 )
-	{
-		matrix3x4 &boneMat0 = m_pworldtransform[boneweights->bone[0]];
-		matrix3x4 &boneMat1 = m_pworldtransform[boneweights->bone[1]];
-		matrix3x4 &boneMat2 = m_pworldtransform[boneweights->bone[2]];
-		flWeight0 = boneweights->weight[0] / 255.0f;
-		flWeight1 = boneweights->weight[1] / 255.0f;
-		flWeight2 = boneweights->weight[2] / 255.0f;
-
-		result[0][0] = boneMat0[0][0] * flWeight0 + boneMat1[0][0] * flWeight1 + boneMat2[0][0] * flWeight2;
-		result[0][1] = boneMat0[0][1] * flWeight0 + boneMat1[0][1] * flWeight1 + boneMat2[0][1] * flWeight2;
-		result[0][2] = boneMat0[0][2] * flWeight0 + boneMat1[0][2] * flWeight1 + boneMat2[0][2] * flWeight2;
-		result[1][0] = boneMat0[1][0] * flWeight0 + boneMat1[1][0] * flWeight1 + boneMat2[1][0] * flWeight2;
-		result[1][1] = boneMat0[1][1] * flWeight0 + boneMat1[1][1] * flWeight1 + boneMat2[1][1] * flWeight2;
-		result[1][2] = boneMat0[1][2] * flWeight0 + boneMat1[1][2] * flWeight1 + boneMat2[1][2] * flWeight2;
-		result[2][0] = boneMat0[2][0] * flWeight0 + boneMat1[2][0] * flWeight1 + boneMat2[2][0] * flWeight2;
-		result[2][1] = boneMat0[2][1] * flWeight0 + boneMat1[2][1] * flWeight1 + boneMat2[2][1] * flWeight2;
-		result[2][2] = boneMat0[2][2] * flWeight0 + boneMat1[2][2] * flWeight1 + boneMat2[2][2] * flWeight2;
-		result[3][0] = boneMat0[3][0] * flWeight0 + boneMat1[3][0] * flWeight1 + boneMat2[3][0] * flWeight2;
-		result[3][1] = boneMat0[3][1] * flWeight0 + boneMat1[3][1] * flWeight1 + boneMat2[3][1] * flWeight2;
-		result[3][2] = boneMat0[3][2] * flWeight0 + boneMat1[3][2] * flWeight1 + boneMat2[3][2] * flWeight2;
-	}
-	else if( numbones == 2 )
-	{
-		matrix3x4 &boneMat0 = m_pworldtransform[boneweights->bone[0]];
-		matrix3x4 &boneMat1 = m_pworldtransform[boneweights->bone[1]];
-		flWeight0 = boneweights->weight[0] / 255.0f;
-		flWeight1 = boneweights->weight[1] / 255.0f;
-
-		// NOTE: Inlining here seems to make a fair amount of difference
-		result[0][0] = boneMat0[0][0] * flWeight0 + boneMat1[0][0] * flWeight1;
-		result[0][1] = boneMat0[0][1] * flWeight0 + boneMat1[0][1] * flWeight1;
-		result[0][2] = boneMat0[0][2] * flWeight0 + boneMat1[0][2] * flWeight1;
-		result[1][0] = boneMat0[1][0] * flWeight0 + boneMat1[1][0] * flWeight1;
-		result[1][1] = boneMat0[1][1] * flWeight0 + boneMat1[1][1] * flWeight1;
-		result[1][2] = boneMat0[1][2] * flWeight0 + boneMat1[1][2] * flWeight1;
-		result[2][0] = boneMat0[2][0] * flWeight0 + boneMat1[2][0] * flWeight1;
-		result[2][1] = boneMat0[2][1] * flWeight0 + boneMat1[2][1] * flWeight1;
-		result[2][2] = boneMat0[2][2] * flWeight0 + boneMat1[2][2] * flWeight1;
-		result[3][0] = boneMat0[3][0] * flWeight0 + boneMat1[3][0] * flWeight1;
-		result[3][1] = boneMat0[3][1] * flWeight0 + boneMat1[3][1] * flWeight1;
-		result[3][2] = boneMat0[3][2] * flWeight0 + boneMat1[3][2] * flWeight1;
-	}
-	else
-	{
-		result = m_pworldtransform[boneweights->bone[0]];
-	}
+    result.Identity();
+    if(!boneweights || !m_pstudiohdr) return;
+    float weights[MAXSTUDIOBONEWEIGHTS]={0};
+    int first=-1;
+    float total=0;
+    for(int i=0;i<MAXSTUDIOBONEWEIGHTS;++i)
+    {
+        const int bone=boneweights->bone[i];
+        if(bone<0 || bone>=m_pstudiohdr->numbones || bone>=MAXSTUDIOBONES) continue;
+        if(first<0) first=i;
+        weights[i]=boneweights->weight[i]/255.0f;total+=weights[i];
+    }
+    if(first<0) return;
+    if(!m_settings.studio_blendweights) {result=m_pworldtransform[boneweights->bone[first]];return;}
+    // Match the GPU palette's compensation for byte-weight rounding.
+    if(total<1.0f) weights[first]+=1.0f-total;
+    for(int column=0;column<4;++column) for(int row=0;row<3;++row) result[column][row]=0;
+    for(int i=0;i<MAXSTUDIOBONEWEIGHTS;++i)
+    {
+        if(weights[i]==0) continue;
+        const matrix3x4 &bone=m_pworldtransform[boneweights->bone[i]];
+        for(int column=0;column<4;++column) for(int row=0;row<3;++row)
+            result[column][row]+=bone[column][row]*weights[i];
+    }
 }
 
 void StudioModel::scaleMeshes (float scale)
@@ -1562,4 +1506,182 @@ void StudioModel::editPosition( float step, int type )
 	if( m_settings.editMode == ViewerSettings::EDIT_MODEL )
 		update_model = true;
 	else m_settings.numSourceChanges++;
+}
+
+const matrix3x4 &StudioModel::GetToolBoneTransform( int bone ) const
+{
+	static matrix3x4 identity;
+	identity.Identity();
+	if( !m_pstudiohdr || bone < 0 || bone >= m_pstudiohdr->numbones )
+		return identity;
+	return m_pbonetransform[bone];
+}
+
+void StudioModel::SetToolBoneOverride( int bone, const matrix3x4 &transform )
+{
+	if( !m_pstudiohdr || bone < 0 || bone >= m_pstudiohdr->numbones || bone >= MAXSTUDIOBONES )
+		return;
+	m_toolBoneOverrides[bone] = transform;
+	m_toolBoneOverrideMask[bone] = true;
+	m_hasToolBoneOverrides = true;
+}
+
+void StudioModel::SetToolPhysicalRootBone(int bone)
+{
+    m_toolPhysicalRootBone=(m_pstudiohdr && bone>=0 && bone<m_pstudiohdr->numbones && bone<MAXSTUDIOBONES)?bone:-1;
+}
+
+void StudioModel::ClearToolBoneOverrides()
+{
+	m_toolBoneOverrideMask.fill( false );
+	m_toolPhysicalRootBone = -1;
+	m_hasToolBoneOverrides = false;
+	m_toolPoseDiagnostics = ragdolldiag::PoseMetrics{};
+}
+
+bool StudioModel::GetBoneVertexBounds( int bone, Vector &mins, Vector &maxs )
+{
+	if( !m_pstudiohdr || bone < 0 || bone >= m_pstudiohdr->numbones )
+		return false;
+
+	bool found = false;
+	mins = Vector( 999999.0f, 999999.0f, 999999.0f );
+	maxs = Vector( -999999.0f, -999999.0f, -999999.0f );
+	const matrix3x4 boneInverse = m_pbonetransform[bone].Invert();
+	mstudiobodyparts_t *bodyparts = (mstudiobodyparts_t *)((byte *)m_pstudiohdr + m_pstudiohdr->bodypartindex);
+
+	for( int bodypart = 0; bodypart < m_pstudiohdr->numbodyparts; ++bodypart )
+	{
+		mstudiomodel_t *models = (mstudiomodel_t *)((byte *)m_pstudiohdr + bodyparts[bodypart].modelindex);
+		for( int modelIndex = 0; modelIndex < bodyparts[bodypart].nummodels; ++modelIndex )
+		{
+			mstudiomodel_t &model = models[modelIndex];
+			if( model.numverts <= 0 ) continue;
+			Vector *vertices = (Vector *)((byte *)m_pstudiohdr + model.vertindex);
+			byte *vertexBones = (byte *)m_pstudiohdr + model.vertinfoindex;
+			mstudioboneweight_t *weights = model.blendvertinfoindex ? (mstudioboneweight_t *)((byte *)m_pstudiohdr + model.blendvertinfoindex) : nullptr;
+			const bool weighted = FBitSet( m_pstudiohdr->flags, STUDIO_HAS_BONEWEIGHTS ) && weights != nullptr;
+
+			for( int vertexIndex = 0; vertexIndex < model.numverts; ++vertexIndex )
+			{
+				Vector world;
+				if( weighted )
+				{
+					int strongestSlot = 0;
+					for( int slot = 1; slot < 4; ++slot )
+						if( weights[vertexIndex].weight[slot] > weights[vertexIndex].weight[strongestSlot] ) strongestSlot = slot;
+					if( (unsigned char)weights[vertexIndex].bone[strongestSlot] != bone || weights[vertexIndex].weight[strongestSlot] == 0 ) continue;
+					matrix3x4 skin;
+					ComputeSkinMatrix( &weights[vertexIndex], skin );
+					world = skin.VectorTransform( vertices[vertexIndex] );
+				}
+				else
+				{
+					if( vertexBones[vertexIndex] != bone ) continue;
+					world = m_pbonetransform[bone].VectorTransform( vertices[vertexIndex] );
+				}
+
+				const Vector local = boneInverse.VectorTransform( world );
+				for( int axis = 0; axis < 3; ++axis )
+				{
+					mins[axis] = Q_min( mins[axis], local[axis] );
+					maxs[axis] = Q_max( maxs[axis], local[axis] );
+				}
+				found = true;
+			}
+		}
+	}
+	return found;
+}
+
+// Authoring samples are collected in the reference pose, independently of the
+// paused animation and tool overrides. Exclusions match whole bodypart tokens.
+bool StudioModel::GetRagdollFitVertices(std::vector<std::vector<Vector>> &out,
+    const std::vector<std::string> &excludedSections)
+{
+    if(!m_pstudiohdr || m_pstudiohdr->numbones<=0 || m_pstudiohdr->numbones>MAXSTUDIOBONES) return false;
+    const auto *bones=(const mstudiobone_t*)((const byte*)m_pstudiohdr+m_pstudiohdr->boneindex);
+    std::vector<matrix3x4> reference(m_pstudiohdr->numbones);
+    std::vector<bool> ready(reference.size(),false);
+    for(int i=0;i<m_pstudiohdr->numbones;++i)
+    {
+        std::vector<int> chain;int bone=i;
+        while(bone>=0&&!ready[bone])
+        {
+            if(bone>=m_pstudiohdr->numbones||std::find(chain.begin(),chain.end(),bone)!=chain.end()) return false;
+            chain.push_back(bone);bone=bones[bone].parent;
+            if(bone < -1 || bone>=m_pstudiohdr->numbones) return false;
+        }
+        for(auto it=chain.rbegin();it!=chain.rend();++it)
+        {
+            const auto &b=bones[*it];const matrix3x4 local(Vector(b.value[0],b.value[1],b.value[2]),Radian(b.value[3],b.value[4],b.value[5]));
+            reference[*it]=b.parent<0?local:reference[b.parent].ConcatTransforms(local);ready[*it]=true;
+        }
+    }
+    std::vector<std::vector<Vector>> result(reference.size());
+    const auto *bodyparts=(const mstudiobodyparts_t*)((const byte*)m_pstudiohdr+m_pstudiohdr->bodypartindex);
+    auto excluded=[&](const char *text)->bool
+    {
+        std::string word;
+        for(size_t i=0;i<=std::strlen(text);++i)
+        {
+            const unsigned char c=text[i];const bool letter=(c>='a'&&c<='z')||(c>='A'&&c<='Z');
+            if(letter) word+=char(c>='A'&&c<='Z'?c-'A'+'a':c);
+            else
+            {
+                for(auto token:excludedSections)
+                {
+                    for(char &v:token) if(v>='A'&&v<='Z') v=char(v-'A'+'a');
+                    if(word==token) return true;
+                }
+                word.clear();
+            }
+        }
+        return false;
+    };
+    for(int bp=0;bp<m_pstudiohdr->numbodyparts;++bp)
+    {
+        if(excluded(bodyparts[bp].name)) continue;
+        const auto *models=(const mstudiomodel_t*)((const byte*)m_pstudiohdr+bodyparts[bp].modelindex);
+        // Include all character variants, but exclude explicit accessory sections.
+        for(int mi=0;mi<bodyparts[bp].nummodels;++mi)
+        {
+            const auto &model=models[mi];if(model.numverts<=0) continue;
+            const auto *vertices=(const Vector*)((const byte*)m_pstudiohdr+model.vertindex);
+            const byte *vertexBones=(const byte*)m_pstudiohdr+model.vertinfoindex;
+            const auto *weights=model.blendvertinfoindex?(const mstudioboneweight_t*)((const byte*)m_pstudiohdr+model.blendvertinfoindex):nullptr;
+            const bool weighted=FBitSet(m_pstudiohdr->flags,STUDIO_HAS_BONEWEIGHTS)&&weights;
+            for(int vi=0;vi<model.numverts;++vi)
+            {
+                int owner=vertexBones[vi];Vector point=vertices[vi];
+                if(weighted)
+                {
+                    int strongest=0;for(int k=1;k<4;++k) if(weights[vi].weight[k]>weights[vi].weight[strongest]) strongest=k;
+                    owner=weights[vi].bone[strongest];if(owner<0||owner>=int(reference.size())||weights[vi].weight[strongest]==0) continue;
+                    // Weighted vertices are model space. Rebuild reference skinning
+                    // with the imported inverse-bind matrices; never use current pose.
+                    Vector world(0,0,0);double total=0;int firstValid=-1;
+                    matrix3x4 firstSkin;
+                    for(int k=0;k<4;++k)
+                    {
+                        const int b=weights[vi].bone[k];const double w=weights[vi].weight[k]/255.0;
+                        if(b<0||b>=int(reference.size())) continue;
+                        const matrix3x4 skin=reference[b].ConcatTransforms(m_plocaltransform[b]);
+                        if(firstValid<0) {firstValid=k;firstSkin=skin;}
+                        if(w<=0) continue;
+                        world+=skin.VectorTransform(point)*float(w);total+=w;
+                    }
+                    if(total<=0) continue;
+                    // Use the render palette's byte rounding rule in authoring
+                    // too. Renormalizing every influence changes the bind mesh.
+                    if(total<1.0) world+=firstSkin.VectorTransform(point)*float(1.0-total);
+                    point=reference[owner].VectorITransform(world);
+                }
+                if(owner<0||owner>=int(result.size())) continue;
+                if(!std::isfinite(point.x)||!std::isfinite(point.y)||!std::isfinite(point.z)) return false;
+                result[owner].push_back(point);
+            }
+        }
+    }
+    out=std::move(result);return true;
 }

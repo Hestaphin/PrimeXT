@@ -405,6 +405,7 @@ typedef struct
 typedef struct
 {
 	RefParams params; // rendering parameters
+	bool skyPortalRendered; // per-view: recursive passes must not suppress their parent's sky
 
 	// NEW STATE
 	ref_viewcache_t	view;		// cached view
@@ -565,7 +566,6 @@ typedef struct
 	float		fogDensity;
 
 	// sky params
-	bool		ignore_2d_skybox;	// we already draw 3d skybox, so don't overwrite it in current pass
 	cl_entity_t *sky_camera;
 	Vector		sky_normal;		// sky vector
 	Vector		sky_ambient;	// sky ambient color
@@ -737,8 +737,10 @@ extern ref_globals_t	tr;
 // gl_backend.cpp
 //
 void R_InitRefState(void);
+void R_RenderReport(void);
 void R_PushRefState(void);
 void R_PopRefState(void);
+void R_SyncSkyboxTextures(void);
 void R_ResetRefState(void);
 ref_instance_t *R_GetPrevInstance(void);
 void CompressNormalizedVector(char outVec[3], const Vector &inVec);

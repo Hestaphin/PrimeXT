@@ -1,0 +1,12 @@
+{
+  "model_bones": 24,
+  "bodies": 15,
+  "joints": 14,
+  "axis_reviews": 4,
+  "pair_rows": 105,
+  "allowed_pairs": 73,
+  "filtered_vertices": 382,
+  "bone_error_peak": 1.52588e-05,
+  "vertex_error_peak": 3.07551e-05,
+  "native_solver_game": "NOT_RUN"
+}

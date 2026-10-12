@@ -1,0 +1,93 @@
+// Exact PrimeXT origin/keyvalue/FallThink/Materialize methods and matrix code.
+// Class bookkeeping, sound, linking and unrelated field services are adapters.
+#include <cassert>
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <strings.h>
+#include "extdll.h"
+#define FBitSet(a,b) ((a)&(b))
+#define ClearBits(a,b) ((a)&=~(b))
+#define VectorCopy(a,b) ((b)=(a))
+#define FStrEq(a,b) (!std::strcmp((a),(b)))
+#define FNullEnt(a) (!(a))
+#define EMIT_SOUND_DYN(...) ((void)0)
+#define EMIT_SOUND(...) ((void)0)
+#define RANDOM_LONG(a,b) (a)
+#define ALERT(...) ((void)0)
+#define ALLOC_STRING(a) (0)
+#define Q_snprintf std::snprintf
+#define Q_stricmp strcasecmp
+constexpr int FCAP_SET_MOVEDIR = 1, FCAP_HOLD_ANGLES = 2;
+globalvars_t globals{}; globalvars_t* gpGlobals = &globals;
+class CBaseEntity {
+public:
+    entvars_t* pev = nullptr;
+    Vector m_vecOrigin{0,0,0}, m_vecAngles{0,0,0}, m_vecTempAngles{0,0,0};
+    CBaseEntity* m_hParent = nullptr;
+    matrix4x4 m_local;
+    bool m_fSetAngles = false;
+    static CBaseEntity* Instance(entvars_t* vars) { return static_cast<CBaseEntity*>(vars->pContainingEntity->pvPrivateData); }
+    const Vector& GetAbsOrigin() const;
+    const Vector& GetAbsAngles() const { return pev->angles; }
+    const Vector& GetLocalAngles() const { return m_vecAngles; }
+    void SetAbsOrigin(const Vector&); void CalcAbsolutePosition(); void SetLocalAngles(const Vector&);
+    void SetAbsAngles(const Vector& angles) { m_vecAngles = pev->angles = angles; }
+    void InvalidatePhysicsState(int flags, int = 0) { pev->flags |= flags; }
+    matrix4x4 GetParentToWorldTransform() { matrix4x4 result; result.Identity(); return result; }
+    void CheckAngles() {} bool IsPlayer() const { return false; } int ObjectCaps() const { return 0; }
+};
+static void UTIL_SetMovedir(CBaseEntity*) {}
+struct typedescription_s { decltype(FIELD_FLOAT) fieldType; const char* fieldName; int fieldOffset; };
+TYPEDESCRIPTION gEntvarsDescription[] = {{FIELD_POSITION_VECTOR, "origin", offsetof(entvars_t, origin)}};
+constexpr int ENTVARS_COUNT = 1;
+static void UTIL_StringToVector(float* out, const char* text) { assert(std::sscanf(text, "%f %f %f", out, out + 1, out + 2) == 3); }
+void EntvarsKeyvalue(entvars_t*, KeyValueData*);
+class CBasePlayerItem : public CBaseEntity {
+public:
+    bool touchEnabled = false;
+    void FallThink(); void Materialize();
+    void DefaultTouch(CBaseEntity*) {}
+    template<class T> void SetTouch(T) { touchEnabled = true; }
+    template<class T> void SetThink(T) {}
+    void RelinkEntity(bool) {
+        CalcAbsolutePosition(); pev->absmin = GetAbsOrigin() + Vector(-24,-24,0);
+        pev->absmax = GetAbsOrigin() + Vector(24,24,16);
+    }
+};
+static struct { struct { void (*pfnKeyValue)(edict_t*, KeyValueData*); } dllFuncs; } svgame;
+static qboolean SV_IsValidEdict(edict_t* entity) { return entity && !entity->free; }
+static const char* SV_GetString(string_t) { return "weapon_modular"; }
+static void KeyValue(edict_t* entity, KeyValueData* kvd) { EntvarsKeyvalue(&entity->v, kvd); }
+@PRODUCTION@
+@ENGINE_HELPERS@
+int main(int argc, char** argv) {
+    assert(argc == 2); const std::string test = argv[1];
+    edict_t entity{}; CBasePlayerItem item;
+    entity.v.pContainingEntity = &entity; entity.pvPrivateData = &item; item.pev = &entity.v;
+    svgame.dllFuncs.pfnKeyValue = KeyValue;
+    Vector requested(100,2,86);
+    if(test == "stale-keyvalue") {
+        item.m_vecOrigin = Vector(1,2,3); item.pev->flags |= FL_ABSTRANSFORM;
+        char origin[] = "25 30 35";
+        KeyValueData kvd{const_cast<char*>("weapon_modular"),const_cast<char*>("origin"),origin,0};
+        EntvarsKeyvalue(item.pev, &kvd);
+        assert(kvd.fHandled && item.GetAbsOrigin() == Vector(25,30,35));
+    } else {
+        if(test == "spawn-origin") {
+            @SYNC_ORIGIN@
+            item.SetLocalAngles(Vector(0,0,0));
+            assert(item.GetAbsOrigin() == requested);
+        } else {
+            item.SetAbsOrigin(requested);
+            // Engine drop-to-floor changes edict origin before weapon think.
+            entity.v.origin.z = 4; entity.v.flags |= FL_ONGROUND;
+            @SYNC_FLOOR@
+            item.FallThink();
+            assert(item.GetAbsOrigin() == Vector(100,2,4));
+            assert(entity.v.solid == SOLID_TRIGGER && item.touchEnabled);
+            assert(entity.v.absmin == Vector(76,-22,4) && entity.v.absmax == Vector(124,26,20));
+        }
+    }
+}

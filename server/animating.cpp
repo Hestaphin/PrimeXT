@@ -27,6 +27,7 @@
 #include "saverestore.h"
 #include "studio.h"
 #include "bs_defs.h"
+#include "physic.h"
 
 BEGIN_DATADESC( CBaseAnimating )
 	DEFINE_FIELD( m_flFrameRate, FIELD_FLOAT ),
@@ -34,7 +35,53 @@ BEGIN_DATADESC( CBaseAnimating )
 	DEFINE_FIELD( m_flLastEventCheck, FIELD_TIME ),
 	DEFINE_FIELD( m_fSequenceFinished, FIELD_BOOLEAN ),
 	DEFINE_FIELD( m_fSequenceLoops, FIELD_BOOLEAN ),
+    DEFINE_FIELD( m_partSaveCount, FIELD_INTEGER ),
+    DEFINE_ARRAY( m_partSaved, FIELD_CHARACTER, sizeof(PhysicsPartSaveRecord)*kSavedPhysicsPartLimit ),
+    DEFINE_ARRAY( m_ragdollSaved, FIELD_CHARACTER, sizeof(PhysicsRagdollSaveState) ),
+    DEFINE_ARRAY( m_ragdollBodiesSaved, FIELD_CHARACTER,
+        sizeof(PhysicsRagdollBodySaveRecord)*kSavedRagdollBodyLimit ),
 END_DATADESC()
+
+int CBaseAnimating::Save(CSave &save)
+{
+    // Do not serialize stale records when this entity has fewer parts than
+    // it did at a previous save (or was switched to the null physics layer).
+    memset(m_partSaved,0,sizeof(m_partSaved));
+    m_partSaveCount = WorldPhysic ? WorldPhysic->CaptureInteractiveParts(
+        this,m_partSaved,kSavedPhysicsPartLimit) : 0;
+    memset(&m_ragdollSaved,0,sizeof(m_ragdollSaved));
+    memset(m_ragdollBodiesSaved,0,sizeof(m_ragdollBodiesSaved));
+    if (WorldPhysic)
+        WorldPhysic->CaptureRagdollState(this,m_ragdollSaved,
+            m_ragdollBodiesSaved,kSavedRagdollBodyLimit);
+    return CBaseDelay::Save(save);
+}
+int CBaseAnimating::Restore(CRestore &restore)
+{
+    const int result=CBaseDelay::Restore(restore);
+    if (result && m_ragdollSaved.active)
+    {
+        const bool restored=WorldPhysic && WorldPhysic->RestoreRagdollState(
+            this,m_ragdollSaved,m_ragdollBodiesSaved,kSavedRagdollBodyLimit);
+        if(!restored)
+        {
+            // Also handle the null-physics layer / missing PhysX SDK. A saved
+            // SOLID_NOT ragdoll must never load as a permanent invisible hull.
+            ClearBits(pev->iuser1,CF_RAGDOLL);
+            pev->solid=m_ragdollSaved.oldSolid;
+            pev->movetype=m_ragdollSaved.oldMovetype;
+            UTIL_SetSize(pev,
+                Vector(m_ragdollSaved.oldMins[0],m_ragdollSaved.oldMins[1],m_ragdollSaved.oldMins[2]),
+                Vector(m_ragdollSaved.oldMaxs[0],m_ragdollSaved.oldMaxs[1],m_ragdollSaved.oldMaxs[2]));
+            SetAbsAngles(Vector(m_ragdollSaved.oldAngles[0],m_ragdollSaved.oldAngles[1],m_ragdollSaved.oldAngles[2]));
+            RelinkEntity(TRUE);
+        }
+    }
+    if (result && WorldPhysic && m_partSaveCount>0 &&
+        m_partSaveCount<=kSavedPhysicsPartLimit)
+        WorldPhysic->RestoreInteractiveParts(this,m_partSaved,m_partSaveCount);
+    return result;
+}
 
 void *CBaseAnimating :: GetModelPtr( void )
 {
@@ -82,6 +129,11 @@ float CBaseAnimating :: StudioFrameAdvance ( float flInterval )
 			pev->frame = (pev->frame < 0.0) ? 0 : 255;
 		m_fSequenceFinished = TRUE;	// just in case it wasn't caught in GetEvents
 	}
+
+	// Keep a lightweight two-frame pose history for models that own a .phys
+	// asset. This records animation-derived limb velocity without instantiating
+	// the expensive PhysX ragdoll while the character is alive.
+	WorldPhysic->UpdatePhysicsAssetPose( this );
 
 	return flInterval;
 }
@@ -354,6 +406,47 @@ void CBaseAnimating :: GetBonePosition ( int iBone, Vector &origin, Vector &angl
 	GET_BONE_POSITION( ENT(pev), iBone, origin, angles );
 }
 
+bool CBaseAnimating::SetInteractivePartDriven( const char *partName )
+{
+    return WorldPhysic->SetPhysicsPartMode( this, partName, IPhysicLayer::PhysicsPartMode::Driven );
+}
+
+bool CBaseAnimating::DamageInteractivePart( const char *partName, float damage )
+{
+    return WorldPhysic && WorldPhysic->DamagePhysicsPart( this, partName, damage );
+}
+
+bool CBaseAnimating::SetInteractivePartFree( const char *partName, bool free )
+{
+    return WorldPhysic->SetPhysicsPartMode( this, partName,
+        free ? IPhysicLayer::PhysicsPartMode::Free : IPhysicLayer::PhysicsPartMode::Animated );
+}
+
+bool CBaseAnimating :: HasPhysicsAsset() const
+{
+	return WorldPhysic->HasPhysicsAsset( const_cast<CBaseAnimating *>( this ));
+}
+
+bool CBaseAnimating :: IsRagdoll() const
+{
+	return WorldPhysic->IsRagdoll( const_cast<CBaseAnimating *>( this ));
+}
+
+void CBaseAnimating :: EnableRagdoll( bool enable )
+{
+	WorldPhysic->SetRagdoll( this, enable );
+}
+
+bool CBaseAnimating :: SetRagdollPhysicsWeight( const char *bodyName, float physicsWeight, bool includeChildren )
+{
+	return WorldPhysic->SetRagdollBodyPhysicsWeight( this, bodyName, physicsWeight, includeChildren );
+}
+
+bool CBaseAnimating :: SetPhysicalAnimation( float physicsWeight )
+{
+	return WorldPhysic->SetRagdollBodyPhysicsWeight( this, nullptr, physicsWeight, true );
+}
+
 //=========================================================
 //=========================================================
 void CBaseAnimating :: GetAttachment ( int iAttachment, Vector &origin, Vector &angles )
@@ -419,7 +512,13 @@ int CBaseAnimating :: GetHitboxSetByName( const char *szName )
 
 void CBaseAnimating :: SetBodygroup( int iGroup, int iValue )
 {
+	const int oldBody = pev->body;
 	::SetBodygroup( GET_MODEL_PTR( ENT(pev) ), pev->body, iGroup, iValue );
+
+	// Collision proxies mirror only collision-relevant bodygroups. Update the
+	// existing PhysX shape immediately when one of those variants changes.
+	if( pev->body != oldBody && WorldPhysic )
+		WorldPhysic->UpdateCollisionBodygroup( this );
 }
 
 int CBaseAnimating :: GetBodygroup( int iGroup )

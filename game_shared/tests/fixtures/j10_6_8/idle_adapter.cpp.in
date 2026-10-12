@@ -1,0 +1,68 @@
+// The production Idle case; clock, simulation and repaint services are adapters.
+#include <cassert>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include "mx/mxEvent.h"
+namespace mx { static unsigned int tick=1000; unsigned int getTickCount() {tick+=20; return tick;} }
+#include "mathlib_defs.h"
+void Sys_Sleep(double) {}
+static bool g_bStopPlaying=false;
+struct PhysicsAssetEditor {
+    bool visible=false, running=false;
+    int updates=0;
+    bool isVisible() const {return visible;}
+    bool IsSimulating() const {return running;}
+    void Update(float) {++updates;}
+};
+struct ViewerAdapter {
+    PhysicsAssetEditor *editor=nullptr;
+    PhysicsAssetEditor *getPhysicsAssetEditor() {return editor;}
+};
+static ViewerAdapter *g_MDLViewer=nullptr;
+struct PanelAdapter {void resetPlayingSequence() {} void updateDrawnPolys() {}};
+static PanelAdapter panel;
+static PanelAdapter *g_ControlPanel=&panel;
+struct ModelAdapter {
+    int advances=0;
+    void updateTimings(double,double) {}
+    bool AdvanceFrame(double) {++advances; return true;}
+};
+struct SettingsAdapter {bool pause=false; float speedScale=1;};
+class GlWindow {
+public:
+    ModelAdapter m_studioModel;
+    SettingsAdapter m_settings;
+    PanelAdapter *d_cpl=&panel;
+    int paints=0;
+    void redraw() {++paints;}
+    int handleEvent(mxEvent *event) {
+        static double lastupdate=0;
+        switch(event->event) {
+@PRODUCTION@
+            break;
+        }
+        return 0;
+    }
+};
+int main(int argc,char **argv) {
+    assert(argc==2);std::string test=argv[1];
+    PhysicsAssetEditor editor;
+    ViewerAdapter viewer; viewer.editor=&editor; g_MDLViewer=&viewer;
+    GlWindow window; mxEvent event; event.event=mxEvent::Idle;
+    if(test=="paused-simulation") {
+        window.m_settings.pause=true;editor.running=true;
+        window.handleEvent(&event); window.handleEvent(&event);
+        assert(editor.updates==2 && window.paints==2 && window.m_studioModel.advances==0);
+    } else if(test=="paused-visibility") {
+        window.m_settings.pause=true;
+        window.handleEvent(&event); assert(window.paints==0);
+        editor.visible=true; window.handleEvent(&event); assert(window.paints==1);
+        window.handleEvent(&event); assert(window.paints==1);
+        editor.visible=false; window.handleEvent(&event); assert(window.paints==2);
+    } else {
+        window.handleEvent(&event); window.handleEvent(&event);
+        assert(window.paints==2 && window.m_studioModel.advances==1);
+    }
+    std::cout<<"animation pause and physics/visibility repaint behavior verified\n";
+}

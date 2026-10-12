@@ -1,0 +1,9 @@
+# F4 changes
+
+- Share validated physical hierarchy reconstruction between pxmv and client CPU prediction/drawing. Restore passive ancestors above the selected ragdoll root, passive descendants and side branches in parent order. Physical parts preserve animated ancestors. Invalid parents/cycles/nonfinite or nonuniform matrices fail transactionally to the evaluated animation pose.
+- Carry the preview's physical root independently of the diagnostics toggle. Restore render basis scale on actor-derived unit transforms, preserve world-sized local translations and reflect the whole preview skeleton in the mirror pass.
+- Encode compact skinning palettes as a unit quaternion plus signed orthogonal scale. Upload the new u_BoneScale uniform for meshes/weapons and Studio decals. Keep complete matrix palettes unchanged. This fixes extracting rotation from scaled bases; it does not add articulated nonuniform/mirrored model support.
+- Match CPU skinning and weighted reference fitting to the GLSL byte-weight rule: compensate a sum below one on the first valid influence, preserve sums above one, guard invalid CPU influence indices and use identity when no valid CPU weights exist.
+- Start a newly physically driven network bone at its displayed passive pose before interpolation to the next target. Preserve root-space interpolation, entry/exit blending, packet validation, sequence checks, cache sharing and physical-part ownership.
+- Add production-method regressions, a baseline defect reproducer, actual Barney generation/pose checks, client translation-unit compilation and a native build runner. Generate new model-based v5 Barney review assets without changing either upload.
+- Correct the inherited matrix inversion comment and source-wiring check for the shared hierarchy implementation. No incremental Xash engine changes are required.

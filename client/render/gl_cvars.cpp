@@ -17,6 +17,7 @@ GNU General Public License for more details.
 #include "enginecallback.h"
 
 cvar_t *r_test;	// just cvar for testify new effects
+cvar_t *cl_ragdoll_diagnostics;
 cvar_t *r_stencilbits;
 cvar_t *r_drawentities;
 cvar_t *gl_extensions;
@@ -109,6 +110,7 @@ cvar_t *r_postfx_enable;
 
 void R_InitializeConVars()
 {
+    cl_ragdoll_diagnostics = CVAR_REGISTER("cl_ragdoll_diagnostics","0",0); // F0: 1 = 1 Hz, 2 = every rebuilt pose
 	// setup some engine cvars for custom rendering
 	r_shadows = CVAR_REGISTER("r_shadows", "4", FCVAR_ARCHIVE);
 	r_shadow_split_weight = CVAR_REGISTER("r_pssm_split_weight", "0.9", FCVAR_ARCHIVE);

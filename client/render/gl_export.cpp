@@ -1031,6 +1031,7 @@ bool GL_Init( void )
 
 	DBG_PrintVertexVBOSizes();
 	GL_InitGPUShaders();
+	ADD_COMMAND( "r_render_report", R_RenderReport );
 	InitPostEffects();
 	GL_InitTextures();
 	COM_InitMatdef();

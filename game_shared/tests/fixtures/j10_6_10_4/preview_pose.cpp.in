@@ -1,0 +1,119 @@
+// Production preview and CPU palette methods with project Studio/math types.
+// No native GUI, PhysX integration or GPU rendering is performed.
+#include <array>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <limits>
+#include "ViewerSettings.h"
+#define private public
+#include "StudioModel.h"
+#undef private
+#include "studio_pose_diagnostics.h"
+#include "studio_physical_hierarchy.h"
+ViewerSettings::ViewerSettings() {pause=false;speedScale=1;studio_blendweights=true;}
+void CBaseBoneSetup::debugMsg(char*,...) {}
+void CBaseBoneSetup::debugLine(const Vector&,const Vector&,int,int,int,bool,float) {}
+mstudioanim_t *CBaseBoneSetup::GetAnimSourceData(mstudioseqdesc_t*) {return nullptr;}
+matrix3x4 m_protationmatrix;
+@PRODUCTION@
+static unsigned checks=0;
+static void Check(bool value,const char *label) {++checks;if(!value) {std::cerr<<"FAIL "<<label<<'\n';std::abort();}}
+static float Error(const matrix3x4 &a,const matrix3x4 &b)
+{float peak=0;for(int c=0;c<4;++c)for(int r=0;r<3;++r)peak=std::max(peak,std::fabs(a[c][r]-b[c][r]));return peak;}
+struct Skeleton {studiohdr_t hdr{};mstudiobone_t bones[5]{};Skeleton(){hdr.numbones=5;hdr.boneindex=offsetof(Skeleton,bones);const int parents[]={-1,0,1,2,0};for(int i=0;i<5;++i)bones[i].parent=parents[i];}};
+static void Animated(Skeleton &s,float scale,matrix3x4 out[])
+{
+    m_protationmatrix=matrix3x4(Vector(10,20,30),Vector(12,23,34),Vector(scale));
+    for(int i=0;i<5;++i)
+    {
+        const matrix3x4 local(Vector(2+i,1-i,3-i),Vector(i*7,i*11,i*3),1);
+        out[i]=(s.bones[i].parent<0?m_protationmatrix:out[s.bones[i].parent]).ConcatTransforms(local);
+    }
+}
+static void Seed(StudioModel &m,const matrix3x4 animated[],const matrix3x4 &move,const matrix3x4 &arm)
+{
+    for(int i=0;i<5;++i)m.m_pbonetransform[i]=animated[i];
+    m.ClearToolBoneOverrides();m.SetToolPhysicalRootBone(1);
+    m.SetToolBoneOverride(1,physicsasset::StudioUnitWorldBone(move.ConcatTransforms(animated[1])));
+    m.SetToolBoneOverride(2,physicsasset::StudioUnitWorldBone(arm.ConcatTransforms(animated[2])));
+}
+static void Weighted(StudioModel &m,bool baseline)
+{
+    for(int i=0;i<5;++i)m.m_pworldtransform[i]=matrix3x4(Vector(i*10,3,7),Vector(3*i,7*i,11*i),1);
+    mstudioboneweight_t w{};for(int i=0;i<4;++i){w.bone[i]=i;w.weight[i]=63;}
+    matrix3x4 result,expected;result.Identity();expected.Identity();
+    m.ComputeSkinMatrix(&w,result);
+    for(int c=0;c<4;++c)for(int r=0;r<3;++r)
+    {expected[c][r]=0;for(int i=0;i<4;++i)expected[c][r]+=m.m_pworldtransform[i][c][r]*(i==0?66.0f:63.0f)/255;}
+    if(baseline){Check(Error(result,expected)>0.05f,"baseline weight shortfall reproduced");std::cout<<"F3 weighted palette error "<<Error(result,expected)<<'\n';return;}
+    Check(Error(result,expected)<0.00001f,"four byte influences match GPU rounding compensation");
+    w.bone[1]=-1;w.weight[1]=0;w.bone[2]=99;w.weight[2]=200;w.bone[3]=-1;w.weight[3]=0;
+    m.ComputeSkinMatrix(&w,result);Check(Error(result,m.m_pworldtransform[0])<0.00001f,"holes and invalid indices are ignored safely");
+    w.bone[0]=-1;w.bone[1]=2;w.weight[1]=200;m.m_settings.studio_blendweights=false;
+    m.ComputeSkinMatrix(&w,result);Check(Error(result,m.m_pworldtransform[2])<0.00001f,"unweighted picks first valid influence");
+    w.bone[1]=-1;m.ComputeSkinMatrix(&w,result);expected.Identity();Check(Error(result,expected)==0,"missing influences use identity");
+    m.ComputeSkinMatrix(nullptr,result);Check(Error(result,expected)==0,"null weight guard");m.m_settings.studio_blendweights=true;
+}
+static void WeightedFit(StudioModel &model)
+{
+    struct WeightedModel {studiohdr_t hdr{};mstudiobone_t bones[4]{};mstudiobodyparts_t part{};mstudiomodel_t mesh{};Vector vertex;byte rigid=0;mstudioboneweight_t weights{};} data;
+    data.hdr.numbones=4;data.hdr.boneindex=offsetof(WeightedModel,bones);data.hdr.numbodyparts=1;data.hdr.bodypartindex=offsetof(WeightedModel,part);data.hdr.flags=STUDIO_HAS_BONEWEIGHTS;
+    for(int i=0;i<4;++i){data.bones[i].parent=i-1;data.weights.bone[i]=i;data.weights.weight[i]=64;model.m_plocaltransform[i].Identity();}
+    std::strcpy(data.part.name,"body");data.part.nummodels=1;data.part.modelindex=offsetof(WeightedModel,mesh);
+    data.mesh.numverts=1;data.mesh.vertindex=offsetof(WeightedModel,vertex);data.mesh.vertinfoindex=offsetof(WeightedModel,rigid);data.mesh.blendvertinfoindex=offsetof(WeightedModel,weights);
+    data.vertex=Vector(12,-20,30);auto *saved=model.m_pstudiohdr;model.m_pstudiohdr=&data.hdr;
+    std::vector<std::vector<Vector>> samples;
+    Check(model.GetRagdollFitVertices(samples,{})&&samples[0].size()==1,"weighted reference mesh produces a fitting sample");
+    Check((samples[0][0]-data.vertex*(256.0f/255.0f)).Length()<0.00001f,"authoring preserves GPU over-one byte weight sum");
+    data.weights.bone[2]=data.weights.bone[3]=-1;data.weights.weight[0]=data.weights.weight[1]=127;data.weights.weight[2]=data.weights.weight[3]=0;
+    model.m_plocaltransform[0].SetOrigin(Vector(10,0,0));model.m_plocaltransform[1].SetOrigin(Vector(30,0,0));
+    Check(model.GetRagdollFitVertices(samples,{})&&(samples[0][0]-(data.vertex+Vector((10*128.0f+30*127.0f)/255.0f,0,0))).Length()<0.00001f,"fitting shortfall goes to first influence as in CPU/GPU rendering");
+    model.m_pstudiohdr=saved;
+}
+int main()
+{
+    Skeleton s;ViewerSettings settings;StudioModel m(settings);m.m_pstudiohdr=&s.hdr;
+    if(!@BASELINE@) {matrix3x4 identity;identity.Identity();m.SetToolBoneOverride(MAXSTUDIOBONES,identity);Check(!m.m_hasToolBoneOverrides,"invalid override index cannot activate or write the palette");}
+    const matrix3x4 move(Vector(100,-20,8),Vector(20,40,15),1),arm(Vector(60,30,20),Vector(-10,55,22),1);
+    for(float scale:{0.5f,1.0f,2.5f})
+    {
+        matrix3x4 animated[5],expected[5];Animated(s,scale,animated);Seed(m,animated,move,arm);
+        for(int i=0;i<5;++i)expected[i]=(i==2||i==3?arm:move).ConcatTransforms(animated[i]);
+        m.ApplyToolBoneOverrides(false);
+        if(@BASELINE@)
+        {
+            if(scale==2.5f) {Check(Error(m.m_pbonetransform[0],expected[0])>10,"baseline passive ancestor lag");Check(Error(m.m_pbonetransform[3],expected[3])>1,"baseline scaled passive child error");std::cout<<"F3 ancestor error "<<Error(m.m_pbonetransform[0],expected[0])<<", passive child error "<<Error(m.m_pbonetransform[3],expected[3])<<", physical basis "<<m.m_pbonetransform[1].GetForward().Length()<<" expected "<<scale<<'\n';}
+            continue;
+        }
+        for(int i=0;i<5;++i)Check(Error(m.m_pbonetransform[i],expected[i])<0.0002f,"physical/passive/side branch world pose");
+        float stationary=0;
+        for(int sample=0;sample<100;++sample){Seed(m,animated,move,arm);m.ApplyToolBoneOverrides(false);for(int i=0;i<5;++i)stationary=std::max(stationary,Error(m.m_pbonetransform[i],expected[i]));}
+        Check(stationary<0.0002f,"stationary bodies produce stable mesh matrices over 100 evaluations");
+        Seed(m,animated,move,arm);m.SetToolPhysicalRootBone(-1);m.ApplyToolBoneOverrides(false);
+        Check(Error(m.m_pbonetransform[0],animated[0])<0.0002f&&Error(m.m_pbonetransform[4],animated[4])<0.0002f,"part overrides preserve animated ancestors and siblings");
+        Check(Error(m.m_pbonetransform[3],expected[3])<0.0002f,"part passive child keeps scaled world offset");
+        Animated(s,scale,animated);Seed(m,animated,move,arm);
+        matrix3x4 normalRoot=m_protationmatrix;m_protationmatrix.SetUp(-m_protationmatrix.GetUp());
+        const matrix3x4 reflection=m_protationmatrix.ConcatTransforms(normalRoot.Invert());
+        for(int i=0;i<5;++i)m.m_pbonetransform[i]=reflection.ConcatTransforms(animated[i]);
+        m.ApplyToolBoneOverrides(true);
+        for(int i=0;i<5;++i)Check(Error(m.m_pbonetransform[i],reflection.ConcatTransforms(expected[i]))<0.0003f,"mirror pass reflects full physical skeleton");
+        Animated(s,scale,animated);Seed(m,animated,move,arm);s.bones[0].parent=3;m.ApplyToolBoneOverrides(false);
+        for(int i=0;i<5;++i)Check(Error(m.m_pbonetransform[i],animated[i])==0,"cyclic hierarchy falls back to complete animation");s.bones[0].parent=-1;
+        bool driven[5]={false,true,true,false,false};matrix3x4 world[5];for(int i=0;i<5;++i)world[i]=expected[i];
+        world[1][3][0]=std::numeric_limits<float>::quiet_NaN();
+        Check(!physicsasset::StudioReconstructPhysicalHierarchy(5,s.bones,animated,driven,1,scale,world)&&std::isnan(world[1][3][0]),"invalid matrix fails without writing partial output");
+        const int permutation[]={4,2,0,3,1};int reverse[5];for(int i=0;i<5;++i)reverse[permutation[i]]=i;
+        mstudiobone_t reordered[5]{};matrix3x4 ra[5],rw[5];bool rd[5]{};
+        for(int i=0;i<5;++i){const int old=permutation[i];reordered[i].parent=s.bones[old].parent<0?-1:reverse[s.bones[old].parent];ra[i]=animated[old];rw[i]=expected[old];rd[i]=driven[old];}
+        Check(physicsasset::StudioReconstructPhysicalHierarchy(5,reordered,ra,rd,reverse[1],scale,rw),"parent order is computed rather than assumed");
+        for(int i=0;i<5;++i)Check(Error(rw[i],expected[permutation[i]])<0.0003f,"reordered branched skeleton matches independent expected transforms");
+    }
+    Weighted(m,@BASELINE@);
+    if(!@BASELINE@) WeightedFit(m);
+    std::cout<<"F4 preview/CPU palette: "<<checks<<" checks PASS; real methods/math, no solver/GPU\n";
+}

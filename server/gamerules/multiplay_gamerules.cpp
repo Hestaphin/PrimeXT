@@ -27,6 +27,7 @@
 #include	"items.h"
 #include	"hltv.h"
 #include "user_messages.h"
+#include "modular_damage_scope.h"
 
 extern DLL_GLOBAL CGameRules	*g_pGameRules;
 extern DLL_GLOBAL BOOL	g_fGameOver;
@@ -677,6 +678,13 @@ void CHalfLifeMultiplay::DeathNotice( CBasePlayer *pVictim, entvars_t *pKiller, 
 		killer_weapon_name = STRING( pevInflictor->classname );
 	}
 
+    const auto* source = g_modularDamageSource;
+    const bool modularKill = source && source->owner == pKiller && source->weapon;
+    modular::KillAssetReference killReference;
+    if (modularKill) {
+        killer_weapon_name = source->weapon->id.c_str();
+        killReference = modular::ReferenceKillAsset(*source->weapon, source->killSprite);
+    }
 	// strip the monster_* or weapon_* from the inflictor's classname
 	if ( strncmp( killer_weapon_name, "weapon_", 7 ) == 0 )
 		killer_weapon_name += 7;
@@ -689,6 +697,11 @@ void CHalfLifeMultiplay::DeathNotice( CBasePlayer *pVictim, entvars_t *pKiller, 
 		WRITE_BYTE( killer_index );						// the killer
 		WRITE_BYTE( ENTINDEX(pVictim->edict()) );		// the victim
 		WRITE_STRING( killer_weapon_name );		// what they were killed by (should this be a string?)
+        if (modularKill && killReference.kind) {
+            WRITE_BYTE(source->weapon->runtimeId);
+            WRITE_BYTE(killReference.kind);
+            WRITE_BYTE(killReference.index);
+        }
 	MESSAGE_END();
 
 	// replace the code names with the 'real' names
