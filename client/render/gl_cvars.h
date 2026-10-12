@@ -21,6 +21,7 @@ GNU General Public License for more details.
 void R_InitializeConVars();
 
 extern cvar_t *r_test;	// just cvar for testify new effects
+extern cvar_t *cl_ragdoll_diagnostics;
 extern cvar_t *r_stencilbits;
 extern cvar_t *r_drawentities;
 extern cvar_t *gl_extensions;

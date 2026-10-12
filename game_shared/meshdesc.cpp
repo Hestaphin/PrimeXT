@@ -85,7 +85,7 @@ void CMeshDesc::SetGeometryType(clipfile::GeometryType geomType)
 	m_iGeometryType = geomType;
 }
 
-bool CMeshDesc::Matches(const std::string &name, int32_t body, int32_t skin, clipfile::GeometryType geomType)
+bool CMeshDesc::Matches(const std::string &name, int32_t body, int32_t skin, clipfile::GeometryType geomType, uint64_t fingerprint)
 {
 	if (!m_debugName || name.compare(m_debugName) != 0)
 		return false;
@@ -93,7 +93,7 @@ bool CMeshDesc::Matches(const std::string &name, int32_t body, int32_t skin, cli
 		return false;
 	if (m_iSkinNumber != skin)
 		return false;
-	if (m_iGeometryType != geomType)
+	if (m_iGeometryType != geomType || m_sourceFingerprint != fingerprint)
 		return false;
 
 	return true;
@@ -803,10 +803,16 @@ void CMeshDesc :: RelinkFacet( mfacet_t *facet )
 
 CMeshDesc::LoadStatus CMeshDesc::StudioLoadCache()
 {
+	// Inline BSP models (*1, *2, ...) are cooked in memory, not MDL caches.
+	if( !m_pModel || m_pModel->type != mod_studio )
+		return LoadStatus::Error;
+
 	int	i, length, iCompare;
 	std::string filePath;
 
 	GetCacheFilePath(filePath);
+	if( filePath.empty() )
+		return LoadStatus::Error;
 	if( COMPARE_FILE_TIME( m_pModel->name, const_cast<char*>(filePath.c_str()), &iCompare))
 	{
 		// MDL file is newer.
@@ -869,7 +875,7 @@ CMeshDesc::LoadStatus CMeshDesc::StudioLoadCache()
 	for (size_t i = 0; i < entriesCount; i++)
 	{
 		const clipfile::CacheEntry &entry = entriesList[i];
-		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType) {
+		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType && entry.sourceFingerprint == m_sourceFingerprint) {
 			desiredEntry = &entry;
 			break;
 		}
@@ -941,10 +947,10 @@ CMeshDesc::LoadStatus CMeshDesc::StudioLoadCache()
 	{
 		file.Read( &facet, sizeof( facet ));
 		m_srcFacets[i].skinref = facet.skinref;
-		m_srcFacets[i].mins = facet.mins;
-		m_srcFacets[i].maxs = facet.maxs;
-		m_srcFacets[i].edge1 = facet.edge1;
-		m_srcFacets[i].edge2 = facet.edge2;
+		memcpy(&m_srcFacets[i].mins, facet.mins, sizeof(facet.mins));
+		memcpy(&m_srcFacets[i].maxs, facet.maxs, sizeof(facet.maxs));
+		memcpy(&m_srcFacets[i].edge1, facet.edge1, sizeof(facet.edge1));
+		memcpy(&m_srcFacets[i].edge2, facet.edge2, sizeof(facet.edge2));
 		m_srcFacets[i].numplanes = facet.numplanes;
 
 		// bounds checking
@@ -957,8 +963,8 @@ CMeshDesc::LoadStatus CMeshDesc::StudioLoadCache()
 
 		for( int k = 0; k < 3; k++ )
 		{
-			m_srcFacets[i].triangle[k] = facet.triangle[k];
-			AddPointToBounds( facet.triangle[k].point, m_mesh.mins, m_mesh.maxs );
+			memcpy(&m_srcFacets[i].triangle[k], &facet.triangle[k], sizeof(facet.triangle[k]));
+			AddPointToBounds( m_srcFacets[i].triangle[k].point, m_mesh.mins, m_mesh.maxs );
 		}
 	}
 
@@ -1009,17 +1015,17 @@ bool CMeshDesc::StudioSaveCache()
 	int32_t curIndex = 0;
 	for (size_t i = 0; i < m_mesh.numfacets; i++)
 	{
-		out_facets[i].mins = m_srcFacets[i].mins;
-		out_facets[i].maxs = m_srcFacets[i].maxs;
-		out_facets[i].edge1 = m_srcFacets[i].edge1;
-		out_facets[i].edge2 = m_srcFacets[i].edge2;
+		memcpy(out_facets[i].mins, &m_srcFacets[i].mins, sizeof(out_facets[i].mins));
+		memcpy(out_facets[i].maxs, &m_srcFacets[i].maxs, sizeof(out_facets[i].maxs));
+		memcpy(out_facets[i].edge1, &m_srcFacets[i].edge1, sizeof(out_facets[i].edge1));
+		memcpy(out_facets[i].edge2, &m_srcFacets[i].edge2, sizeof(out_facets[i].edge2));
 		out_facets[i].numplanes = m_srcFacets[i].numplanes;
 		out_facets[i].skinref = m_srcFacets[i].skinref;
 		out_facets[i].firstindex = curIndex;
 		curIndex += m_srcFacets[i].numplanes;
 
 		for (int k = 0; k < 3; k++) {
-			out_facets[i].triangle[k] = m_srcFacets[i].triangle[k];
+			memcpy(&out_facets[i].triangle[k], &m_srcFacets[i].triangle[k], sizeof(out_facets[i].triangle[k]));
 		}
 	}
 
@@ -1042,6 +1048,7 @@ bool CMeshDesc::StudioSaveCache()
 	currentEntry.body = m_iBodyNumber;
 	currentEntry.skin = m_iSkinNumber;
 	currentEntry.geometryType = m_iGeometryType;
+    currentEntry.sourceFingerprint = m_sourceFingerprint;
 	currentEntry.dataOffset = cacheFile.Tell();
 	
 	// write lumps 
@@ -1050,7 +1057,11 @@ bool CMeshDesc::StudioSaveCache()
 	lump = &data.lumps[clipfile::kDataLumpFacets];
 	lump->fileofs = cacheFile.Tell();
 	lump->filelen = sizeof(clipfile::Facet) * m_mesh.numfacets;
-	cacheFile.Write(out_facets, AlignTo<size_t, 4>(lump->filelen));
+	cacheFile.Write(out_facets, lump->filelen);
+	uint32_t facetPadding = 0;
+	const size_t facetPaddingSize = AlignTo<size_t, 4>(lump->filelen) - lump->filelen;
+	if( facetPaddingSize )
+		cacheFile.Write(&facetPadding, facetPaddingSize);
 
 	lump = &data.lumps[clipfile::kDataLumpPlanes];
 	lump->fileofs = cacheFile.Tell();
@@ -1111,6 +1122,7 @@ bool CMeshDesc :: StudioCreateCache()
 	table.entries[0].body = m_iBodyNumber;
 	table.entries[0].skin = m_iSkinNumber;
 	table.entries[0].geometryType = m_iGeometryType;
+    table.entries[0].sourceFingerprint = m_sourceFingerprint;
 	table.entries[0].dataOffset = file.Tell();
 	file.Write(&data, sizeof(data));
 
@@ -1124,17 +1136,17 @@ bool CMeshDesc :: StudioCreateCache()
 	// copy planes into mesh array (probably aligned block)
 	for( i = 0, curIndex = 0; i < m_mesh.numfacets; i++ )
 	{
-		out_facets[i].mins = m_srcFacets[i].mins;
-		out_facets[i].maxs = m_srcFacets[i].maxs;
-		out_facets[i].edge1 = m_srcFacets[i].edge1;
-		out_facets[i].edge2 = m_srcFacets[i].edge2;
+		memcpy(out_facets[i].mins, &m_srcFacets[i].mins, sizeof(out_facets[i].mins));
+		memcpy(out_facets[i].maxs, &m_srcFacets[i].maxs, sizeof(out_facets[i].maxs));
+		memcpy(out_facets[i].edge1, &m_srcFacets[i].edge1, sizeof(out_facets[i].edge1));
+		memcpy(out_facets[i].edge2, &m_srcFacets[i].edge2, sizeof(out_facets[i].edge2));
 		out_facets[i].numplanes = m_srcFacets[i].numplanes;
 		out_facets[i].skinref = m_srcFacets[i].skinref;
 		out_facets[i].firstindex = curIndex;
 		curIndex += m_srcFacets[i].numplanes;
 
 		for( int k = 0; k < 3; k++ )
-			out_facets[i].triangle[k] = m_srcFacets[i].triangle[k];
+			memcpy(&out_facets[i].triangle[k], &m_srcFacets[i].triangle[k], sizeof(out_facets[i].triangle[k]));
 	}
 
 	if( curIndex != m_iTotalPlanes ) 
@@ -1150,7 +1162,11 @@ bool CMeshDesc :: StudioCreateCache()
 	lump = &data.lumps[clipfile::kDataLumpFacets];
 	lump->fileofs = file.Tell();
 	lump->filelen = sizeof(clipfile::Facet) * m_mesh.numfacets;
-	file.Write(out_facets, AlignTo<size_t, 4>(lump->filelen));
+	file.Write(out_facets, lump->filelen);
+	const uint32_t facetPadding = 0;
+	const size_t facetPaddingSize = AlignTo<size_t, 4>(lump->filelen) - lump->filelen;
+	if( facetPaddingSize )
+		file.Write(&facetPadding, facetPaddingSize);
 
 	lump = &data.lumps[clipfile::kDataLumpPlanes];
 	lump->fileofs = file.Tell();
@@ -1188,9 +1204,21 @@ bool CMeshDesc :: StudioCreateCache()
 
 void CMeshDesc::GetCacheFilePath(std::string &filePath) const
 {
+	filePath.clear();
+	if( !m_pModel || m_pModel->type != mod_studio )
+		return;
+
 	std::string fileName = m_pModel->name;
-	fileName.erase(0, fileName.find_first_of("/\\") + 1);
-	fileName.erase(fileName.find_last_of("."));
+	const auto rootSeparator = fileName.find_first_of("/\\");
+	if( rootSeparator != std::string::npos )
+		fileName.erase(0, rootSeparator + 1);
+	const auto extension = fileName.find_last_of('.');
+	const auto directory = fileName.find_last_of("/\\");
+	if( extension != std::string::npos &&
+		( directory == std::string::npos || extension > directory ))
+		fileName.erase(extension);
+	if( fileName.empty() )
+		return;
 	filePath = "cache/" + fileName + ".clip";
 }
 
@@ -1198,6 +1226,8 @@ bool CMeshDesc::CacheFileExists() const
 {
 	std::string filePath;
 	GetCacheFilePath(filePath);
+	if( filePath.empty() )
+		return false;
 	if (fs::FileExists(filePath)) {
 		return true;
 	}
@@ -1503,7 +1533,9 @@ bool CMeshDesc :: FinishMeshBuild( void )
 		m_mesh.maxs[i] += 1.0f;
 	}
 
-	size_t memsize = (sizeof( mfacet_t ) * m_mesh.numfacets) + (sizeof( mplane_t ) * m_mesh.numplanes) + (sizeof( uint32_t ) * m_iTotalPlanes);
+	// Facets contain pointers and require stronger alignment on 64-bit builds.
+	const size_t planesSize = AlignTo<size_t, alignof(mfacet_t)>(sizeof( mplane_t ) * m_mesh.numplanes);
+	size_t memsize = (sizeof( mfacet_t ) * m_mesh.numfacets) + planesSize + (sizeof( uint32_t ) * m_iTotalPlanes);
 	mesh_size = sizeof( m_mesh ) + memsize;
 
 	// create non-fragmented memory piece and move mesh
@@ -1512,7 +1544,7 @@ bool CMeshDesc :: FinishMeshBuild( void )
 
 	// setup pointers
 	m_mesh.planes = (mplane_t *)buffer; // so we free mem with planes
-	buffer += (sizeof( mplane_t ) * m_mesh.numplanes);
+	buffer += planesSize;
 	m_mesh.facets = (mfacet_t *)buffer;
 	buffer += (sizeof( mfacet_t ) * m_mesh.numfacets);
 
@@ -1606,6 +1638,9 @@ void CMeshDesc::SaveToCacheFile()
 
 bool CMeshDesc::LoadFromCacheFile()
 {
+	if( !m_pModel || m_pModel->type != mod_studio )
+		return false;
+
 	LoadStatus status = StudioLoadCache();
 	if (status == LoadStatus::Error && CacheFileExists()) 
 	{
@@ -1624,15 +1659,15 @@ bool CMeshDesc::PresentInCache() const
 	std::vector<clipfile::CacheEntry> entriesList;
 	const clipfile::CacheEntry *desiredEntry = nullptr;
 
-	if (m_pModel->type != mod_studio) {
+	if (!m_pModel || m_pModel->type != mod_studio) {
 		return false; // only studio model can be cached
 	}
 
-	std::string fileName = m_pModel->name;
-	fileName.erase(0, fileName.find_first_of("/\\") + 1);
-	fileName.erase(fileName.find_last_of("."));
-
-	fs::Path filePath = "cache/" + fileName + ".clip";
+	std::string cachePath;
+	GetCacheFilePath(cachePath);
+	if( cachePath.empty() )
+		return false;
+	fs::Path filePath = cachePath;
 	fs::File cacheFile(filePath, "rb");
 	if (!fs::FileExists(filePath) || !cacheFile.IsOpen()) {
 		return false;
@@ -1640,6 +1675,9 @@ bool CMeshDesc::PresentInCache() const
 
 	// read header
 	cacheFile.Read(&hdr, sizeof(hdr));
+    // Never trust stale v2 .clip offsets/layout or the old MDL-only CRC.
+    if (hdr.id != clipfile::kFileMagic || hdr.version != clipfile::kFormatVersion ||
+        hdr.modelCRC != m_pModel->modelCRC) return false;
 
 	// read cache entries table
 	uint32_t entriesCount;
@@ -1658,7 +1696,7 @@ bool CMeshDesc::PresentInCache() const
 	for (size_t i = 0; i < entriesCount; i++)
 	{
 		const clipfile::CacheEntry &entry = entriesList[i];
-		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType) {
+		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType && entry.sourceFingerprint == m_sourceFingerprint) {
 			return true;
 		}
 	}

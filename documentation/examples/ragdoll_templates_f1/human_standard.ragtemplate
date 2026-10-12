@@ -1,0 +1,351 @@
+ragdoll_template
+{
+    template_version 1
+    id "human_standard"
+    name "Human Standard"
+    description "F1 candidate: review mappings and fitting; anatomical axes/stability are F2 work."
+    anatomy "human"
+    mass_budget 70
+    linear_damping 0.0500000007
+    angular_damping 0.0500000007
+
+    role "pelvis"
+    {
+        parent ""
+        alias "Bip01 Pelvis"
+        alias "ValveBiped.Bip01_Pelvis"
+        override ""
+        required 1
+        minimum_detail 0
+        shape box
+        hitgroup 3
+        mass_weight 16
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "spine"
+    {
+        parent "pelvis"
+        alias "Bip01 Spine"
+        alias "ValveBiped.Bip01_Spine"
+        override ""
+        required 0
+        minimum_detail 2
+        shape box
+        hitgroup 2
+        mass_weight 4
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "spine_mid"
+    {
+        parent "spine"
+        alias "Bip01 Spine1"
+        alias "ValveBiped.Bip01_Spine1"
+        override ""
+        required 0
+        minimum_detail 2
+        shape box
+        hitgroup 2
+        mass_weight 4
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "chest"
+    {
+        parent "spine_mid"
+        alias "Bip01 Spine3"
+        alias "ValveBiped.Bip01_Spine4"
+        override ""
+        required 1
+        minimum_detail 0
+        shape box
+        hitgroup 2
+        mass_weight 20
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "head"
+    {
+        parent "chest"
+        alias "Bip01 Head"
+        alias "ValveBiped.Bip01_Head1"
+        override ""
+        required 1
+        minimum_detail 0
+        shape sphere
+        hitgroup 1
+        mass_weight 5
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "left_upper_arm"
+    {
+        parent "chest"
+        alias "Bip01 L Arm1"
+        alias "ValveBiped.Bip01_L_UpperArm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 4
+        mass_weight 2
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "left_forearm"
+    {
+        parent "left_upper_arm"
+        alias "Bip01 L Arm2"
+        alias "ValveBiped.Bip01_L_Forearm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 4
+        mass_weight 1.60000002
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "left_hand"
+    {
+        parent "left_forearm"
+        alias "Bip01 L Hand"
+        alias "ValveBiped.Bip01_L_Hand"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 4
+        mass_weight 0.600000024
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "right_upper_arm"
+    {
+        parent "chest"
+        alias "Bip01 R Arm1"
+        alias "ValveBiped.Bip01_R_UpperArm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 5
+        mass_weight 2
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "right_forearm"
+    {
+        parent "right_upper_arm"
+        alias "Bip01 R Arm2"
+        alias "ValveBiped.Bip01_R_Forearm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 5
+        mass_weight 1.60000002
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "right_hand"
+    {
+        parent "right_forearm"
+        alias "Bip01 R Hand"
+        alias "ValveBiped.Bip01_R_Hand"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 5
+        mass_weight 0.600000024
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "left_thigh"
+    {
+        parent "pelvis"
+        alias "Bip01 L Leg"
+        alias "ValveBiped.Bip01_L_Thigh"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 6
+        mass_weight 7
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "left_calf"
+    {
+        parent "left_thigh"
+        alias "Bip01 L Leg1"
+        alias "ValveBiped.Bip01_L_Calf"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 6
+        mass_weight 4
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "left_foot"
+    {
+        parent "left_calf"
+        alias "Bip01 L Foot"
+        alias "ValveBiped.Bip01_L_Foot"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 6
+        mass_weight 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "right_thigh"
+    {
+        parent "pelvis"
+        alias "Bip01 R Leg"
+        alias "ValveBiped.Bip01_R_Thigh"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 7
+        mass_weight 7
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "right_calf"
+    {
+        parent "right_thigh"
+        alias "Bip01 R Leg1"
+        alias "ValveBiped.Bip01_R_Calf"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 7
+        mass_weight 4
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+
+    role "right_foot"
+    {
+        parent "right_calf"
+        alias "Bip01 R Foot"
+        alias "ValveBiped.Bip01_R_Foot"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 7
+        mass_weight 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+}

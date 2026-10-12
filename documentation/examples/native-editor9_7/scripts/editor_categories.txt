@@ -1,0 +1,4 @@
+# pxwe empty/category folders; the game reads asset category fields.
+version = 1
+cartridge = 9x19/unassigned
+weapon = pistols/service/reserve

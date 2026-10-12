@@ -1,0 +1,28 @@
+#include "../../../../server/physx/physics_d6_frame.h"
+#include "../../../../server/physx/physics_asset_motion.h"
+#include <algorithm>
+#include <iostream>
+#include <cstdlib>
+using namespace physx;
+@PRODUCTION@
+static unsigned checks=0;
+static void Check(bool b,const char *name) {++checks;if(!b) {std::cerr<<"FAIL "<<name<<'\n';std::abort();}}
+int main()
+{
+    physicsasset::JointDef def;def.frameAnchor={1,2,3};def.frameAngles={30,-60,25};
+    const auto frame=physicsasset::ChildD6Frame(def,2);
+    Check(frame.p.x==2&&frame.p.y==4&&frame.p.z==6,"child frame anchor scales exactly once");
+    const auto r=raggeometry::Euler(def.frameAngles);const auto actual=frame.q.rotate({2,3,4});const auto expected=r.Rotate({2,3,4});
+    Check(std::fabs(actual.x-expected.x)<1e-5&&std::fabs(actual.y-expected.y)<1e-5&&std::fabs(actual.z-expected.z)<1e-5,"production frame adapter retains rotation");
+    for(auto mode:{physicsasset::AngularMotion::Limited,physicsasset::AngularMotion::Free})
+    {
+        def.twistMotion=def.swing1Motion=def.swing2Motion=mode;def.twistLow=0;def.twistHigh=130;def.swing1=30;def.swing2=40;
+        PxD6Joint runtime,preview;RuntimeSettings(&runtime,def);PreviewSettings(&preview,def);
+        for(int i=0;i<6;++i) Check(runtime.motions[i]==preview.motions[i]&&runtime.writes[i]==preview.writes[i],"actual runtime/editor D6 settings agree");
+        for(int i=0;i<3;++i) Check(runtime.motions[i]==PxD6Motion::eLOCKED,"runtime locks all translations even in Free Rotation");
+        Check(std::fabs(runtime.twist.upper-130*PxPi/180)<1e-6&&runtime.twist.lower==0,"asymmetric flexion limits consumed in radians");
+    }
+    def.twistMotion=physicsasset::AngularMotion::Limited;def.swing1Motion=def.swing2Motion=physicsasset::AngularMotion::Locked;
+    PxD6Joint knee;RuntimeSettings(&knee,def);Check(knee.motions[4]==PxD6Motion::eLOCKED&&knee.motions[5]==PxD6Motion::eLOCKED,"hinge-like secondary DOFs locked by production runtime");
+    std::cout<<"F2 shared frame and actual runtime/editor D6 setters: "<<checks<<" checks PASS (SDK facade; NO solver/native SDK)\n";
+}

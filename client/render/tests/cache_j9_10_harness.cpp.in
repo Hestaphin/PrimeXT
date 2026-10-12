@@ -1,0 +1,122 @@
+// Real CMeshDesc implementation and headers; filesystem APIs are adapters.
+#include "hud.h"
+#include "utils.h"
+#include "gl_local.h"
+#include "virtualfs.h"
+#include "filesystem_utils.h"
+#include <cassert>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+#define private public
+#include "meshdesc.h"
+#undef private
+
+extern "C" const char *__asan_default_options() { return "detect_leaks=0:halt_on_error=1"; }
+extern "C" const char *__ubsan_default_options() { return "halt_on_error=1:print_stacktrace=1"; }
+cl_enginefunc_t gEngfuncs = {};
+render_api_t gRenderfuncs = {};
+static int filesystemCalls;
+static std::string savedPath;
+static std::vector<byte> savedCache;
+void ALERT(ALERT_TYPE, char *, ...) {}
+static void QuietPrint(const char *, ...) {}
+namespace fs {
+File::File() : m_handle(nullptr) {}
+File::File(const Path &, const char *) : m_handle(nullptr) { ++filesystemCalls; }
+File::~File() {}
+bool File::IsOpen() { return false; }
+bool File::Open(const Path &, const char *) { ++filesystemCalls; return false; }
+void File::Close() {}
+void File::Seek(int32_t, SeekType) {}
+int32_t File::Tell() { return 0; }
+int32_t File::Read(void *, int32_t) { return 0; }
+int32_t File::Write(void *, int32_t) { return 0; }
+bool FileExists(const Path &) { ++filesystemCalls; return false; }
+void RemoveFile(const Path &) { ++filesystemCalls; }
+}
+
+static void SetupApi() {
+    gRenderfuncs.pfnMemAlloc = [](size_t n, const char *, int) { return std::calloc(1, n); };
+    gRenderfuncs.pfnMemFree = [](void *p, const char *, int) { std::free(p); };
+    gRenderfuncs.COM_CompareFileTime = [](const char *, const char *path, int *order) {
+        ++filesystemCalls; *order = 0; return savedPath == path ? 1 : 0;
+    };
+    gRenderfuncs.pfnSaveFile = [](const char *path, const void *data, int size) {
+        savedPath = path; savedCache.assign((const byte *)data, (const byte *)data + size); return 1;
+    };
+    gEngfuncs.COM_LoadFile = [](const char *path, int, int *size) -> byte * {
+        ++filesystemCalls;
+        if(savedPath != path) return nullptr;
+        *size = (int)savedCache.size();
+        byte *copy = (byte *)std::malloc(*size); std::memcpy(copy, savedCache.data(), *size); return copy;
+    };
+    gEngfuncs.COM_FreeFile = [](void *p) { std::free(p); };
+    gEngfuncs.Con_Printf = QuietPrint;
+    gEngfuncs.pfnSys_FloatTime = []() { return 0.0; };
+}
+
+static const char *brushNames[] = {/* BRUSH_NAMES */};
+int main(int argc, char **argv) {
+    assert(argc == 2); SetupApi(); std::string test = argv[1];
+    model_t model = {}; model.type = mod_brush;
+    std::strcpy(model.name, brushNames[0]);
+    CMeshDesc desc; desc.SetModel(&model, 0, 0);
+    if(test == "brush_load") {
+        for(const char *name : brushNames) {
+            std::strcpy(model.name, name); filesystemCalls = 0;
+            assert(!desc.LoadFromCacheFile()); assert(filesystemCalls == 0);
+        }
+    } else if(test == "brush_path") {
+        for(const char *name : brushNames) {
+            std::strcpy(model.name, name); std::string path = "old";
+            desc.GetCacheFilePath(path); assert(path.empty());
+        }
+    } else if(test == "brush_private_load") {
+        assert(desc.StudioLoadCache() == CMeshDesc::LoadStatus::Error);
+        assert(!desc.CacheFileExists() && !desc.PresentInCache());
+        assert(filesystemCalls == 0);
+    } else if(test == "null_cache") {
+        desc.SetModel(nullptr, 0, 0);
+        assert(!desc.LoadFromCacheFile() && !desc.PresentInCache() && !desc.CacheFileExists());
+        assert(filesystemCalls == 0);
+    } else if(test == "studio_paths") {
+        model.type = mod_studio;
+        for(const char *name : {"models/asset/testgman.mdl", "models\\asset\\testgman.mdl"}) {
+            std::strcpy(model.name, name); std::string path;
+            desc.GetCacheFilePath(path);
+            assert(path == (std::strchr(name, '\\') ? "cache/asset\\testgman.clip" : "cache/asset/testgman.clip"));
+        }
+    } else if(test == "studio_extensionless") {
+        model.type = mod_studio;
+        std::strcpy(model.name, "models/asset.v2/door"); std::string path;
+        desc.GetCacheFilePath(path); assert(path == "cache/asset.v2/door.clip");
+        std::strcpy(model.name, "barney"); desc.GetCacheFilePath(path); assert(path == "cache/barney.clip");
+    } else if(test == "studio_missing") {
+        model.type = mod_studio; std::strcpy(model.name, "models/barney.mdl");
+        assert(!desc.LoadFromCacheFile()); assert(filesystemCalls > 0);
+    } else if(test == "studio_roundtrip") {
+        model.type = mod_studio; model.modelCRC = 12345;
+        std::strcpy(model.name, "models/asset/testgman.mdl");
+        desc.SetModel(&model, 2, 1); desc.SetGeometryType(clipfile::GeometryType::CookedConvexHull);
+        desc.SetSourceFingerprint(0x123456789ABCDEF0ULL);
+        assert(desc.InitMeshBuild(1));
+        Vector triangle[3] = {Vector(0,0,0), Vector(16,0,0), Vector(0,16,0)};
+        assert(desc.AddMeshTrinagle(triangle)); assert(desc.FinishMeshBuild());
+        assert((uintptr_t)desc.GetMesh()->facets % alignof(mfacet_t) == 0);
+        desc.SaveToCacheFile(); desc.FreeMeshBuild();
+        assert(savedPath == "cache/asset/testgman.clip" && !savedCache.empty());
+        CMeshDesc reader; reader.SetModel(&model, 2, 1);
+        reader.SetGeometryType(clipfile::GeometryType::CookedConvexHull);
+        reader.SetSourceFingerprint(0x123456789ABCDEF0ULL);
+        assert(reader.LoadFromCacheFile()); assert(reader.FinishMeshBuild());
+        reader.FreeMeshBuild(); assert(reader.GetMesh() && reader.GetMesh()->numfacets == 1);
+        assert((uintptr_t)reader.GetMesh()->facets % alignof(mfacet_t) == 0);
+        CMeshDesc wrong; wrong.SetModel(&model, 2, 1);
+        wrong.SetGeometryType(clipfile::GeometryType::CookedConvexHull); wrong.SetSourceFingerprint(1);
+        assert(!wrong.LoadFromCacheFile());
+    } else { assert(false && "Unknown case"); }
+    std::printf("PASS %s\n", test.c_str());
+}

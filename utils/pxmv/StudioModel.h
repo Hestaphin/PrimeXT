@@ -22,6 +22,9 @@ typedef unsigned char byte;
 #include "bs_defs.h"
 #include "ikcontext.h"
 #include <array>
+#include <vector>
+#include <string>
+#include "ragdoll_diagnostics.h"
 
 #define MAX_SEQBLENDS	4		// must be power of two
 #define MASK_SEQBLENDS	(MAX_SEQBLENDS - 1)
@@ -197,6 +200,24 @@ public:
 	edit_field_t	*editField( void ) { return m_pedit; }
 	const char	*getQCcode( void );
 
+	// Tool-only skeletal overrides used by the Physics Asset Editor preview.
+	// Runtime ragdoll networking uses a separate engine/client bridge.
+	const matrix3x4 &GetToolBoneTransform( int bone ) const;
+	const matrix3x4 &GetToolModelTransform() const;
+	bool GetBoneVertexBounds( int bone, Vector &mins, Vector &maxs );
+    bool GetRagdollFitVertices(std::vector<std::vector<Vector>> &, const std::vector<std::string> &excludedSections);
+	void SetToolBoneOverride( int bone, const matrix3x4 &transform );
+	void ClearToolBoneOverrides();
+	void SetToolPhysicalRootBone(int bone);
+	void ApplyToolBoneOverrides(bool mirrored);
+	void SetToolPoseDiagnostics(bool enabled, int rootBone = -1)
+	{
+		m_toolPoseDiagnosticsEnabled = enabled;
+		m_toolDiagnosticRootBone = rootBone;
+		m_toolPoseDiagnostics = ragdolldiag::PoseMetrics{};
+	}
+	const ragdolldiag::PoseMetrics &GetToolPoseDiagnostics() const { return m_toolPoseDiagnostics; }
+
 	float		m_prevGroundCycle;
 	CBaseBoneSetup	m_boneSetup;
 
@@ -249,6 +270,13 @@ private:
 	matrix3x4	m_pbonetransform[MAXSTUDIOBONES];	// bone transformation matrix
 	matrix3x4	m_plocaltransform[MAXSTUDIOBONES];
 	matrix3x4	m_pworldtransform[MAXSTUDIOBONES];
+	std::array<bool, MAXSTUDIOBONES> m_toolBoneOverrideMask = { false };
+	std::array<matrix3x4, MAXSTUDIOBONES> m_toolBoneOverrides;
+	int m_toolPhysicalRootBone = -1;
+	bool m_hasToolBoneOverrides = false;
+	bool m_toolPoseDiagnosticsEnabled = false;
+	int m_toolDiagnosticRootBone = -1;
+	ragdolldiag::PoseMetrics m_toolPoseDiagnostics;
 
 	blend_sequence_t	m_seqblend[MAX_SEQBLENDS];
 	int		m_current_seqblend = 0;

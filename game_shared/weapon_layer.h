@@ -92,11 +92,12 @@ public:
 	virtual matrix3x3 GetCameraOrientation() = 0;
 	virtual Vector GetViewAngles() = 0;
 	virtual Vector GetAutoaimVector(float delta) = 0;
-	virtual Vector FireBullets(int bullets, Vector origin, matrix3x3 orientation, float distance, float spread, int bulletType, uint32_t seed, int damage = 0) = 0;
+	virtual Vector FireBullets(int bullets, Vector origin, matrix3x3 orientation, float distance, float spread, int bulletType, uint32_t seed, float damage = 0) = 0;
 	virtual CBasePlayerWeapon* GetWeaponEntity() = 0;
 
 	// modifying/accessing player state
-	virtual int GetPlayerAmmo(int ammoType) = 0;
+    virtual int GetPlayerAmmo(int ammoType) = 0;
+    virtual int FindAmmoType(const char* name) = 0;
 	virtual void SetPlayerAmmo(int ammoType, int count) = 0;
 	virtual void SetPlayerWeaponAnim(int anim) = 0;
 	virtual void SetPlayerViewmodel(std::string_view model) = 0;

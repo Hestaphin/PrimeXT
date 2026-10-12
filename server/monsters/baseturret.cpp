@@ -25,8 +25,13 @@
 //
 
 #include "baseturret.h"
+#include "modular_weapons.h"
 
 BEGIN_DATADESC( CBaseTurret )
+    DEFINE_FIELD( m_iszModularWeapon, FIELD_STRING ),
+    DEFINE_FIELD( m_iszModularCartridge, FIELD_STRING ),
+    DEFINE_FIELD( m_iModularRounds, FIELD_INTEGER ),
+    DEFINE_FIELD( m_useModularWeapon, FIELD_BOOLEAN ),
 	DEFINE_FIELD( m_flMaxSpin, FIELD_FLOAT ),
 	DEFINE_FIELD( m_iSpin, FIELD_INTEGER ),
 	DEFINE_FIELD( m_pEyeGlow, FIELD_CLASSPTR ),
@@ -63,7 +68,23 @@ END_DATADESC()
 
 void CBaseTurret::KeyValue( KeyValueData *pkvd )
 {
-	if (FStrEq(pkvd->szKeyName, "maxsleep"))
+    if (FStrEq(pkvd->szKeyName, "modular_weapon"))
+    {
+        m_iszModularWeapon = ALLOC_STRING(pkvd->szValue);
+        pkvd->fHandled = TRUE;
+    }
+    else if (FStrEq(pkvd->szKeyName, "modular_cartridge"))
+    {
+        m_iszModularCartridge = ALLOC_STRING(pkvd->szValue);
+        pkvd->fHandled = TRUE;
+    }
+    else if (FStrEq(pkvd->szKeyName, "modular_rounds"))
+    {
+        m_iModularRounds = Q_atoi(pkvd->szValue);
+        if (m_iModularRounds < -1) m_iModularRounds = -1;
+        pkvd->fHandled = TRUE;
+    }
+	else if (FStrEq(pkvd->szKeyName, "maxsleep"))
 	{
 		m_flMaxWait = Q_atof(pkvd->szValue);
 		pkvd->fHandled = TRUE;
@@ -95,8 +116,35 @@ void CBaseTurret::KeyValue( KeyValueData *pkvd )
 		BaseClass::KeyValue( pkvd );
 }
 
+bool CBaseTurret::TryModularShoot( const Vector &source, const Vector &direction )
+{
+    if (!m_useModularWeapon) return false;
+    // -1 is unbounded turret ammo; finite magazines charge authored ammoCost.
+    const int available = m_iModularRounds < 0 ? 32767 : m_iModularRounds;
+    const int spent = FireModularNpcWeapon(this,
+        STRING(m_iszModularWeapon),
+        FStringNull(m_iszModularCartridge) ? nullptr : STRING(m_iszModularCartridge),
+        source, direction, available);
+    if (spent > 0 && m_iModularRounds >= 0)
+        m_iModularRounds -= spent;
+    return true;
+}
+
 void CBaseTurret::Spawn()
 { 
+    m_useModularWeapon = false;
+    if (!FStringNull(m_iszModularWeapon)) {
+        const auto* definition = modular::SharedRegistry().FindWeapon(STRING(m_iszModularWeapon));
+        const char* cartridge = FStringNull(m_iszModularCartridge) ?
+            (definition ? definition->defaultCartridgeId.c_str() : "") : STRING(m_iszModularCartridge);
+        if (definition && definition->npcUsable) {
+            for (const auto& accepted : definition->compatible)
+                if (accepted.cartridgeId == cartridge && modular::SharedRegistry().FindCartridge(cartridge))
+                    m_useModularWeapon = true;
+        }
+        if (!m_useModularWeapon)
+            ALERT(at_warning, "turret: invalid modular weapon or cartridge; using legacy fire\n");
+    }
 	Precache( );
 	pev->nextthink		= gpGlobals->time + 1;
 	pev->movetype		= MOVETYPE_FLY;

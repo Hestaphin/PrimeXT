@@ -14,6 +14,7 @@
 #include <mx/mxWindow.h>
 #include <mx/mx.h>
 #include <QResizeEvent>
+#include <QCloseEvent>
 #include <QMainWindow>
 #include <QMenuBar>
 #include <QApplication>
@@ -60,6 +61,14 @@ public slots:
 	}
 	
 protected:
+	virtual void closeEvent (QCloseEvent *e)
+	{
+		mxEvent event;
+		event.event = mxEvent::Close;
+		d_window->handleEvent (&event);
+		QMainWindow::closeEvent (e);
+	}
+
 	virtual void resizeEvent (QResizeEvent *e)
 	{
 		QMainWindow::resizeEvent (e);

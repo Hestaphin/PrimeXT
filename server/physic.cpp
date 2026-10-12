@@ -57,7 +57,7 @@ unsigned int EngineSetFeatures(void)
 
 void DrawDebugTriangles( void )
 {
-	if( g_debugdraw != NULL && g_debugdraw->value > 0.0f )
+	if(( g_debugdraw != NULL && g_debugdraw->value > 0.0f ) || ragdoll_debug.value > 0.0f )
 		WorldPhysic->DebugDraw();
 
 	if( g_physdebug != NULL && g_physdebug->value > 0.0f )

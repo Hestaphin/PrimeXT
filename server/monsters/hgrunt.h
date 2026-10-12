@@ -125,6 +125,7 @@ class CHGrunt : public CSquadMonster
 	DECLARE_CLASS( CHGrunt, CSquadMonster );
 public:
 	void Spawn( void );
+    void KeyValue(KeyValueData* data) override;
 	void Precache( void );
 	void SetYawSpeed ( void );
 	int  Classify ( void );
@@ -168,6 +169,9 @@ public:
 	float m_flNextPainTime;
 	float m_flLastEnemySightTime;
 
+    string_t m_iszModularWeapon = iStringNull;
+    string_t m_iszModularCartridge = iStringNull;
+    BOOL m_useModularWeapon = FALSE;
 	Vector	m_vecTossVelocity;
 
 	BOOL	m_fThrowGrenade;

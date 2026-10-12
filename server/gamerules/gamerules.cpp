@@ -87,6 +87,10 @@ BOOL CGameRules::CanHavePlayerItem( CBasePlayer *pPlayer, CBasePlayerItem *pWeap
 	if ( pPlayer->pev->deadflag != DEAD_NO )
 		return FALSE;
 
+	const int typedCapacity = pWeapon->DuplicateAmmoCapacity(pPlayer);
+	if (typedCapacity >= 0)
+		return !pPlayer->HasPlayerItem(pWeapon) || typedCapacity > 0;
+
 	if ( pWeapon->pszAmmo1() )
 	{
 		if ( !CanHaveAmmo( pPlayer, pWeapon->pszAmmo1(), pWeapon->iMaxAmmo1() ) )

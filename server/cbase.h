@@ -511,7 +511,7 @@ public:
 	void SUB_FadeOut ( void );
 	void SUB_CallUseToggle( void ) { this->Use( this, this, USE_TOGGLE, 0 ); }
 	int ShouldToggle( USE_TYPE useType, BOOL currentState );
-	void FireBullets( ULONG cShots, Vector vecSrc, Vector vecDirShooting,	Vector vecSpread, float flDistance, int iBulletType, int iTracerFreq = 4, int iDamage = 0, entvars_t *pevAttacker = nullptr);
+	void FireBullets( ULONG cShots, Vector vecSrc, Vector vecDirShooting,	Vector vecSpread, float flDistance, int iBulletType, int iTracerFreq = 4, float iDamage = 0, entvars_t *pevAttacker = nullptr);
 	void Teleport( const Vector *newPosition, const Vector *newAngles, const Vector *newVelocity );
 	void GetVectors( Vector *pForward, Vector *pRight, Vector *pUp ) const;
 
@@ -898,6 +898,12 @@ class CBaseAnimating : public CBaseDelay
 {
 	DECLARE_CLASS( CBaseAnimating, CBaseDelay );
 public:
+    int Save(CSave &save) override;
+    int Restore(CRestore &restore) override;
+    int m_partSaveCount = 0;
+    PhysicsPartSaveRecord m_partSaved[kSavedPhysicsPartLimit] = {};
+    PhysicsRagdollSaveState m_ragdollSaved = {};
+    PhysicsRagdollBodySaveRecord m_ragdollBodiesSaved[kSavedRagdollBodyLimit] = {};
 	// Basic Monster Animation functions
 	float StudioFrameAdvance( float flInterval = 0.0 ); // accumulate animation frame time from last time called until now
 	float StudioGaitFrameAdvance( void );	// accumulate gait frame time from last time called until now
@@ -914,6 +920,16 @@ public:
 	void InitBoneControllers ( void );
 	float SetBlending ( int iBlender, float flValue );
 	void GetBonePosition ( int iBone, Vector &origin, Vector &angles );
+	bool HasPhysicsAsset() const;
+	bool IsRagdoll() const;
+	void EnableRagdoll( bool enable = true );
+	bool SetRagdollPhysicsWeight( const char *bodyName, float physicsWeight, bool includeChildren = false );
+	bool SetPhysicalAnimation( float physicsWeight );
+    // Interactive prop part, e.g. "left_door". Set free=true to hand off
+    // animation motion to the authored PhysX hinge, false to reattach to animation.
+    bool SetInteractivePartFree( const char *partName, bool free );
+    bool SetInteractivePartDriven( const char *partName );
+    bool DamageInteractivePart( const char *partName, float damage );
 	void GetAutomovement( Vector &origin, Vector &angles, float flInterval = 0.1 );
 	int  FindTransition( int iEndingSequence, int iGoalSequence, int *piDir );
 	void GetAttachment ( int iAttachment, Vector &origin, Vector &angles );

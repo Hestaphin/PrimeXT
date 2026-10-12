@@ -152,6 +152,7 @@ CStudioModelRenderer :: CStudioModelRenderer( void )
 	m_pVboModel	= NULL;
 	m_pSubModel	= NULL;
 	m_pModelInstance	= NULL;
+	m_fRagdollDecalWorldSpace = false;
 }
 
 /*
@@ -261,34 +262,51 @@ bool CStudioModelRenderer :: StudioSetEntity( CSolidEntry *entry )
 	return true;
 }
 
-bool CStudioModelRenderer :: StudioSetupInstance( void )
+CStudioModelRenderer::ModelInstance_t* CStudioModelRenderer::StudioEnsureCpuInstance(
+    cl_entity_t* entity, model_t* model, bool reset)
 {
-	if (RI->currententity->model->type != mod_studio) {
-		// hotfix for bug when worldspawn == RI->currententity but why???
-		return false; 
-	}
-	if( RI->currententity->modelhandle == INVALID_HANDLE )
-	{
-		RI->currententity->modelhandle = m_ModelInstances.AddToTail();
+    if (!entity) return nullptr;
+    if (!model) {
+        model = entity->model;
+        if (entity->player || entity->curstate.renderfx == kRenderFxDeadPlayer) {
+            const int index = entity->player ? entity->curstate.number-1 : entity->curstate.renderamt-1;
+            if (index < 0 || (gEngfuncs.GetMaxClients && index >= GET_MAX_CLIENTS()))
+                return nullptr;
+            if (IEngineStudio.SetupPlayerModel)
+                model = IEngineStudio.SetupPlayerModel(index);
+        }
+    }
+    if (!model || model->type != mod_studio) return nullptr;
+    auto* hdr = static_cast<studiohdr_t*>(model->cache.data);
+    if (!hdr && IEngineStudio.Mod_Extradata)
+        hdr = static_cast<studiohdr_t*>(IEngineStudio.Mod_Extradata(model));
+    if (!hdr || hdr->numbones <= 0 || hdr->numbones > MAXSTUDIOBONES || hdr->numseq <= 0)
+        return nullptr;
+    bool create = entity->modelhandle == INVALID_HANDLE ||
+        !m_ModelInstances.IsValidIndex(entity->modelhandle);
+    if (!create && m_ModelInstances[entity->modelhandle].m_pEntity != entity)
+        create = true; // stale handle belongs to another entity
+    if (create) {
+        entity->modelhandle = m_ModelInstances.AddToTail();
+        if (entity->modelhandle == INVALID_HANDLE) return nullptr;
+    }
+    ModelInstance_t& inst = m_ModelInstances[entity->modelhandle];
+    if (create || reset || inst.m_pModel != model || inst.m_cpuModelHeader != hdr ||
+        entity->curstate.messagenum < inst.m_cpuLastMessage)
+        StudioInitCpuInstance(inst, entity, model, hdr, create);
+    inst.m_cpuLastMessage = entity->curstate.messagenum;
+    return &inst;
+}
 
-		if( RI->currententity->modelhandle == INVALID_HANDLE )
-			return false; // out of memory ?
-
-		m_pModelInstance = &m_ModelInstances[RI->currententity->modelhandle];
-		ClearInstanceData( true );
-	}
-	else
-	{
-		m_pModelInstance = &m_ModelInstances[RI->currententity->modelhandle];
-
-		// model has been changed or something like
-		if( !IsModelInstanceValid( m_pModelInstance ))
-			ClearInstanceData( false );
-	}
-
-	m_boneSetup.SetStudioPointers( m_pStudioHeader, m_pModelInstance->m_poseparameter );
-
-	return true;
+bool CStudioModelRenderer::StudioSetupInstance(void)
+{
+    m_pModelInstance = StudioEnsureCpuInstance(RI->currententity, RI->currentmodel);
+    if (!m_pModelInstance) return false;
+    if (!m_pModelInstance->materials) UpdateInstanceMaterials();
+    if (!m_pModelInstance->cubemap[0]) m_pModelInstance->cubemap[0] = &world->defaultCubemap;
+    if (!m_pModelInstance->cubemap[1]) m_pModelInstance->cubemap[1] = &world->defaultCubemap;
+    m_boneSetup.SetStudioPointers(m_pStudioHeader, m_pModelInstance->m_poseparameter);
+    return true;
 }
 
 //-----------------------------------------------------------------------------
@@ -354,6 +372,8 @@ void CStudioModelRenderer :: DestroyInstance( word handle )
 		delete inst->m_pJiggleBones;
 	inst->m_pJiggleBones = NULL;
 
+    if (inst->m_pEntity && inst->m_pEntity->modelhandle == handle)
+        inst->m_pEntity->modelhandle = INVALID_HANDLE;
 	m_ModelInstances.Remove( handle );
 }
 
@@ -364,8 +384,10 @@ void CStudioModelRenderer :: DestroyAllModelInstances( void )
 	m_fShootDecal = false;
 
 	// NOTE: should destroy in reverse-order because it's linked list not array!
-	for( int i = m_ModelInstances.Count(); --i >= 0; )
-		DestroyInstance( i );
+    while (m_ModelInstances.Count() > 0)
+        DestroyInstance(m_ModelInstances.Tail());
+    m_pModelInstance = nullptr;
+    m_pStudioHeader = nullptr;
 }
 
 void CStudioModelRenderer :: UpdateInstanceMaterials( void )
@@ -393,75 +415,123 @@ void CStudioModelRenderer :: UpdateInstanceMaterials( void )
 	}
 }
 
-void CStudioModelRenderer :: ClearInstanceData( bool create )
+void CStudioModelRenderer::StudioInitCpuInstance(ModelInstance_t& instance,
+    cl_entity_t* entity, model_t* model, studiohdr_t* hdr, bool create)
 {
+    ModelInstance_t* inst = &instance;
+    CStudioBoneSetup setup;
+    const float now = GET_CLIENT_TIME();
 	if( create )
 	{
-		m_pModelInstance->m_DecalList.Purge();
-		m_pModelInstance->m_pJiggleBones = NULL;
-		m_pModelInstance->materials = NULL;
+		inst->m_DecalList.Purge();
+		inst->m_pJiggleBones = NULL;
+		inst->materials = NULL;
 	}
 	else
 	{
-		if( m_pModelInstance->m_pJiggleBones != NULL )
-			delete m_pModelInstance->m_pJiggleBones;
-		m_pModelInstance->m_pJiggleBones = NULL;
-		PurgeDecals( m_pModelInstance );
+		if( inst->m_pJiggleBones != NULL )
+			delete inst->m_pJiggleBones;
+		inst->m_pJiggleBones = NULL;
+		PurgeDecals( inst );
+        if (inst->materials) Mem_Free(inst->materials);
+        inst->materials = NULL;
 	}
 
-	m_pModelInstance->m_pEntity = RI->currententity;
-	m_pModelInstance->m_pModel = RI->currentmodel;
-	m_pModelInstance->m_VlCache = NULL;
-	m_pModelInstance->m_FlCache = NULL;
-	m_pModelInstance->m_DecalCount = 0;
-	m_pModelInstance->m_bExternalBones = false;
-	m_pModelInstance->cached_frame = -1;
-	m_pModelInstance->visframe = -1;
-	m_pModelInstance->radius = 0.0f;
-	m_pModelInstance->info_flags = 0;
-	m_pModelInstance->lerpFactor = 0.0f;
-	m_pModelInstance->cubemap[0] = &world->defaultCubemap;
-	m_pModelInstance->cubemap[1] = &world->defaultCubemap;
+	inst->m_pEntity = entity;
+	inst->m_pModel = model;
+    inst->m_cpuModelHeader = hdr;
+    inst->m_cpuLastMessage = entity->curstate.messagenum;
+    inst->m_cpuCompatible = false;
+    inst->m_cpuSequenceBlends = false;
+    inst->m_flRagdollDiagnosticsNextTime = 0.0f;
+    inst->m_cpuPoseRoot.Identity();
+    inst->m_ik.ClearTargets();
+	inst->m_VlCache = NULL;
+	inst->m_FlCache = NULL;
+	inst->m_DecalCount = 0;
+	inst->m_bExternalBones = false;
+    memset(inst->m_partPoseActive,0,sizeof(inst->m_partPoseActive));
+    memset(inst->m_partPoseDetached,0,sizeof(inst->m_partPoseDetached));
+    memset(inst->m_partPosePending,0,sizeof(inst->m_partPosePending));
+    memset(inst->m_partPoseSequence,0,sizeof(inst->m_partPoseSequence));
+    memset(inst->m_partPoseReceived,0,sizeof(inst->m_partPoseReceived));
+    memset(inst->m_partPoseStartTime,0,sizeof(inst->m_partPoseStartTime));
+    memset(inst->m_partPoseDuration,0,sizeof(inst->m_partPoseDuration));
+	inst->m_bRagdollPose = false;
+	inst->m_bRagdollSleeping = false;
+	inst->m_bRagdollFrozen = false;
+	inst->m_bRagdollEntryBlendPending = false;
+	inst->m_bRagdollExitBlend = false;
+	inst->m_bRagdollExitPoseValid = false;
+	inst->m_iRagdollSnapshotSequence = 0;
+	inst->m_flRagdollLastSnapshotTime = 0.0f;
+	inst->m_flRagdollInterpStartTime = 0.0f;
+	inst->m_flRagdollInterpDuration = 0.0f;
+	inst->m_flRagdollExitBlendStartTime = 0.0f;
+	inst->m_flRagdollExitBlendDuration = 0.0f;
+	inst->m_iRagdollRootBone = -1;
+	inst->m_ragdollStartRootOrigin = g_vecZero;
+	inst->m_ragdollStartRootQuat = Vector4D( 0, 0, 0, 1 );
+	inst->m_ragdollTargetRootOrigin = g_vecZero;
+	inst->m_ragdollTargetRootQuat = Vector4D( 0, 0, 0, 1 );
+	inst->cached_frame = -1;
+	inst->visframe = -1;
+	inst->radius = 0.0f;
+	inst->info_flags = 0;
+	inst->lerpFactor = 0.0f;
+	inst->cubemap[0] = NULL;
+	inst->cubemap[1] = NULL;
+    inst->m_cubemapInitialized = false;
 
-	ClearBounds( m_pModelInstance->absmin, m_pModelInstance->absmax );
-	memset( &m_pModelInstance->bonecache, 0, sizeof( BoneCache_t ));
-	memset( m_pModelInstance->m_protationmatrix, 0, sizeof( matrix3x4 ));
-	memset( m_pModelInstance->m_pbones, 0, sizeof( matrix3x4 ) * MAXSTUDIOBONES );
-	memset( m_pModelInstance->m_pwpnbones, 0, sizeof( matrix3x4 ) * MAXSTUDIOBONES );
-	memset( m_pModelInstance->attachment, 0, sizeof( StudioAttachment_t ) * MAXSTUDIOATTACHMENTS );
-	memset( m_pModelInstance->m_glstudiobones, 0, sizeof( Vector4D ) * MAXSTUDIOBONES * 3 );
-	memset( m_pModelInstance->m_glweaponbones, 0, sizeof( Vector4D ) * MAXSTUDIOBONES * 3 );
-	memset( m_pModelInstance->m_studioquat, 0, sizeof( Vector4D ) * MAXSTUDIOBONES );
-	memset( m_pModelInstance->m_studiopos, 0, sizeof( Vector ) * MAXSTUDIOBONES );
-	memset( m_pModelInstance->m_weaponquat, 0, sizeof( Vector4D ) * MAXSTUDIOBONES );
-	memset( m_pModelInstance->m_weaponpos, 0, sizeof( Vector ) * MAXSTUDIOBONES );
-	memset( &m_pModelInstance->lerp, 0, sizeof( mstudiolerp_t ));
-	memset( &m_pModelInstance->light, 0, sizeof( mstudiolight_t ));
-	memset( &m_pModelInstance->oldlight, 0, sizeof( mstudiolight_t ));
-	memset( &m_pModelInstance->newlight, 0, sizeof( mstudiolight_t ));
-	memset( &m_pModelInstance->lights, 255, sizeof( byte[MAXDYNLIGHTS] ));
-	memset( &m_pModelInstance->m_controller, 0, sizeof( m_pModelInstance->m_controller ));
-	memset( &m_pModelInstance->m_seqblend, 0, sizeof( m_pModelInstance->m_seqblend ));
-	m_pModelInstance->lerp.stairoldz = StudioGetOrigin().z;
-	m_pModelInstance->lerp.stairtime = tr.time;
-	m_pModelInstance->m_current_seqblend = 0;
-	m_pModelInstance->light_update = false;
-	m_pModelInstance->lighttimecheck = 0.0f;
+	ClearBounds( inst->absmin, inst->absmax );
+	memset( &inst->bonecache, 0, sizeof( BoneCache_t ));
+	inst->m_collisionPoseStamp = physicsasset::CollisionPoseStamp{};
+    inst->m_predictionCollisionStamp = physicsasset::CollisionPoseStamp{};
+	memset( inst->m_protationmatrix, 0, sizeof( matrix3x4 ));
+	memset( inst->m_pbones, 0, sizeof( matrix3x4 ) * MAXSTUDIOBONES );
+	memset( inst->m_pwpnbones, 0, sizeof( matrix3x4 ) * MAXSTUDIOBONES );
+	memset( inst->attachment, 0, sizeof( StudioAttachment_t ) * MAXSTUDIOATTACHMENTS );
+	memset( inst->m_glstudiobones, 0, sizeof( Vector4D ) * MAXSTUDIOBONES * 3 );
+	memset( inst->m_glweaponbones, 0, sizeof( Vector4D ) * MAXSTUDIOBONES * 3 );
+	memset( inst->m_ragdollBoneMask, 0, sizeof( inst->m_ragdollBoneMask ));
+	memset( inst->m_ragdollStartRelOrigin, 0, sizeof( inst->m_ragdollStartRelOrigin ));
+	memset( inst->m_ragdollStartRelQuat, 0, sizeof( inst->m_ragdollStartRelQuat ));
+	memset( inst->m_ragdollTargetRelOrigin, 0, sizeof( inst->m_ragdollTargetRelOrigin ));
+	memset( inst->m_ragdollTargetRelQuat, 0, sizeof( inst->m_ragdollTargetRelQuat ));
+	memset( inst->m_ragdollExitPose, 0, sizeof( inst->m_ragdollExitPose ));
+	memset( inst->m_studioquat, 0, sizeof( Vector4D ) * MAXSTUDIOBONES );
+	memset( inst->m_studiopos, 0, sizeof( Vector ) * MAXSTUDIOBONES );
+	memset( inst->m_weaponquat, 0, sizeof( Vector4D ) * MAXSTUDIOBONES );
+	memset( inst->m_weaponpos, 0, sizeof( Vector ) * MAXSTUDIOBONES );
+	memset( &inst->lerp, 0, sizeof( mstudiolerp_t ));
+	memset( &inst->light, 0, sizeof( mstudiolight_t ));
+	memset( &inst->oldlight, 0, sizeof( mstudiolight_t ));
+	memset( &inst->newlight, 0, sizeof( mstudiolight_t ));
+	memset( &inst->lights, 255, sizeof( byte[MAXDYNLIGHTS] ));
+	memset( &inst->m_controller, 0, sizeof( inst->m_controller ));
+	memset( &inst->m_seqblend, 0, sizeof( inst->m_seqblend ));
+	inst->lerp.stairoldz = entity->origin.z;
+	inst->lerp.stairtime = now;
+	inst->m_current_seqblend = 0;
+    inst->lerp.sequence = entity->curstate.sequence;
+    inst->lerp.gaitsequence = entity->curstate.gaitsequence;
+    inst->lerp.lastgaitframe = inst->lerp.prevgaitframe = entity->curstate.fuser1;
+	inst->light_update = false;
+	inst->lighttimecheck = 0.0f;
 
-	m_boneSetup.SetStudioPointers( m_pStudioHeader, m_pModelInstance->m_poseparameter );
+	setup.SetStudioPointers( hdr, inst->m_poseparameter );
 
 	// set poseparam sliders to their default values
-	m_boneSetup.CalcDefaultPoseParameters( m_pModelInstance->m_poseparameter );
+	setup.CalcDefaultPoseParameters( inst->m_poseparameter );
 
-	// refresh the materials list
-	UpdateInstanceMaterials();
 
+    for (int i=0; i<MAXSTUDIOPOSEPARAM; ++i) inst->m_oldposeparams[i] = inst->m_poseparameter[i];
 	// copy attachments names
-	mstudioattachment_t *pattachment = (mstudioattachment_t *)((byte *)m_pStudioHeader + m_pStudioHeader->attachmentindex);
-	StudioAttachment_t *att = m_pModelInstance->attachment;
+	mstudioattachment_t *pattachment = (mstudioattachment_t *)((byte *)hdr + hdr->attachmentindex);
+	StudioAttachment_t *att = inst->attachment;
 
 	// setup attachment names
-	for( int i = 0; i < Q_min( MAXSTUDIOATTACHMENTS, m_pStudioHeader->numattachments ); i++ )
+	for( int i = 0; i < Q_min( MAXSTUDIOATTACHMENTS, hdr->numattachments ); i++ )
 	{
 		Q_strncpy( att[i].name, pattachment[i].name, sizeof( att[0].name ));
 		att[i].local.SetOrigin( pattachment[i].org );
@@ -483,12 +553,12 @@ void CStudioModelRenderer :: ClearInstanceData( bool create )
 		}
 
 		if( !Q_strnicmp( att[i].name, "LightProbe.", 11 ))
-			SetBits( m_pModelInstance->info_flags, MF_CUSTOM_LIGHTGRID );
+			SetBits( inst->info_flags, MF_CUSTOM_LIGHTGRID );
 	}
-	m_pModelInstance->numattachments = m_pStudioHeader->numattachments;
+	inst->numattachments = Q_min(MAXSTUDIOATTACHMENTS, hdr->numattachments);
 
 	for( int map = 0; map < MAXLIGHTMAPS; map++ )
-		m_pModelInstance->styles[map] = 255;
+		inst->styles[map] = 255;
 }
 
 void CStudioModelRenderer :: PrecacheStudioShaders( void )
@@ -2119,12 +2189,39 @@ void CStudioModelRenderer :: FreeStudioCacheFL( void )
 
 void CStudioModelRenderer :: ProcessUserData( model_t *mod, qboolean create, const byte *buffer )
 {
-	// to get something valid here
+	if( !mod || !IEngineStudio.Mod_Extradata || ( create && !buffer ))
+		return;
+	studiohdr_t *header = (studiohdr_t *)IEngineStudio.Mod_Extradata( mod );
+	if( !header ) return;
+	if( !RI ) R_InitRefState();
+
+	// Model loading can run from precaching or player selection, nested inside
+	// another model operation. Cache construction installs temporary pose
+	// sliders; restore them as well as the model/header before returning.
+	struct ModelContext
+	{
+		ref_instance_t &view;
+		cl_entity_t *entity;
+		model_t *model;
+		studiohdr_t *&header;
+		studiohdr_t *savedHeader;
+		CBaseBoneSetup &setup;
+		CBaseBoneSetup savedSetup;
+		~ModelContext()
+		{
+			view.currententity = entity;
+			view.currentmodel = model;
+			header = savedHeader;
+			setup = savedSetup;
+			IEngineStudio.StudioSetHeader( savedHeader );
+			IEngineStudio.SetRenderModel( model );
+		}
+	} context { *RI, RI->currententity, RI->currentmodel, m_pStudioHeader,
+		m_pStudioHeader, m_boneSetup, m_boneSetup };
+
 	RI->currententity = GET_ENTITY( 0 );
 	RI->currentmodel = mod;
-
-	if( !( m_pStudioHeader = (studiohdr_t *)IEngineStudio.Mod_Extradata( RI->currentmodel )))
-		return;
+	m_pStudioHeader = header;
 
 	IEngineStudio.StudioSetHeader( m_pStudioHeader );
 	IEngineStudio.SetRenderModel( RI->currentmodel );

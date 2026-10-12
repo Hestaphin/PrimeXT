@@ -1,0 +1,40 @@
+{
+  "actual_model_inputs": {
+    "barney(2).mdl": {
+      "bytes": 129104,
+      "sha256": "d326ef89e83489db85e1cc1d3c554f1b7cbc9c43c4bc7a940d76b0d75e1a393f"
+    },
+    "barney(3).phys": {
+      "bytes": 11801,
+      "sha256": "8040edc7a4b5de91279730f692a64df41167a4ee42cdcb18777b58f848777490"
+    }
+  },
+  "actual_barney_variants": {
+    "human_heavy": {
+      "bodies": 15,
+      "joints": 14,
+      "mass_budget": 110,
+      "axis_reviews": 4
+    },
+    "human_loose": {
+      "bodies": 15,
+      "joints": 14,
+      "mass_budget": 70,
+      "axis_reviews": 4
+    }
+  },
+  "synthetic_fixtures": {
+    "quadruped": {
+      "simple_bodies": 11,
+      "standard_bodies": 21,
+      "detailed_bodies": 22
+    },
+    "creature": {
+      "simple_bodies": 3,
+      "standard_bodies": 13,
+      "detailed_bodies": 24
+    }
+  },
+  "second_naming_convention": "synthetic ValveBiped relabeling of audited human skeleton",
+  "native_solver_game_additional_real_models": "NOT_RUN"
+}
