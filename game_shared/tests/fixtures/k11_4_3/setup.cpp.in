@@ -1,0 +1,147 @@
+// Compile/run the production InitPhysic/FreePhysic using recording services.
+// This checks API usage/lifetime, not native PhysX linking or solver behavior.
+#include "physics_runtime_policy.h"
+#include <algorithm>
+#include <cassert>
+#include <cstdlib>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+#include <iostream>
+#include <limits>
+static unsigned allocations=0,deallocations=0,extensionStarts=0,extensionEnds=0,foundationEnds=0;
+static bool failScratch=false,failDispatcher=false,failScene=false,failExtensions=false;
+static bool sceneLive=false;static unsigned sceneFlags=0,workers=0;
+namespace physx
+{
+using PxU32=unsigned;using PxFilterObjectAttributes=unsigned;using PxFilterFlags=unsigned;using PxPairFlags=unsigned;
+constexpr unsigned PX_PHYSICS_VERSION=0;
+struct PxFilterFlag {enum {eDEFAULT=0};};
+struct PxPairFlag {enum {eCONTACT_DEFAULT=1,eDETECT_CCD_CONTACT=2,eNOTIFY_TOUCH_CCD=4,eNOTIFY_TOUCH_FOUND=8,eNOTIFY_TOUCH_PERSISTS=16,eNOTIFY_CONTACT_POINTS=32,eCONTACT_EVENT_POSE=64,eMODIFY_CONTACTS=128,eTRIGGER_DEFAULT=256};};
+struct PxSceneFlag {enum {eENABLE_CCD=1,eENABLE_PCM=2};};
+struct PxPvdInstrumentationFlag {enum {eALL=1};};
+struct PxPvdSceneFlag {enum {eTRANSMIT_CONSTRAINTS=1,eTRANSMIT_CONTACTS=2,eTRANSMIT_SCENEQUERIES=3};};
+struct PxVisualizationParameter {enum {eSCALE,eCOLLISION_SHAPES,eCONTACT_POINT,eCONTACT_NORMAL,eBODY_AXES};};
+struct PxVec3 {float x=0,y=0,z=0;PxVec3()=default;PxVec3(float a,float b,float c):x(a),y(b),z(c){}};
+struct PxBounds3 {PxVec3 minimum,maximum;};struct PxTolerancesScale {float length=1,speed=10;};
+struct PxDefaultAllocator
+{
+    void *allocate(std::size_t bytes,const char *,const char *,int)
+    {if(failScratch)return nullptr;assert(bytes==performance::kPhysXScratchBytes);++allocations;return std::aligned_alloc(16,bytes);}
+    void deallocate(void *p) {assert(!sceneLive);++deallocations;std::free(p);}
+};
+struct PxFoundation {void release(){++foundationEnds;delete this;}};
+struct PxDefaultCpuDispatcher {void release(){delete this;}};
+struct PxCooking {void release(){delete this;}};
+struct PxPvdTransport {void release(){delete this;}};
+struct PxPvd
+{
+    PxPvdTransport *transport=nullptr;
+    void connect(PxPvdTransport &t,int){transport=&t;}
+    PxPvdTransport *getTransport(){return transport;}
+    void release(){delete this;}
+};
+struct PxPvdSceneClient {void setScenePvdFlag(int,bool){}};
+struct PxFilterData {unsigned word0=0,word1=0,word2=0,word3=0;};
+using Shader=PxFilterFlags (*)(PxFilterObjectAttributes,PxFilterData,PxFilterObjectAttributes,PxFilterData,PxPairFlags &,const void *,PxU32);
+struct PxSceneDesc
+{
+    explicit PxSceneDesc(PxTolerancesScale){}
+    // Include an unknown default bit to verify that future SDK defaults survive.
+    unsigned flags=PxSceneFlag::eENABLE_PCM|0x1000;PxVec3 gravity;PxBounds3 sanityBounds;
+    void *simulationEventCallback=nullptr,*contactModifyCallback=nullptr,*filterCallback=nullptr;
+    PxDefaultCpuDispatcher *cpuDispatcher=nullptr;Shader filterShader=nullptr;
+};
+struct PxScene
+{
+    PxPvdSceneClient client;
+    PxPvdSceneClient *getScenePvdClient(){return &client;}
+    void setVisualizationParameter(int,float){}
+    void release(){sceneLive=false;delete this;}
+};
+struct PxMaterial {};
+struct PxPhysics
+{
+    std::vector<std::unique_ptr<PxMaterial>> materials;
+    PxScene *createScene(const PxSceneDesc &desc)
+    {sceneFlags=desc.flags;assert(desc.cpuDispatcher&&desc.filterShader&&desc.simulationEventCallback&&desc.contactModifyCallback);if(failScene)return nullptr;sceneLive=true;return new PxScene;}
+    PxMaterial *createMaterial(float,float,float){materials.push_back(std::make_unique<PxMaterial>());return materials.back().get();}
+    void release(){delete this;}
+};
+struct PxCookingParams {explicit PxCookingParams(PxTolerancesScale){}};
+inline bool PxFilterObjectIsTrigger(unsigned a){return bool(a&1);}
+inline PxFoundation *PxCreateFoundation(unsigned,PxDefaultAllocator &,int &){return new PxFoundation;}
+inline PxPhysics *PxCreatePhysics(unsigned,PxFoundation &,PxTolerancesScale,bool,PxPvd *){return new PxPhysics;}
+inline PxDefaultCpuDispatcher *PxDefaultCpuDispatcherCreate(unsigned n){workers=n;return failDispatcher?nullptr:new PxDefaultCpuDispatcher;}
+inline PxPvd *PxCreatePvd(PxFoundation &){return new PxPvd;}
+inline PxPvdTransport *PxDefaultPvdSocketTransportCreate(const char *,int,int){return new PxPvdTransport;}
+inline PxCooking *PxCreateCooking(unsigned,PxFoundation &,PxCookingParams){return new PxCooking;}
+inline void PxSetAssertHandler(int &){}
+inline bool PxInitExtensions(PxPhysics &,PxPvd *){++extensionStarts;return !failExtensions;}
+inline void PxCloseExtensions(){++extensionEnds;}
+}
+using namespace physx;
+constexpr float METERS_PER_INCH=.0254f;
+namespace physicsasset
+{
+inline PxTolerancesScale AssetTolerancesScale(){return {};}
+inline PxMaterial *CreateAssetMaterial(PxPhysics &sdk){return sdk.createMaterial(.5,.5,0);}
+inline PxFilterFlags AssetPairFilter(PxFilterData,PxFilterData){return PxFilterFlag::eDEFAULT;}
+}
+struct CollisionFilterData
+{
+    PxFilterData data;explicit CollisionFilterData(PxFilterData d):data(d){}
+    bool HasConveyorFlag() const{return bool(data.word0&1);}
+    bool IsPhysicsAssetBody() const{return bool(data.word0&2);}
+};
+struct DebugRenderer{};struct EventHandler{};struct ContactModifyCallback{};struct HoldableItemController{};
+struct Cvar {float value=1;};static Cvar allow,physics_workers;static Cvar *g_allow_physx=&allow;
+static unsigned nullInitializations=0;void GameInitNullPhysics(){++nullInitializations;}
+#define ALERT(...) ((void)0)
+class CPhysicPhysX
+{
+public:
+    PxPhysics *m_pPhysics=nullptr;PxFoundation *m_pFoundation=nullptr;PxDefaultCpuDispatcher *m_pDispatcher=nullptr;
+    PxCooking *m_pCooking=nullptr;PxScene *m_pScene=nullptr;PxPvd *m_pVisualDebugger=nullptr;
+    void *m_simulationScratch=nullptr;unsigned m_workerCount=0;bool m_extensionsInitialized=false,debug=false;
+    PxMaterial *m_pDefaultMaterial=nullptr,*m_pConveyorMaterial=nullptr;PxBounds3 m_worldBounds;
+    int m_AllocatorUnused=0,m_errorCallback=0,m_assertHandler=0,m_assetContactFilter=0;
+    PxDefaultAllocator m_Allocator;
+    std::unique_ptr<DebugRenderer> m_debugRenderer;std::unique_ptr<EventHandler> m_eventHandler;
+    std::unique_ptr<ContactModifyCallback> m_contactModifyCallback;std::unique_ptr<HoldableItemController> m_holdableController;
+    std::vector<int> m_physicsAssets;std::map<int,int> m_physicsAssetCollisionStates,m_ragdollLegacyCollisionState,m_ragdollEntityState,m_ragdollNetworkState,m_pendingRagdollImpulses;
+    unsigned m_ragdollSnapshotSequence=0;
+    bool DebugEnabled(){return debug;}
+    void ReleaseAnimatedCollisionActors(int &){}void ClearWorldAssetCaches(){}
+    void InitPhysic();void FreePhysic();
+};
+@PRODUCTION@
+int main()
+{
+    using performance::ResolvePhysXWorkers;
+    assert(ResolvePhysXWorkers(-1,0)==0&&ResolvePhysXWorkers(-1,1)==0&&ResolvePhysXWorkers(-1,2)==0);
+    assert(ResolvePhysXWorkers(-1,4)==1&&ResolvePhysXWorkers(-1,8)==2&&ResolvePhysXWorkers(-1,128)==2);
+    assert(ResolvePhysXWorkers(0,128)==0&&ResolvePhysXWorkers(8,4)==4&&ResolvePhysXWorkers(200,128)==32);
+    assert(ResolvePhysXWorkers(std::numeric_limits<float>::quiet_NaN(),8)==2);
+    assert(ResolvePhysXWorkers(std::numeric_limits<float>::infinity(),8)==2);
+    assert(ResolvePhysXWorkers(1.9f,8)==1);
+    CPhysicPhysX runtime;physics_workers.value=0;
+    for(int n=0;n<3;++n)
+    {
+        runtime.debug=n==2;runtime.InitPhysic();
+        assert(workers==0&&(sceneFlags&PxSceneFlag::eENABLE_PCM)&&(sceneFlags&PxSceneFlag::eENABLE_CCD)&&(sceneFlags&0x1000));
+        assert(runtime.m_simulationScratch&&reinterpret_cast<std::uintptr_t>(runtime.m_simulationScratch)%16==0);
+        runtime.FreePhysic();assert(allocations==deallocations&&!runtime.m_pDispatcher&&!runtime.m_pScene&&!runtime.m_simulationScratch);
+        assert(extensionStarts==extensionEnds);
+    }
+    failScratch=true;runtime.InitPhysic();assert(runtime.m_pScene&&!runtime.m_simulationScratch);runtime.FreePhysic();failScratch=false;
+    unsigned closes=extensionEnds;failDispatcher=true;runtime.InitPhysic();assert(!runtime.m_pPhysics&&!runtime.m_pFoundation&&extensionEnds==closes);failDispatcher=false;
+    failScene=true;runtime.InitPhysic();assert(!runtime.m_pPhysics&&!runtime.m_simulationScratch&&allocations==deallocations);failScene=false;
+    closes=extensionEnds;failExtensions=true;runtime.InitPhysic();runtime.FreePhysic();assert(extensionEnds==closes);failExtensions=false;
+    runtime.FreePhysic();assert(allocations==deallocations);
+    allow.value=0;runtime.InitPhysic();assert(!runtime.m_pPhysics&&nullInitializations>=3);
+    std::cout<<"K.11.4.3 production scene setup/lifetime: PCM+CCD+defaults, bounded workers, 16-byte scratch alignment/reuse/free, allocation/dispatcher/scene/extension failures and restart PASS (recording API; no solver)\n";
+}

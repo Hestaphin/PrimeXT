@@ -28,11 +28,8 @@ GNU General Public License for more details.
 
 CMeshDescFactory::CMeshDescFactory()
 {
-    // TODO we can't use std::vector for m_meshDescList
-    // because when adding new object to it, all areanode pointers 
-    // inside objects that already added being invalidated  
-    // after refactoring this problem we can't swap back to std::vector
-    // or even better to replace it with hashmap
+    // Meshes contain pointers into their own embedded area nodes. Keep stable
+    // list ownership and index it separately instead of relocating the objects.
     m_meshDescList = {};
 }
 
@@ -44,10 +41,11 @@ CMeshDescFactory& CMeshDescFactory::Instance()
 
 void CMeshDescFactory::ClearCache()
 {
+    m_meshDescIndex.clear();
     m_meshDescList.clear();
 }
 
-CMeshDesc &CMeshDescFactory::CreateObject(int32_t modelIndex, int32_t body, int32_t skin, clipfile::GeometryType geomType)
+CMeshDesc &CMeshDescFactory::CreateObject(int32_t modelIndex, int32_t body, int32_t skin, clipfile::GeometryType geomType, uint64_t fingerprint)
 {
     model_t *mod = static_cast<model_t*>(MODEL_HANDLE(modelIndex));
 	if (!mod) {
@@ -58,18 +56,19 @@ CMeshDesc &CMeshDescFactory::CreateObject(int32_t modelIndex, int32_t body, int3
         desc.SetDebugName(mod->name);
 	    desc.SetModel(mod, body, skin);
 	    desc.SetGeometryType(geomType);
+        desc.SetSourceFingerprint(fingerprint);
     };
 
-    for (auto it = m_meshDescList.begin(); it != m_meshDescList.end(); it++) 
+    const Key key{mod->name, body, skin, geomType, fingerprint};
+    const auto found = m_meshDescIndex.find(key);
+    if(found != m_meshDescIndex.end())
     {
-        CMeshDesc &meshDesc = *it;
-        if (meshDesc.Matches(mod->name, body, skin, geomType)) {
-            initializeMeshDesc(meshDesc);
-            return meshDesc;
-        }
+        initializeMeshDesc(*found->second);
+        return *found->second;
     }
 
     auto &meshDesc = m_meshDescList.emplace_back();
     initializeMeshDesc(meshDesc);
+    m_meshDescIndex.emplace(key, &meshDesc);
     return meshDesc;
 }

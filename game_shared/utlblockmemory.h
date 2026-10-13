@@ -119,8 +119,14 @@ void CUtlBlockMemory<T,I>::Swap( CUtlBlockMemory< T, I > &mem )
 {
 	SWAP( m_pMemory, mem.m_pMemory );
 	SWAP( m_nBlocks, mem.m_nBlocks );
-	SWAP( m_nIndexMask, mem.m_nIndexMask );
-	SWAP( m_nIndexShift, mem.m_nIndexShift );
+	// Bit-fields cannot bind to non-const references (Clang, including Android NDK).
+	// Swap their integer values explicitly without changing the bit-field layout.
+	const int indexMask = m_nIndexMask;
+	m_nIndexMask = mem.m_nIndexMask;
+	mem.m_nIndexMask = indexMask;
+	const int indexShift = m_nIndexShift;
+	m_nIndexShift = mem.m_nIndexShift;
+	mem.m_nIndexShift = indexShift;
 }
 
 

@@ -1,0 +1,68 @@
+#include <algorithm>
+#include <cassert>
+#include <iostream>
+#include <vector>
+using PxU32=unsigned int;
+using PxActorTypeFlags=int;
+namespace PxActorTypeFlag {enum {eRIGID_STATIC=1,eRIGID_DYNAMIC=2};}
+namespace PxActorFlag {enum {eVISUALIZATION};}
+namespace PxVisualizationParameter {enum {eSCALE,eCOLLISION_SHAPES,eBODY_AXES,eJOINT_LOCAL_FRAMES,eJOINT_LIMITS};}
+struct PxActor {
+    bool visible=true;
+    void setActorFlag(int,bool value) {visible=value;}
+};
+struct SceneAdapter {
+    std::vector<PxActor*> actors;
+    float parameters[5]{};
+    int buffer=0;
+    void setVisualizationParameter(int parameter,float value) {parameters[parameter]=value;}
+    PxU32 getNbActors(PxActorTypeFlags) {return actors.size();}
+    PxU32 getActors(PxActorTypeFlags,PxActor** output,PxU32 size) {
+        const auto count=std::min(size,static_cast<PxU32>(actors.size()));
+        for(PxU32 i=0;i<count;++i) output[i]=actors[i];
+        return count;
+    }
+    const int& getRenderBuffer() {return buffer;}
+};
+struct BodyAdapter {PxActor* actor;};
+struct AssetAdapter {
+    bool ragdoll;
+    std::vector<BodyAdapter> bodies;
+    bool IsRagdoll() const {return ragdoll;}
+    const std::vector<BodyAdapter>& Bodies() const {return bodies;}
+};
+struct DebugRendererAdapter {void RenderData(const int&) {}};
+static struct {float value=0;} ragdoll_debug;
+class CPhysicPhysX {
+public:
+    bool general=false;
+    void* m_pPhysics=nullptr;
+    SceneAdapter* m_pScene=nullptr;
+    DebugRendererAdapter* m_debugRenderer=nullptr;
+    std::vector<AssetAdapter*> m_physicsAssets;
+    bool DebugEnabled() const {return general;}
+    void DebugDraw();
+};
+@PRODUCTION@
+int main() {
+    PxActor world,legacy,prop,rag;
+    SceneAdapter scene;scene.actors={&world,&legacy,&prop,&rag};
+    AssetAdapter propAsset{false,{{&prop}}},ragAsset{true,{{&rag}}};
+    DebugRendererAdapter debug;
+    CPhysicPhysX physics;physics.m_pPhysics=&physics;physics.m_pScene=&scene;
+    physics.m_debugRenderer=&debug;physics.m_physicsAssets={&propAsset,&ragAsset};
+    ragdoll_debug.value=1;physics.DebugDraw();
+    assert(!world.visible && !legacy.visible && !prop.visible && rag.visible);
+    assert(scene.parameters[PxVisualizationParameter::eSCALE]==1);
+    assert(scene.parameters[PxVisualizationParameter::eJOINT_LIMITS]==0);
+    physics.general=true;physics.DebugDraw();
+    assert(world.visible && legacy.visible && prop.visible && rag.visible);
+    physics.general=false;ragdoll_debug.value=0;physics.DebugDraw();
+    assert(!prop.visible && !rag.visible);
+    assert(scene.parameters[PxVisualizationParameter::eSCALE]==0);
+    ragdoll_debug.value=2;physics.DebugDraw();
+    assert(!world.visible && !legacy.visible && !prop.visible && rag.visible);
+    assert(scene.parameters[PxVisualizationParameter::eJOINT_LIMITS]==1);
+    physics.m_pScene=nullptr;physics.DebugDraw();
+    std::cout<<"world/legacy/prop filtering and general/off/level-2 toggles passed\n";
+}

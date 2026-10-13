@@ -1,0 +1,182 @@
+// Actual editor/Studio declarations and methods; GUI, engine and GL services
+// are explicit adapters. Private exposure supplies authoring fixtures only.
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+#include <sstream> // Include STL before the test's private/public exposure.
+#include <functional>
+#include "physics_asset_constraint_guide.h"
+#include "ViewerSettings.h"
+#define private public
+#include "StudioModel.h"
+#include "PhysicsAssetEditor.h"
+#undef private
+#include "mx/mxButton.h"
+#include "mx/mxChoice.h"
+#include "mx/mxLabel.h"
+#include "mx/mxLineEdit.h"
+#include "mx/mxListBox.h"
+#include "gl_export.h"
+
+struct WidgetRecord {int x,y,w,h; std::string label; bool visible=true; void *handle=nullptr; mxWindow *parent=nullptr;};
+class mxWidget_i {public: WidgetRecord record;};
+static std::map<const mxWidget*,WidgetRecord*> widgets;
+class mxWindow_i {public: std::vector<mxWidget*> children;};
+mxWidget::mxWidget(mxWindow *parent,int x,int y,int w,int h,const char *label):d_this(new mxWidget_i) {
+    d_this->record={x,y,w,h,label ? label : "",true,this,parent};widgets[this]=&d_this->record;
+}
+mxWidget::~mxWidget() {widgets.erase(this);delete d_this;}
+void mxWidget::setHandle(void *value) {d_this->record.handle=value;}
+void *mxWidget::getHandle() const {return d_this->record.handle;}
+void mxWidget::setParent(mxWindow *value) {d_this->record.parent=value;}
+mxWindow *mxWidget::getParent() const {return d_this->record.parent;}
+void mxWidget::setType(int) {}
+void mxWidget::setVisible(bool value) {d_this->record.visible=value;}
+bool mxWidget::isVisible() const {return d_this->record.visible;}
+void mxWidget::setLabel(const char *value) {d_this->record.label=value ? value : "";}
+const char *mxWidget::getLabel() const {return d_this->record.label.c_str();}
+mxWindow::mxWindow(mxWindow *parent,int x,int y,int w,int h,const char *label,int):
+    mxWidget(parent,x,y,w,h,label),d_this(new mxWindow_i) {if(parent) parent->addWidget(this);}
+mxWindow::~mxWindow() {for(auto *widget:d_this->children) delete widget;delete d_this;}
+void mxWindow::addWidget(mxWidget *widget) {d_this->children.push_back(widget);}
+int mxWindow::handleEvent(mxEvent*) {return 0;}
+void mxWindow::redraw() {}
+mxButton::mxButton(mxWindow *p,int x,int y,int w,int h,const char *s,int):mxWidget(p,x,y,w,h,s) {p->addWidget(this);}
+mxButton::~mxButton()=default;
+mxLabel::mxLabel(mxWindow *p,int x,int y,int w,int h,const char *s):mxWidget(p,x,y,w,h,s) {p->addWidget(this);}
+mxLabel::~mxLabel()=default;
+mxLineEdit::mxLineEdit(mxWindow *p,int x,int y,int w,int h,const char *s,int,int):mxWidget(p,x,y,w,h,s) {p->addWidget(this);}
+mxLineEdit::~mxLineEdit()=default;
+mxChoice::mxChoice(mxWindow *p,int x,int y,int w,int h,int):mxWidget(p,x,y,w,h) {p->addWidget(this);}
+mxChoice::~mxChoice()=default;
+void mxChoice::add(const char*) {}
+void mxChoice::select(int) {}
+mxListBox::mxListBox(mxWindow *p,int x,int y,int w,int h,int,int):mxWidget(p,x,y,w,h) {p->addWidget(this);}
+mxListBox::~mxListBox()=default;
+struct PhysicsAssetEditor::PreviewImpl {};
+PhysicsAssetEditor::~PhysicsAssetEditor()=default;
+int PhysicsAssetEditor::handleEvent(mxEvent*) {return 1;}
+ViewerSettings::ViewerSettings() {pause=false;speedScale=1;}
+void CBaseBoneSetup::debugMsg(char*,...) {}
+void CBaseBoneSetup::debugLine(const Vector&,const Vector&,int,int,int,bool,float) {}
+mstudioanim_t *CBaseBoneSetup::GetAnimSourceData(mstudioseqdesc_t*) {return nullptr;}
+matrix3x4 m_protationmatrix;
+
+struct GLState {
+    std::map<GLenum,bool> enabled;
+    bool depthWrite=true;
+    float lineWidth=1;
+    std::array<float,3> color={1,1,1};
+};
+struct AttribFrame {GLbitfield mask;GLState state;};
+struct VertexRecord {Vector point;GLState state;};
+static GLState state;
+static std::vector<AttribFrame> attribStack;
+static std::vector<std::array<float,16>> matrices;
+static std::vector<VertexRecord> vertices;
+static int attributePushes=0;
+static void glPushAttrib(GLbitfield mask) {attribStack.push_back({mask,state});++attributePushes;}
+static void glPopAttrib() {
+    assert(!attribStack.empty());auto frame=attribStack.back();attribStack.pop_back();
+    if(frame.mask&GL_ENABLE_BIT) state.enabled=frame.state.enabled;
+    if(frame.mask&GL_LINE_BIT) state.lineWidth=frame.state.lineWidth;
+    if(frame.mask&GL_CURRENT_BIT) state.color=frame.state.color;
+    if(frame.mask&GL_DEPTH_BUFFER_BIT) state.depthWrite=frame.state.depthWrite;
+}
+static void glEnable(GLenum cap) {state.enabled[cap]=true;}
+static void glDisable(GLenum cap) {state.enabled[cap]=false;}
+static void glDepthMask(GLboolean value) {state.depthWrite=value!=0;}
+static void glLineWidth(float value) {state.lineWidth=value;}
+static void glColor3f(float r,float g,float b) {state.color={r,g,b};}
+static void glBegin(GLenum) {}
+static void glEnd() {}
+static void glPushMatrix() {assert(!matrices.empty());matrices.push_back(matrices.back());}
+static void glPopMatrix() {assert(matrices.size()>1);matrices.pop_back();}
+static void glMultMatrixf(const float *matrix) {
+    auto a=matrices.back();std::array<float,16> result{};
+    for(int column=0;column<4;++column) for(int row=0;row<4;++row)
+        for(int k=0;k<4;++k) result[column*4+row]+=a[k*4+row]*matrix[column*4+k];
+    matrices.back()=result;
+}
+static void glVertex3f(float x,float y,float z) {
+    const auto &m=matrices.back();
+    vertices.push_back({Vector(m[0]*x+m[4]*y+m[8]*z+m[12],
+        m[1]*x+m[5]*y+m[9]*z+m[13],m[2]*x+m[6]*y+m[10]*z+m[14]),state});
+}
+static void glVertex3fv(const float *v) {glVertex3f(v[0],v[1],v[2]);}
+@PRODUCTION@
+
+struct StudioFixture {studiohdr_t hdr{};mstudiobone_t bones[2]{};};
+static void near(float actual,float expected) {assert(std::isfinite(actual) && std::fabs(actual-expected)<0.001f);}
+static bool overlaps(const WidgetRecord &a,const WidgetRecord &b) {
+    return a.x<b.x+b.w && b.x<a.x+a.w && a.y<b.y+b.h && b.y<a.y+a.h;
+}
+int main(int argc,char **argv) {
+    assert(argc==2);std::string test=argv[1];
+    ViewerSettings settings;StudioModel model(settings);StudioFixture studio;
+    studio.hdr.numbones=2;studio.hdr.boneindex=offsetof(StudioFixture,bones);
+    std::strcpy(studio.bones[0].name,"root");std::strcpy(studio.bones[1].name,"door");
+    model.m_pstudiohdr=&studio.hdr;
+    model.m_pbonetransform[0].Identity();
+    model.m_pbonetransform[1]=matrix3x4(Vector(100,200,0),Vector(0,0,0),1);
+    m_protationmatrix=matrix3x4(Vector(50,10,0),Vector(0,90,0),1);
+    PhysicsAssetEditor editor(nullptr,model,settings);editor.setVisible(true);
+    if(test=="layout") {
+        std::vector<WidgetRecord*> controls;
+        for(auto entry:widgets) if(entry.first->getParent()==&editor) controls.push_back(entry.second);
+        assert(controls.size()>80);
+        for(size_t i=0;i<controls.size();++i) {
+            auto &a=*controls[i];assert(a.x>=0 && a.y>=0 && a.x+a.w<=730 && a.y+a.h<=966);
+            for(size_t j=i+1;j<controls.size();++j) if(overlaps(a,*controls[j])) {
+                std::cerr<<"overlapping controls: "<<a.label<<" at "<<a.x<<","<<a.y
+                    <<" and "<<controls[j]->label<<" at "<<controls[j]->x<<","<<controls[j]->y<<"\n";
+                return 1;
+            }
+        }
+        std::cout<<controls.size()<<" controls fit without overlaps\n";return 0;
+    }
+    for(GLenum cap:{GL_DEPTH_TEST,GL_BLEND,GL_ALPHA_TEST,GL_TEXTURE_2D,GL_CULL_FACE}) state.enabled[cap]=true;
+    const GLState before=state;
+    matrices.push_back({1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1});
+    if(test=="invalid-joint") {
+        physicsasset::BodyDef good;good.name="good";good.bone="root";good.shape.type=physicsasset::ShapeType::Box;
+        physicsasset::BodyDef bad=good;bad.name="bad";bad.bone="missing";
+        editor.m_asset.bodies={good,bad};
+        physicsasset::JointDef joint;joint.parent="good";joint.child="bad";editor.m_asset.joints={joint};
+    } else if(test!="empty-overlay") {
+        physicsasset::CollisionDef collision;collision.name="test";
+        collision.vertices={{1,0,0},{0,1,0},{0,0,1}};collision.indices={0,1,2};
+        if(test=="bone-transform") collision.bone="door";
+        editor.m_asset.collisions.push_back(collision);
+    }
+    if(test=="hidden-overlay") editor.setVisible(false);
+    editor.DrawOverlay();
+    if(test=="occlusion-state") {
+        assert(!vertices.empty());
+        for(const auto &vertex:vertices) {
+            assert(!vertex.state.enabled.at(GL_DEPTH_TEST));assert(!vertex.state.depthWrite);
+            assert(!vertex.state.enabled.at(GL_BLEND));assert(!vertex.state.enabled.at(GL_ALPHA_TEST));
+        }
+    } else if(test=="root-transform") {
+        assert(vertices.size()==6);near(vertices[0].point.x,50);near(vertices[0].point.y,11);
+    } else if(test=="bone-transform") {
+        assert(vertices.size()==6);near(vertices[0].point.x,101);near(vertices[0].point.y,200);
+    } else if(test=="invalid-joint") {
+        assert(vertices.size()==24);
+    } else {
+        assert(vertices.empty() && attributePushes==0);
+    }
+    assert(attribStack.empty() && matrices.size()==1);
+    assert(state.enabled==before.enabled && state.depthWrite==before.depthWrite);
+    assert(state.color==before.color && state.lineWidth==before.lineWidth);
+    std::cout<<"overlay transforms/visibility and caller GL state verified\n";
+}

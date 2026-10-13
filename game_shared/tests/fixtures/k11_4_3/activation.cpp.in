@@ -1,0 +1,188 @@
+// Production death-pose sampling/construction, real .phys parser/settings,
+// and recording SDK/engine adapters. No collision simulation is performed.
+#include "physics_asset.h"
+#include "physics_asset_construction.h"
+#include "physics_asset_contact_filter.h"
+#include "physics_asset_scale.h"
+#include "barney_skeleton.h"
+#include <algorithm>
+#include <cassert>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+
+using namespace physx;
+struct Vector
+{
+    float x=0,y=0,z=0;
+    float operator[](int i) const {return i==0?x:i==1?y:z;}
+};
+struct Vars
+{
+    int modelindex=1,sequence=0;float frame=0;
+    Vector origin,angles;
+    unsigned char controller[4]{},blending[2]{};
+};
+struct CBaseEntity
+{
+    Vars vars;Vars *pev=&vars;
+    Vector scale{1,1,1};const void *model=this;
+    Vector GetAbsOrigin() const {return vars.origin;}
+    Vector GetScale() const {return scale;}
+    void *edict() {return this;}
+};
+struct Globals {float time=1;} globals;
+Globals *gpGlobals=&globals;
+#define GET_MODEL_PTR(e) (static_cast<CBaseEntity *>(e)->model)
+#define ENTINDEX(e) 7
+#define ALERT(...) ((void)0)
+constexpr float kMinimumPoseDelta=.001f,kMaximumPoseDelta=.25f;
+constexpr float kMaximumTrackedLinearSpeed=4000,kMaximumTrackedAngularSpeed=50;
+static unsigned boneReads=0,insertions=0;
+static PxPhysics *recordingPhysics=nullptr;
+static bool failReference=false;
+static std::vector<PxActor *> inserted;
+
+void PxScene::addActors(PxActor *const *actors,PxU32 count)
+{
+    ++insertions;
+    assert(recordingPhysics && recordingPhysics->joints.size()+1==count);
+    inserted.assign(actors,actors+count);
+    for(PxActor *base:inserted)
+    {
+        auto *actor=static_cast<PxRigidDynamic *>(base);
+        assert(actor->userData && !actor->released && actor->shapes.size()==1);
+        assert(actor->getRigidBodyFlags().isSet(PxRigidBodyFlag::eKINEMATIC));
+        assert(!actor->shapes[0]->getFlags().isSet(PxShapeFlag::eSIMULATION_SHAPE));
+        assert(!actor->shapes[0]->getFlags().isSet(PxShapeFlag::eSCENE_QUERY_SHAPE));
+    }
+}
+void PxScene::addActor(PxActor &actor)
+{
+#ifdef PERFORMANCE_BASELINE
+    ++insertions;inserted.push_back(&actor);
+#else
+    (void)actor;assert(false && "activation must batch the bodies");
+#endif
+}
+
+// Bone getter and model bind-pose services are explicit engine adapters.
+// Vary every input used by the actual engine getter to detect stale reuse.
+static PxTransform BoneSample(const CBaseEntity &e,int bone)
+{
+    const auto &v=*e.pev;
+    const float controls=v.controller[0]+v.controller[1]+v.controller[2]+v.controller[3]+v.blending[0]+v.blending[1];
+    const float angle=.001f*(v.angles.x+v.angles.y+v.angles.z);
+    return PxTransform(PxVec3(v.origin.x+bone*3+v.frame+v.sequence+controls,
+        v.origin.y+bone*2+gpGlobals->time,v.origin.z+40+bone),PxQuat(0,0,std::sin(angle),std::cos(angle)));
+}
+int PhysicsAssetInstance::FindBody(const char *name) const {return physicsasset::FindBody(*m_def,name);}
+bool PhysicsAssetInstance::MatchesOwnerModel() const {return m_owner&&m_modelIndex==m_owner->pev->modelindex;}
+bool PhysicsAssetInstance::InitializePoseTracking()
+{
+    if(!m_bodies.empty()) return MatchesOwnerModel();
+    m_modelIndex=m_owner->pev->modelindex;
+    const auto bones=BarneySkeleton();
+    m_rigidScale=m_owner->scale.x;
+    m_bodies.resize(m_def->bodies.size());
+    for(size_t i=0;i<m_bodies.size();++i)
+    {
+        const auto found=std::find_if(bones.begin(),bones.end(),[&](const auto &bone){return bone.name==m_def->bodies[i].bone;});
+        assert(found!=bones.end());m_bodies[i].boneIndex=int(found-bones.begin());
+    }
+    m_rootBodyIndex=0;
+    return true;
+}
+PxTransform PhysicsAssetInstance::BodyLocalTransform(const PhysicsAssetBodyDef &body) const
+{
+    return PxTransform(PxVec3(body.offset.x*m_rigidScale,body.offset.y*m_rigidScale,body.offset.z*m_rigidScale));
+}
+bool PhysicsAssetInstance::BuildReferencePoses()
+{
+    if(failReference) return false;
+    for(size_t i=0;i<m_bodies.size();++i)
+    {
+        auto &body=m_bodies[i];
+        body.referenceBonePose=PxTransform(PxVec3(float(i)*3,0,40));
+        body.bodyLocalPose=BodyLocalTransform(m_def->bodies[i]);
+        body.bodyToBonePose=body.bodyLocalPose.getInverse();
+        body.referenceBodyPose=body.referenceBonePose*body.bodyLocalPose;
+    }
+    return true;
+}
+PxTransform PhysicsAssetInstance::BoneWorldTransform(int bone,const PhysicsAssetBodyDef &body) const
+{++boneReads;return BoneSample(*m_owner,bone)*BodyLocalTransform(body);}
+PxVec3 PhysicsAssetInstance::FallbackLinearVelocity() const {return PxVec3(2,3,4);}
+PxVec3 PhysicsAssetInstance::FallbackAngularVelocity() const {return PxVec3(0);}
+bool PhysicsAssetInstance::NeedsAnimationControl() const
+{if(!m_ragdoll)return false;for(const auto &b:m_bodies)if(b.physicsWeight<.999f)return true;return false;}
+
+@PRODUCTION@
+
+int main(int argc,char **argv)
+{
+    assert(argc==2);std::ifstream file(argv[1]);
+    const std::string source((std::istreambuf_iterator<char>(file)),std::istreambuf_iterator<char>());
+    auto def=std::make_shared<PhysicsAssetDef>();std::string error;
+    const bool parsed=physicsasset::Parse(source.c_str(),*def,&error);
+    if(!parsed)std::cerr<<"Fixture read bytes="<<source.size()<<" parse error="<<error<<'\n';
+    assert(parsed);
+    const unsigned count=unsigned(def->bodies.size());assert(count>10);
+    CBaseEntity owner;PxPhysics sdk;PxScene scene;PxMaterial material;
+    recordingPhysics=&sdk;
+    PhysicsAssetInstance asset(&owner,def);
+    assert(asset.InitializePoseTracking());
+    asset.UpdateAnimationPose(globals.time);assert(boneReads==count);
+    assert(asset.CreateActors(&sdk,&scene,&material));
+#ifdef PERFORMANCE_BASELINE
+    assert(insertions==count&&inserted.size()==count&&boneReads==2*count);
+    assert(asset.SetRagdoll(true)&&boneReads==3*count);
+#else
+    assert(insertions==1&&inserted.size()==count&&boneReads==count);
+    assert(asset.SetRagdoll(true)&&boneReads==count);
+#endif
+    for(size_t i=0;i<asset.Bodies().size();++i)
+    {
+        const auto &b=asset.Bodies()[i];const auto s=physicsasset::ResolveBodySettings(*def,def->bodies[i]);
+        const auto expected=BoneSample(owner,b.boneIndex)*b.bodyLocalPose;
+        assert((b.actor->getGlobalPose().p-expected.p).magnitude()<.00001f);
+        assert(!b.actor->getRigidBodyFlags().isSet(PxRigidBodyFlag::eKINEMATIC));
+        assert(b.actor->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD)==s.ccd);
+        assert(b.actor->positionIterations==unsigned(s.positionIterations)&&b.actor->velocityIterations==unsigned(s.velocityIterations));
+        assert(b.actor->mass==def->bodies[i].mass&&b.shape->getFlags().isSet(PxShapeFlag::eSIMULATION_SHAPE));
+        assert(!b.shape->getFlags().isSet(PxShapeFlag::eSCENE_QUERY_SHAPE));
+        assert((b.actor->getLinearVelocity()-PxVec3(2,3,4)).magnitude()<.00001f);
+        assert(b.actor->getAngularVelocity().magnitude()==0);
+    }
+    std::cout<<"ACTIVATION_COUNTS "<<count<<' '<<boneReads<<' '<<insertions<<'\n';
+#ifdef PERFORMANCE_BASELINE
+    std::cout<<"K.11.4.2 baseline activation pose/velocity/body settings PASS (recording SDK; no solver)\n";
+    return 0;
+#endif
+    assert(asset.CreateActors(&sdk,&scene,&material)&&insertions==1);
+    assert(asset.SetRagdoll(false));unsigned reads=boneReads;
+    asset.UpdateAnimationPose(globals.time);assert(boneReads==reads);
+    for(unsigned char &value:owner.vars.controller)
+    {++value;asset.UpdateAnimationPose(globals.time);reads+=count;assert(boneReads==reads);asset.UpdateAnimationPose(globals.time);assert(boneReads==reads);}
+    for(unsigned char &value:owner.vars.blending)
+    {++value;asset.UpdateAnimationPose(globals.time);reads+=count;assert(boneReads==reads);}
+    owner.vars.frame+=1;asset.UpdateAnimationPose(globals.time);reads+=count;assert(boneReads==reads);
+    owner.vars.angles.x+=1;asset.UpdateAnimationPose(globals.time);reads+=count;assert(boneReads==reads);
+    owner.vars.origin.x+=1;asset.UpdateAnimationPose(globals.time);reads+=count;assert(boneReads==reads);
+    ++owner.vars.sequence;asset.UpdateAnimationPose(globals.time);reads+=count;assert(boneReads==reads);
+    globals.time+=.02f;asset.UpdateAnimationPose(globals.time);reads+=count;assert(boneReads==reads);
+    globals.time-=.1f;asset.UpdateAnimationPose(globals.time);reads+=count;assert(boneReads==reads);
+    owner.model=nullptr;asset.UpdateAnimationPose(globals.time);asset.UpdateAnimationPose(globals.time);reads+=2*count;assert(boneReads==reads);
+    owner.model=&owner;asset.UpdateAnimationPose(globals.time);reads+=count;assert(boneReads==reads);
+    asset.Destroy();for(auto &a:sdk.actors)assert(a->released);
+    for(auto &j:sdk.joints)assert(j->released);
+    // A failed joint must roll back every body without publishing a partial
+    // ragdoll. The same instance must then allow a clean retry.
+    PxPhysics failed;recordingPhysics=&failed;failed.jointFailure=true;
+    PhysicsAssetInstance retry(&owner,def);const auto before=insertions;
+    assert(!retry.CreateActors(&failed,&scene,&material)&&insertions==before&&!retry.HasActors());
+    for(auto &a:failed.actors)assert(a->released);
+    failed.jointFailure=false;assert(retry.CreateActors(&failed,&scene,&material));
+    assert(insertions==before+1&&retry.HasActors());retry.Destroy();
+    std::cout<<"K.11.4.3 Barney activation: "<<count<<" bone reads for sample+create+activate; 1 batch insertion; pose changes, epochs, body/joint settings and atomic rollback/retry PASS (recording SDK; no solver)\n";
+}

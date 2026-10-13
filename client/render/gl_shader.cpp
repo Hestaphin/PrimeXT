@@ -28,6 +28,7 @@ GNU General Public License for more details.
 #include "gl_grass.h"
 #include "gl_cvars.h"
 #include "basetypes.h"
+#include "performance_cache.h"
 
 //#define _DEBUG_UNIFORMS
 #define SHADERS_HASH_SIZE	(MAX_GLSL_PROGRAMS >> 2)
@@ -102,6 +103,39 @@ int uniform_t :: GetSizeInBytes( void )
 	return 0; // assume error
 }
 
+bool uniform_t::CachedValue(const void *data, size_t bytes, int count) const
+{
+    // This descriptor belongs to one linked program. Only an identical
+    // parameter write is reused; shader execution and draw passes continue.
+    return bytes && valueCacheValid && valueCache && valueCacheCount == count &&
+        bytes <= valueCacheCapacity && !memcmp(valueCache, data, bytes);
+}
+
+void uniform_t::RememberValue(const void *data, size_t bytes, int count)
+{
+    // Cap retained memory per uniform. Larger values still upload normally.
+    if(!bytes || bytes > 65536) { valueCacheValid = false; return; }
+    if(bytes > valueCacheCapacity)
+    {
+        FreeValueCache();
+        valueCache = Mem_Alloc(bytes);
+        if(!valueCache) return;
+        valueCacheCapacity = bytes;
+    }
+    memcpy(valueCache, data, bytes);
+    valueCacheCount = count;
+    valueCacheValid = true;
+}
+
+void uniform_t::FreeValueCache()
+{
+    if(valueCache) Mem_Free(valueCache);
+    valueCache = nullptr;
+    valueCacheCapacity = 0;
+    valueCacheCount = 0;
+    valueCacheValid = false;
+}
+
 void uniform_t :: SetValue( const void *pdata, int count )
 {
 	unicache_t *check = (unicache_t *)pdata;
@@ -117,6 +151,11 @@ void uniform_t :: SetValue( const void *pdata, int count )
 		// handle arrays
 		if( count == -1 )
 			count = size;
+
+        const size_t bytes = count > 0 && count <= size
+            ? size_t(GetSizeInBytes()) * size_t(count) : 0;
+        if(CachedValue(pdata, bytes, count))
+        { ++performance::ClientStats().uniformHits; return; }
 
 		switch( format )
 		{
@@ -141,7 +180,11 @@ void uniform_t :: SetValue( const void *pdata, int count )
 		case GL_FLOAT_MAT4_ARB:
 			pglUniformMatrix4fvARB( location, count, GL_FALSE, (const float *)pdata );
 			break;
+		default:
+			return;
 		}
+        RememberValue(pdata, bytes, count);
+        ++performance::ClientStats().uniformUploads;
 	}
 	else
 	{
@@ -149,7 +192,9 @@ void uniform_t :: SetValue( const void *pdata, int count )
 
 		// some values could be cached
 		if( testSize <= 16 && !memcmp( &cache, check, testSize ))
-			return;
+        { ++performance::ClientStats().uniformHits; return; }
+        if(testSize > 16 && CachedValue(pdata, size_t(testSize), 1))
+        { ++performance::ClientStats().uniformHits; return; }
 
 		// single cached values
 		switch( format )
@@ -211,7 +256,11 @@ void uniform_t :: SetValue( const void *pdata, int count )
 		case GL_FLOAT_MAT4_ARB:
 			pglUniformMatrix4fvARB( location, 1, GL_FALSE, (const float *)pdata );
 			break;
+		default:
+			return;
 		}
+        if(testSize > 16) RememberValue(pdata, size_t(testSize), 1);
+        ++performance::ClientStats().uniformUploads;
 	}
 }
 
@@ -250,6 +299,7 @@ static uniformTable_t glsl_uniformTable[] =
 { "u_BonesArray",		UT_BONESARRAY,		0 },	
 { "u_BoneQuaternion",	UT_BONEQUATERNION,		0 },
 { "u_BonePosition",		UT_BONEPOSITION,		0 },
+{ "u_BoneScale",		UT_BONESCALE,		0 },
 { "u_ScreenSizeInv",	UT_SCREENSIZEINV,		UFL_GLOBAL_PARM },
 { "u_zFar",				UT_ZFAR,			UFL_GLOBAL_PARM },
 { "u_LightStyleValues",	UT_LIGHTSTYLEVALUES,	UFL_GLOBAL_PARM },
@@ -1113,6 +1163,10 @@ static void GL_ParseProgramUniforms( glsl_program_t *shader )
 
 		// fill next uniform
 		uniform = &shader->uniforms[shader->numUniforms++];
+        uniform->valueCache = nullptr;
+        uniform->valueCacheCapacity = 0;
+        uniform->valueCacheCount = 0;
+        uniform->valueCacheValid = false;
 		Q_strncpy( uniform->name, cleanName, sizeof( uniform->name ));
 		uniform->location = location;
 		uniform->flags = desc->flags;
@@ -1235,6 +1289,7 @@ static void GL_FreeGPUShader( glsl_program_t *shader )
 		find = va( "%s %s", shader->name, shader->options );
 		if( shader->uniforms != NULL )
 		{
+			for(int i = 0; i < shader->numUniforms; ++i) shader->uniforms[i].FreeValueCache();
 			Mem_Free( shader->uniforms );
 			shader->uniforms = NULL;
 		}
@@ -1543,6 +1598,7 @@ void GL_ReloadShader(word shaderNum)
 		find = va("%s %s", shader->name, shader->options);
 		if (shader->uniforms != nullptr)
 		{
+			for(int i = 0; i < shader->numUniforms; ++i) shader->uniforms[i].FreeValueCache();
 			Mem_Free(shader->uniforms);
 			shader->uniforms = nullptr;
 			shader->numUniforms = 0;

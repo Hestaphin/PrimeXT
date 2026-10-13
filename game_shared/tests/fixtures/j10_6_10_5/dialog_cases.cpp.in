@@ -1,0 +1,64 @@
+// New controls execute actual production dialog methods. Geometry is a declared
+// synthetic adapter; real Studio extraction remains covered by inherited F4.
+static void F5Dialog(StudioModel &model,const std::filesystem::path &folder)
+{
+    const auto saved=model.m_pstudiohdr;f5ActiveSkeleton=F5Quadruped();
+    struct Data {studiohdr_t hdr{};mstudiobone_t bones[128]{};} data;
+    data.hdr.numbones=int(f5ActiveSkeleton.size());data.hdr.boneindex=offsetof(Data,bones);
+    for(size_t i=0;i<f5ActiveSkeleton.size();++i)
+    {
+        const auto &b=f5ActiveSkeleton[i];std::strcpy(data.bones[i].name,b.name.c_str());data.bones[i].parent=b.parent;
+        data.bones[i].value[0]=b.localOrigin.x;data.bones[i].value[1]=b.localOrigin.y;data.bones[i].value[2]=b.localOrigin.z;
+    }
+    model.m_pstudiohdr=&data.hdr;ViewerSettings settings;PhysicsAssetEditor editor(nullptr,model,settings);
+    editor.m_modelPath=(folder/"f5_synthetic_quad.mdl").string();editor.m_assetPath=physicsasset::BuildAssetPath(editor.m_modelPath);
+    editor.AutoGenerate();auto &dialog=*editor.m_templateDialog;
+    const std::string beforeTextSize=physicsasset::Serialize(editor.m_asset);
+    dialog.m_textSize->select(2);Action(dialog,RagdollTemplateDialog::TextSize);
+    Check(physui::CurrentTextScale()==150&&physicsasset::Serialize(editor.m_asset)==beforeTextSize,
+          "J.10.6.10.7 text size leaves the authoring asset unchanged");
+    Action(dialog,RagdollTemplateDialog::BeginnerGuide);
+    Check(physicsasset::Serialize(editor.m_asset)==beforeTextSize,
+          "J.10.6.10.7 beginner walkthrough is read-only");
+    dialog.m_textSize->select(1);Action(dialog,RagdollTemplateDialog::TextSize);
+    Check(physui::CurrentTextScale()==125,"J.10.6.10.7 restore large default");
+    Check(items[dialog.m_templates].size()==8&&RagdollTemplateDialog::CustomCopyIndex()==7,"F5 seven built-ins plus dynamic editable copy slot");
+    for(int preset:{3,4,5,6})
+    {
+        dialog.m_templates->select(preset);Action(dialog,RagdollTemplateDialog::SelectTemplate);
+        Check(dialog.m_builtin&&dialog.m_draft.id==ragtemplate::Builtins()[preset].id&&!enabled[dialog.m_chainDepth],"F5 new preset selection preserves read-only policy");
+    }
+    dialog.m_templates->select(5);Action(dialog,RagdollTemplateDialog::SelectTemplate);Action(dialog,RagdollTemplateDialog::Generate);
+    Check(editor.m_generationPreview&&editor.m_generation.Preview().chainReviews==1&&editor.m_generationPreview->bodies.size()==21,"F5 production preview includes bounded quadruped tail");
+    Check(!items[dialog.m_previewJoints].empty()&&editor.m_generationSelectedJoint==editor.m_generationPreview->joints[0].name,
+          "J.10.6.10.8 preview joint selector belongs to generated asset, not old index");
+    dialog.m_previewJoints->select(1);editor.m_selectedJoint=999;Action(dialog,RagdollTemplateDialog::SelectPreviewJoint);
+    Check(editor.m_generationSelectedJoint==editor.m_generationPreview->joints[1].name&&editor.m_selectedJoint==999,
+          "J.10.6.10.8 preview guide changes by generated joint identity and leaves live editor selection alone");
+    const std::string before=physicsasset::Serialize(editor.m_asset);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(dialog.isVisible()&&physicsasset::Serialize(editor.m_asset)==before,"F5 inferred axes/expanded chain review blocks premature Apply");
+    Action(dialog,RagdollTemplateDialog::Duplicate);
+    Check(!dialog.m_builtin&&dialog.m_templates->getSelectedIndex()==7&&enabled[dialog.m_chainDepth],"F5 duplication reaches editable slot after expanded preset list");
+    const int tail=int(std::find_if(dialog.m_draft.roles.begin(),dialog.m_draft.roles.end(),[](const auto &r){return r.id=="tail";})-dialog.m_draft.roles.begin());
+    dialog.m_roles->select(tail);Action(dialog,RagdollTemplateDialog::SelectRole);
+    const std::string draft=ragtemplate::Serialize(dialog.m_draft);dialog.m_chainDepth->setLabel("17");
+    Check(!dialog.ReadFields()&&ragtemplate::Serialize(dialog.m_draft)==draft,"F5 invalid chain depth cannot mutate draft");
+    dialog.m_chainDepth->setLabel("4");dialog.m_chainBranches->setChecked(true);
+    Check(dialog.ReadFields()&&dialog.m_draft.roles[tail].chainBranches,"F5 branch consent control writes the authoring profile");
+    Action(dialog,RagdollTemplateDialog::Generate);dialog.m_axisReviewed->setChecked(true);dialog.m_chainDepth->setLabel("3");Action(dialog,RagdollTemplateDialog::Apply);
+    Check(dialog.isVisible()&&physicsasset::Serialize(editor.m_asset)==before,"F5 chain edit invalidates prior generation key");
+    dialog.m_massRatio->setLabel("1");
+    Action(dialog,RagdollTemplateDialog::Generate);
+    Check(editor.m_generationPreview&&editor.m_generationPreview->bodies.size()==20,"F5 depth edit produces a fresh bounded candidate");
+    Check(editor.m_generation.Preview().massRatioWarnings>0&&!dialog.m_risksReviewed->isChecked(),
+          "J.10.6.10.8 mass-ratio issues are visible and not pre-acknowledged");
+    dialog.m_axisReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(dialog.isVisible()&&physicsasset::Serialize(editor.m_asset)==before,
+          "J.10.6.10.8 mass-ratio warning blocks Apply until separately acknowledged");
+    dialog.m_risksReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(!dialog.isVisible()&&editor.m_asset.bodies.size()==20,"F5 reviewed candidate applies");
+    editor.UndoGeneration();Check(editor.m_asset.bodies.empty(),"F5 expanded candidate undo restores original asset");
+    editor.AutoGenerate();Action(dialog,RagdollTemplateDialog::Generate);dialog.Cancel();
+    Check(editor.m_asset.bodies.empty()&&!editor.m_generationPreview&&editor.m_generationSelectedJoint.empty(),"F5 cancel clears candidate and preview joint selection without changing live asset");
+    f5ActiveSkeleton.clear();model.m_pstudiohdr=saved;
+}

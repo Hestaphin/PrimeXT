@@ -1,0 +1,78 @@
+// Exact command dispatch/filtering. Lookup, tokenization and registration are
+// explicit adapters; aliases retain the production command-buffer privilege.
+#include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+#include "xash3d_types.h"
+#define MAX_CMD_LINE 1024
+#define MAX_CMD_TOKENS 16
+#define CMD_PRIVILEGED 1
+#define CMD_FILTERABLE 2
+#define S_WARN "Warning: "
+#define Q_strlen strlen
+#define Q_strnicmp strncasecmp
+typedef void (*xcommand_t)(void);
+typedef struct { char data[4096]; size_t cursize; } cmdbuf_t;
+typedef struct { const char* name; xcommand_t function; int flags; } cmd_t;
+typedef struct { const char* name; const char* value; } cmdalias_t;
+typedef struct { float value; } convar_t;
+static convar_t cmd_scripting = {0}, cl_filterstuffcmd = {1};
+static int cmd_condlevel, cmd_condition, forwarded, called, commandCount;
+static qboolean cmd_currentCommandIsPrivileged = true;
+static char* cmd_argv[MAX_CMD_TOKENS]; static int cmd_argc;
+static cmdbuf_t cmd_text, filteredcmd_text;
+static cmd_t registered[4];
+static cmdalias_t alias;
+static void Con_Printf(const char* format, ...) {}
+#define Con_Reportf Con_Printf
+static size_t Q_strncpy(char* out, const char* text, size_t size) {
+    size_t length = strlen(text); if(length >= size) length = size - 1;
+    memcpy(out, text, length); out[length] = 0; return length;
+}
+static const char* Cvar_VariableString(const char* name) { return ""; }
+static qboolean Cvar_CommandWithPrivilegeCheck(convar_t* cvar, qboolean privileged) { return false; }
+static void Cmd_ForwardToServer(void) { ++forwarded; }
+static void Cmd_TokenizeString(const char* text) {
+    static char buffer[2048]; Q_strncpy(buffer, text, sizeof(buffer)); cmd_argc = 0;
+    for(char* token = strtok(buffer, " \n\r\t"); token; token = strtok(NULL, " \n\r\t")) cmd_argv[cmd_argc++] = token;
+}
+static int Cmd_Argc(void) { return cmd_argc; }
+static const char* Cmd_Argv(int index) { return index >= 0 && index < cmd_argc ? cmd_argv[index] : ""; }
+static void BaseCmd_FindAll(const char* name, cmd_t** command, cmdalias_t** a, convar_t** cvar) {
+    *command = NULL; *a = NULL; *cvar = NULL;
+    if(alias.name && !strcmp(name, alias.name)) *a = &alias;
+    for(int i = 0; i < commandCount; ++i) if(!strcmp(name, registered[i].name)) *command = &registered[i];
+}
+static void Cmd_AddCommand(const char* name, xcommand_t function, const char* description) {
+    registered[commandCount++] = (cmd_t){name, function, 0};
+}
+enum { ca_connected = 2 };
+static struct { int state; } cls = {ca_connected};
+@PRODUCTION@
+static void Mark(void) { ++called; }
+int main(int argc, char** argv) {
+    assert(argc == 2);
+    @REGISTRATION@
+    if(!strcmp(argv[1], "default")) {
+        Cmd_ExecuteStringWithPrivilegeCheck("ent_getvars_cb", false);
+        assert(!forwarded && !called && !cmd_text.cursize && !filteredcmd_text.cursize);
+    } else {
+        alias = (cmdalias_t){"ent_getvars_cb", "marker\n"};
+        qboolean privileged = !strcmp(argv[1], "alias");
+        if(!strcmp(argv[1], "filtered-privileged")) {
+            alias.value = "privileged_marker\n";
+            registered[commandCount++] = (cmd_t){"privileged_marker", Mark, CMD_PRIVILEGED};
+        }
+        Cmd_ExecuteStringWithPrivilegeCheck("ent_getvars_cb", privileged);
+        assert(!forwarded && !called);
+        cmdbuf_t* buffer = privileged ? &cmd_text : &filteredcmd_text;
+        assert(buffer->cursize == strlen(alias.value) && !memcmp(buffer->data, alias.value, buffer->cursize));
+        assert((privileged ? filteredcmd_text.cursize : cmd_text.cursize) == 0);
+        if(!strcmp(argv[1], "filtered-privileged")) {
+            Cmd_ExecuteStringWithPrivilegeCheck(buffer->data, false); assert(called == 0 && !cmd_text.cursize);
+        }
+        assert(!strcmp(alias.name, "ent_getvars_cb"));
+    }
+}

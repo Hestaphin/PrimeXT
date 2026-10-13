@@ -1,0 +1,75 @@
+// Real mxWindow declaration/implementation; explicit Win32 service adapter.
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <vector>
+#include "mx/mxWindow.h"
+using namespace std;
+using DWORD = unsigned long;
+using UINT = unsigned int;
+using LONG = long;
+using LONG_PTR = intptr_t;
+using HWND = void*;
+using HMENU = void*;
+using HINSTANCE = void*;
+struct RECT { long left, top, right, bottom; };
+constexpr DWORD WS_OVERLAPPEDWINDOW=0x00cf0000, WS_POPUP=0x80000000, WS_CHILD=0x40000000;
+constexpr DWORD WS_VISIBLE=0x10000000, WS_DLGFRAME=0x00400000, WS_CAPTION=0x00c00000;
+constexpr DWORD WS_SYSMENU=0x00080000, WS_CLIPCHILDREN=0x02000000;
+constexpr DWORD WS_GROUP=0x00020000, WS_TABSTOP=0x00010000, WS_EX_CONTROLPARENT=0x00010000;
+constexpr int FALSE=0, CW_USEDEFAULT=-2147483647, GWLP_USERDATA=-21, GWL_STYLE=-16;
+#define CLASSNAME "MXTK::CLASSNAME"
+struct NativeWindow { DWORD style, ex; int x,y,w,h; void *owner; LONG_PTR data=0; };
+static vector<NativeWindow*> native;
+static void *CreateWindowEx(DWORD ex,const char*,const char*,DWORD style,int x,int y,int w,int h,
+                           HWND owner,HMENU,HINSTANCE,void*) {
+    auto *result=new NativeWindow{style,ex,x,y,w,h,owner}; native.push_back(result); return result;
+}
+static void *GetModuleHandle(void*) { return nullptr; }
+static LONG_PTR GetWindowLongPtr(HWND handle,int index) {
+    auto *window=static_cast<NativeWindow*>(handle);
+    return index==GWL_STYLE ? window->style : window->data;
+}
+static LONG_PTR SetWindowLongPtr(HWND handle,int index,LONG_PTR value) {
+    auto *window=static_cast<NativeWindow*>(handle);
+    if(index==GWL_STYLE) window->style=value; else window->data=value; return 0;
+}
+static bool IsWindow(HWND handle) { return handle!=nullptr; }
+// Simulate a nonzero frame so clients cannot accidentally treat outer size as client size.
+static bool AdjustWindowRectEx(RECT *bounds,DWORD,int,DWORD) {
+    bounds->left-=4; bounds->right+=4; bounds->top-=28; bounds->bottom+=4; return true;
+}
+class mxWidget_i { public: void *handle=nullptr; mxWindow *parent=nullptr; };
+mxWidget::mxWidget(mxWindow *parent,int,int,int,int,const char*) : d_this(new mxWidget_i) {d_this->parent=parent;}
+mxWidget::~mxWidget() {delete d_this;}
+void mxWidget::setHandle(void *handle) {d_this->handle=handle;}
+void *mxWidget::getHandle() const {return d_this->handle;}
+void mxWidget::setParent(mxWindow *parent) {d_this->parent=parent;}
+mxWindow *mxWidget::getParent() const {return d_this->parent;}
+void mxWidget::setType(int) {}
+mxWindow *g_mainWindow=nullptr;
+@PRODUCTION@
+int main(int argc,char **argv) {
+    assert(argc==2); string test=argv[1];
+    {
+        mxWindow owner(nullptr,0,0,640,540,"Viewer",mxWindow::Normal);
+        int style=test=="normal-child" ? mxWindow::Normal :
+                  test=="modal-dialog" ? mxWindow::ModalDialog : mxWindow::Dialog;
+        auto *window=new mxWindow(&owner,40,40,730,705,"Editor",style);
+        auto *record=static_cast<NativeWindow*>(window->getHandle());
+        assert(record->owner==owner.getHandle() && window->getParent()==&owner);
+        if(test=="normal-child") {
+            assert(record->style&WS_CHILD); assert(record->style&WS_VISIBLE);
+            assert(record->w==730 && record->h==705);
+        } else if(test=="client-bounds") {
+            assert(record->w-8==730 && record->h-32==705);
+        } else {
+            assert(!(record->style&WS_CHILD));
+            assert(record->style&WS_CAPTION); assert(record->style&WS_SYSMENU);
+            assert(record->style&WS_CLIPCHILDREN);
+        }
+    } // Owner deletes its registered C++ child exactly once.
+    for(auto *window:native) delete window;
+    cout<<"dialog ownership/client size or embedded child control verified\n";
+}

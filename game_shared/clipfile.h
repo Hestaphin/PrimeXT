@@ -38,7 +38,7 @@ typedef struct mvert_s
 
 namespace clipfile
 {
-	constexpr uint32_t kFormatVersion = 2;
+	constexpr uint32_t kFormatVersion = 3;
 	constexpr uint32_t kFileMagic = (('P' << 24) + ('I' << 16) + ('L' << 8) + 'C'); // little-endian "CLIP"
 
 	constexpr uint32_t kDataLumpFacets = 0;
@@ -82,6 +82,7 @@ namespace clipfile
 		int32_t body;
 		int32_t skin;
 		GeometryType geometryType;
+        uint64_t sourceFingerprint; // 0 for model-only; hash of .phys bytes otherwise
 	};
 
 	struct CacheTable
@@ -91,16 +92,24 @@ namespace clipfile
 	};
 
 	using Plane = dplane_t;
+	// Disk records must not construct aligned Vector objects at packed offsets.
+	struct Vertex
+	{
+		float point[3];
+		float st[2];
+	};
 	struct Facet
 	{
 		int16_t		skinref;		// pointer to texture for special effects
-		mvert_t		triangle[3];	// store triangle points
-		vec3_t		mins, maxs;		// an individual size of each facet
-		vec3_t		edge1, edge2;	// new trace stuff
+		Vertex		triangle[3];	// same wire layout as mvert_t
+		float		mins[3], maxs[3];
+		float		edge1[3], edge2[3];
 		uint8_t		numplanes;		// because numplanes for each facet can't exceeds MAX_FACET_PLANES!
 		uint32_t	firstindex;		// first index into CLIP_PLANE_INDEXES lump
 	};
 #pragma pack(pop)
+	static_assert(sizeof(Vertex) == sizeof(mvert_t), "CLIP vertex layout changed");
+	static_assert(sizeof(Facet) == 115, "CLIP v3 facet layout changed");
 };
 
 #endif // CLIPFILE_H

@@ -1,0 +1,422 @@
+// J.10.6.10.2 F2 bounds-fixture review candidate; NOT stability-certified.
+// Recorded Barney bounds lack reference rotations/section samples; regenerate from matching MDL before game use.
+physics_asset
+{
+    version 4
+
+    body "Bip01 Pelvis"
+    {
+        bone "Bip01 Pelvis"
+        shape box
+        half_extents 12.1340199 5.48099995 7.25850105
+        offset 3.59224367 0.430000067 -0.534998894
+        angles 0 0 0
+        mass 13.6888885
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 3
+    }
+
+    body "Bip01 Spine3"
+    {
+        bone "Bip01 Spine3"
+        shape box
+        half_extents 2.47049999 5.54399967 5.26499987
+        offset 3.21499991 0.170000076 2.62999964
+        angles 0 0 0
+        mass 17.1111107
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 2
+    }
+
+    body "Bip01 Head"
+    {
+        bone "Bip01 Head"
+        shape sphere
+        radius 5.4989996
+        offset 5.26499987 1.8599999 -0.304999828
+        angles 0 0 0
+        mass 5.5999999
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 1
+    }
+
+    body "Bip01 L Arm1"
+    {
+        bone "Bip01 L Arm1"
+        shape capsule
+        radius 1.69074893
+        half_height 1.69074905
+        offset 3.84261131 -1.1450001 -0.245000005
+        angles -0 0 90
+        mass 1.69696963
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 4
+    }
+
+    body "Bip01 L Arm2"
+    {
+        bone "Bip01 L Arm2"
+        shape capsule
+        radius 2.25417614
+        half_height 2.25417614
+        offset 5.12312746 0 0.334999263
+        angles 1.67756261e-05 0 90
+        mass 1.35757577
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 4
+    }
+
+    body "Bip01 R Arm1"
+    {
+        bone "Bip01 R Arm1"
+        shape capsule
+        radius 1.88623619
+        half_height 1.88623631
+        offset 4.28690052 -1.18500006 0.169996858
+        angles 2.54923161e-05 0 90
+        mass 1.69696963
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 5
+    }
+
+    body "Bip01 R Arm2"
+    {
+        bone "Bip01 R Arm2"
+        shape capsule
+        radius 2.18096066
+        half_height 2.18096089
+        offset 4.95672894 0.205000043 -0.185001776
+        angles -1.73387871e-05 0 90
+        mass 1.35757577
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 5
+    }
+
+    body "Bip01 L Leg"
+    {
+        bone "Bip01 L Leg"
+        shape capsule
+        radius 4.02623415
+        half_height 4.02623463
+        offset 9.15053272 -1.07000005 -0.13499999
+        angles -0 0 90
+        mass 6.5333333
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 6
+    }
+
+    body "Bip01 L Leg1"
+    {
+        bone "Bip01 L Leg1"
+        shape capsule
+        radius 3.76348686
+        half_height 3.76348662
+        offset 8.55337906 -1.31000006 -0.339999914
+        angles -0 0 90
+        mass 3.73333335
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 6
+    }
+
+    body "Bip01 L Foot"
+    {
+        bone "Bip01 L Foot"
+        shape box
+        half_extents 2.47950006 5.25150013 2.54250002
+        offset 3.66499996 2.84500027 -1.21499991
+        angles 0 0 0
+        mass 0.933333337
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 6
+    }
+
+    body "Bip01 R Leg"
+    {
+        bone "Bip01 R Leg"
+        shape capsule
+        radius 3.98929667
+        half_height 3.98929691
+        offset 9.06658363 -1.08999991 -0.0399999619
+        angles -0 0 90
+        mass 6.5333333
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 7
+    }
+
+    body "Bip01 R Leg1"
+    {
+        bone "Bip01 R Leg1"
+        shape capsule
+        radius 3.82271051
+        half_height 3.82271075
+        offset 8.68797874 -1.38499999 0.105000019
+        angles -0 0 90
+        mass 3.73333335
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 7
+    }
+
+    body "Bip01 R Foot"
+    {
+        bone "Bip01 R Foot"
+        shape box
+        half_extents 2.47950006 5.25599957 2.51999998
+        offset 3.45499992 2.5999999 0.480000019
+        angles 0 0 0
+        mass 0.933333337
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 7
+    }
+
+    body "Bip01 L Arm"
+    {
+        bone "Bip01 L Arm"
+        shape capsule
+        radius 1.33406889
+        half_height 1.33406889
+        offset 3.03197479 -0.714999914 -0.0850024223
+        angles -3.60435151e-05 0 90
+        mass 2.5454545
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 4
+    }
+
+    body "Bip01 R Arm"
+    {
+        bone "Bip01 R Arm"
+        shape capsule
+        radius 1.37929142
+        half_height 1.37929142
+        offset 3.13475323 -0.940425992 0.0249998569
+        angles -0 0 90
+        mass 2.5454545
+        linear_damping 0.0500000007
+        angular_damping 0.0500000007
+        hitgroup 5
+    }
+
+    joint "Bip01 Pelvis_to_Bip01 Spine3"
+    {
+        parent "Bip01 Pelvis"
+        child "Bip01 Spine3"
+        frame_anchor 0 0 0
+        frame_angles -49.186245 11.2561035 89.9999924
+        swing1 20
+        swing2 20
+        twist_low -15
+        twist_high 15
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 Spine3_to_Bip01 Head"
+    {
+        parent "Bip01 Spine3"
+        child "Bip01 Head"
+        frame_anchor 0 0 0
+        frame_angles -9.15986402e-06 -0.0412165299 90
+        swing1 25
+        swing2 25
+        twist_low -35
+        twist_high 35
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 L Arm_to_Bip01 L Arm1"
+    {
+        parent "Bip01 L Arm"
+        child "Bip01 L Arm1"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 85
+        swing2 75
+        twist_low -65
+        twist_high 65
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 L Arm1_to_Bip01 L Arm2"
+    {
+        parent "Bip01 L Arm1"
+        child "Bip01 L Arm2"
+        frame_anchor 0 0 0
+        frame_angles 89.9999237 -90 0
+        swing1 45
+        swing2 45
+        twist_low 0
+        twist_high 140
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 R Arm_to_Bip01 R Arm1"
+    {
+        parent "Bip01 R Arm"
+        child "Bip01 R Arm1"
+        frame_anchor 0 0 0
+        frame_angles 2.54923161e-05 0 90
+        swing1 85
+        swing2 75
+        twist_low -65
+        twist_high 65
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 R Arm1_to_Bip01 R Arm2"
+    {
+        parent "Bip01 R Arm1"
+        child "Bip01 R Arm2"
+        frame_anchor 0 0 0
+        frame_angles 89.9999161 -108.136009 -18.1360168
+        swing1 45
+        swing2 45
+        twist_low 0
+        twist_high 140
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 Pelvis_to_Bip01 L Leg"
+    {
+        parent "Bip01 Pelvis"
+        child "Bip01 L Leg"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 65
+        swing2 45
+        twist_low -35
+        twist_high 35
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 L Leg_to_Bip01 L Leg1"
+    {
+        parent "Bip01 L Leg"
+        child "Bip01 L Leg1"
+        frame_anchor 0 0 0
+        frame_angles -89.9999237 90 180
+        swing1 45
+        swing2 45
+        twist_low 0
+        twist_high 130
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 L Leg1_to_Bip01 L Foot"
+    {
+        parent "Bip01 L Leg1"
+        child "Bip01 L Foot"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 Pelvis_to_Bip01 R Leg"
+    {
+        parent "Bip01 Pelvis"
+        child "Bip01 R Leg"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 65
+        swing2 45
+        twist_low -35
+        twist_high 35
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 R Leg_to_Bip01 R Leg1"
+    {
+        parent "Bip01 R Leg"
+        child "Bip01 R Leg1"
+        frame_anchor 0 0 0
+        frame_angles -89.9999237 90 180
+        swing1 45
+        swing2 45
+        twist_low 0
+        twist_high 130
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 R Leg1_to_Bip01 R Foot"
+    {
+        parent "Bip01 R Leg1"
+        child "Bip01 R Foot"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 Spine3_to_Bip01 L Arm"
+    {
+        parent "Bip01 Spine3"
+        child "Bip01 L Arm"
+        frame_anchor 0 0 0
+        frame_angles -3.60435151e-05 0 90
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+    joint "Bip01 Spine3_to_Bip01 R Arm"
+    {
+        parent "Bip01 Spine3"
+        child "Bip01 R Arm"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+        twist_motion free
+        swing1_motion free
+        swing2_motion free
+    }
+
+}

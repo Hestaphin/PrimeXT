@@ -1,0 +1,12 @@
+version = 3
+id = test_jhp
+chamber = 9x19
+projectile = jhp
+mass_grams = 7.45
+diameter_mm = 9.02
+drag_coefficient = 0.34
+reference_velocity_mps = 340
+projectile_count = 1
+damage_coefficient = 2.6711074
+category = 9x19/jhp
+sprite = sprites/640hud7.spr

@@ -646,7 +646,13 @@ void EntvarsKeyvalue( entvars_t *pev, KeyValueData *pkvd )
 			if( FStrEq( pField->fieldName, "origin" ))
 			{
 				CBaseEntity *pEntity = CBaseEntity::Instance( pev );
-				if( pEntity ) pEntity->SetAbsOrigin( pev->origin );
+				if( pEntity )
+				{
+					// CalcAbsolutePosition inside SetAbsOrigin may update pev->origin.
+					// Keep the requested keyvalue independent of that cached state.
+					const Vector origin = pev->origin;
+					pEntity->SetAbsOrigin( origin );
+				}
 			}
 			else if( FStrEq( pField->fieldName, "angles" ))
 			{

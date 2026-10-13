@@ -1,0 +1,10 @@
+version = 2
+id = j6_12g_buck
+chamber = 12gauge
+projectile = buckshot
+mass_grams = 1.25
+diameter_mm = 8.4
+drag_coefficient = 0.5
+reference_velocity_mps = 360
+projectile_count = 6
+damage = 6

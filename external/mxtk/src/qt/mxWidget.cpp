@@ -13,6 +13,7 @@
 //
 #include <mx/mxWidget.h>
 #include <QWidget>
+#include <QByteArray>
 #include <QPushButton>
 #include <QLineEdit>
 #include <QLabel>
@@ -251,24 +252,22 @@ mxWidget:: h2 () const
 const char*
 mxWidget::getLabel () const
 {
-	if (d_this->d_widget)
-	{
-		if (d_this->d_widget->inherits ("QPushButton"))
-			return qPrintable(((QPushButton *) d_this->d_widget)->text ());
-		else if (d_this->d_widget->inherits ("QCheckBox"))
-			return qPrintable(((QCheckBox *) d_this->d_widget)->text ());
-		else if (d_this->d_widget->inherits ("QRadioButton"))
-			return qPrintable(((QRadioButton *) d_this->d_widget)->text ());
-		else if (d_this->d_widget->inherits ("QLineEdit"))
-			return qPrintable(((QLineEdit *) d_this->d_widget)->text ());
-		else if (d_this->d_widget->inherits ("QLabel"))
-			return qPrintable(((QLabel *) d_this->d_widget)->text ());
-		else if (d_this->d_widget->inherits ("QGroupBox"))
-			return qPrintable(((QGroupBox *) d_this->d_widget)->title ());
-		else
-                        return qPrintable(d_this->d_widget->windowTitle ());
-	}
-	return "";
+    // Keep returned bytes alive until the next call on this GUI thread.
+    // qPrintable of a temporary QString returned a dangling pointer.
+    static thread_local QByteArray label;
+    label.clear();
+    if(d_this->d_widget)
+    {
+        QWidget *widget = d_this->d_widget;
+        if(widget->inherits("QPushButton")) label = static_cast<QPushButton *>(widget)->text().toLocal8Bit();
+        else if(widget->inherits("QCheckBox")) label = static_cast<QCheckBox *>(widget)->text().toLocal8Bit();
+        else if(widget->inherits("QRadioButton")) label = static_cast<QRadioButton *>(widget)->text().toLocal8Bit();
+        else if(widget->inherits("QLineEdit")) label = static_cast<QLineEdit *>(widget)->text().toLocal8Bit();
+        else if(widget->inherits("QLabel")) label = static_cast<QLabel *>(widget)->text().toLocal8Bit();
+        else if(widget->inherits("QGroupBox")) label = static_cast<QGroupBox *>(widget)->title().toLocal8Bit();
+        else label = widget->windowTitle().toLocal8Bit();
+    }
+    return label.constData();
 }
 
 

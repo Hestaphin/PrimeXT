@@ -1,0 +1,43 @@
+// Actual DrawOverlay and GL-state bookkeeping with explicit GL services.
+static unsigned f5Checks=0;
+static void F5Check(bool v,const char *s){++f5Checks;if(!v){std::cerr<<"FAIL "<<s<<'\n';std::abort();}}
+int main()
+{
+    struct Data{studiohdr_t hdr{};mstudiobone_t bones[2]{};} data;
+    data.hdr.numbones=2;data.hdr.boneindex=offsetof(Data,bones);data.bones[0].parent=-1;data.bones[1].parent=0;data.bones[1].value[0]=10;
+    std::strcpy(data.bones[0].name,"parent_bone");std::strcpy(data.bones[1].name,"child_bone");
+    ViewerSettings settings;StudioModel model(settings);model.m_pstudiohdr=&data.hdr;m_protationmatrix.Identity();
+    const matrix3x4 root(Vector(20,30,40),Vector(15,35,65),1),child(Vector(10,0,0),Vector(0,0,0),1);
+    model.m_pbonetransform[0]=root;model.m_pbonetransform[1]=root.ConcatTransforms(child);
+    PhysicsAssetEditor editor(nullptr,model,settings);editor.setVisible(true);editor.m_selectedJoint=0;
+    physicsasset::BodyDef p,c;p.name="parent";p.bone="parent_bone";p.offset={3,2,1};p.angles={3,5,7};c.name="child";c.bone="child_bone";c.offset={-2,3,4};c.angles={11,17,23};editor.m_asset.bodies={p,c};
+    physicsasset::JointDef j;j.name="joint";j.parent=p.name;j.child=c.name;j.frameAnchor={1,2,3};j.frameAngles={20,30,40};editor.m_asset.joints={j};
+    state.enabled[GL_DEPTH_TEST]=true;state.depthWrite=true;state.lineWidth=3;state.color={.8f,.7f,.6f};
+    const GLState original=state;
+    matrices.push_back({1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1});
+    editor.DrawOverlay();size_t yellow=0;std::vector<Vector> anchors;
+    for(const auto &v:vertices)if(v.state.color==std::array<float,3>{1,1,.1f}){++yellow;anchors.push_back(v.point);}
+    const matrix3x4 frame=model.m_pbonetransform[1].ConcatTransforms(matrix3x4(Vector(1,2,3),Vector(20,30,40),1));
+    F5Check(yellow==2&&(anchors[0]-frame.GetOrigin()).Length()<.0001f&&(anchors[1]-frame.GetOrigin()).Length()<.0001f,"actual overlay draws both canceled-offset joint anchors");
+    // Generated candidate owns its own joint list and name-based selection.
+    vertices.clear();editor.m_generationPreview.reset(new physicsasset::AssetDef(editor.m_asset));
+    physicsasset::JointDef other=j;other.name="other_joint";other.frameAnchor={8,0,0};
+    editor.m_generationPreview->joints.insert(editor.m_generationPreview->joints.begin(),other);
+    editor.m_selectedJoint=999;editor.m_generationSelectedJoint="joint";
+    editor.DrawOverlay();size_t generatedAnchors=0;
+    for(const auto &v:vertices)if(v.state.color==std::array<float,3>{1,1,.1f})++generatedAnchors;
+    F5Check(generatedAnchors==2,"generated joint resolved by identity even with stale live index");
+    editor.m_generationPreview.reset();editor.m_generationSelectedJoint.clear();editor.m_selectedJoint=0;
+    vertices.clear();
+    F5Check(state.enabled==original.enabled&&state.depthWrite==original.depthWrite&&state.lineWidth==original.lineWidth&&state.color==original.color,"guide drawing restores caller GL state");
+    F5Check(attribStack.empty()&&matrices.size()==1,"guide overlay balances attribute/matrix stacks");
+    vertices.clear();editor.m_showJointGuides=false;editor.DrawOverlay();yellow=0;for(const auto &v:vertices)if(v.state.color==std::array<float,3>{1,1,.1f})++yellow;
+    F5Check(yellow==0&&!vertices.empty(),"guide toggle hides only guides and keeps body wireframes");
+    vertices.clear();editor.m_showJointGuides=true;editor.m_selectedJoint=99;editor.DrawOverlay();
+    F5Check(!vertices.empty(),"invalid selected joint retains body wireframes safely");
+    std::vector<matrix3x4> reference;data.bones[0].parent=1;
+    F5Check(!BuildReferenceBoneMatrices(&data.hdr,reference),"reference guide hierarchy rejects cycles");
+    data.bones[0].parent=-2;F5Check(!BuildReferenceBoneMatrices(&data.hdr,reference),"reference guide hierarchy rejects malformed negative parent");
+    data.hdr.numbones=MAXSTUDIOBONES+1;F5Check(!BuildReferenceBoneMatrices(&data.hdr,reference),"reference guide hierarchy enforces Studio capacity");
+    std::cout<<"F5 actual editor overlay: "<<f5Checks<<" checks PASS; project matrices and GL-state adapter, NO driver/GUI\n";
+}

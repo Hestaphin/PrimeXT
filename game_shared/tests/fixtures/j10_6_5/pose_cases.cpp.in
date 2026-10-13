@@ -1,0 +1,172 @@
+// Extra cases use the real Studio fixture and the extracted production methods.
+// Renderer frame time intentionally differs from the engine client clock.
+static int packetClockSamples=0;
+static void receiveRagdoll(Fixture& f,uint32_t sequence=1,float target=40) {
+    const byte indices[]={2};const Vector relative[]={Vector(3,0,0)};
+    const Vector4D rotations[]={Vector4D(0,0,0,1)};
+    g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,sequence,1,
+        Vector(target,0,0),Vector4D(0,0,0,1),1,indices,relative,rotations);
+}
+static void clearRagdoll(Fixture& f,uint32_t sequence) {
+    g_StudioRenderer.StudioSetRagdollPose(&f.entity,true,false,false,sequence,-1,
+        Vector(),Vector4D(0,0,0,1),0,nullptr,nullptr,nullptr);
+}
+static void drawWithClock(Fixture& f,float rendererTime) {
+    auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+    g_StudioRenderer.m_pModelInstance=inst;
+    g_StudioRenderer.m_pStudioHeader=&f.hdr;
+    RI->currententity=&f.entity;
+    inst->m_protationmatrix=matrix3x4(f.entity.origin,f.entity.angles,Vector(f.entity.curstate.scale));
+    tr.time=rendererTime;
+    g_StudioRenderer.StudioSetupBones();
+    g_StudioRenderer.StudioPublishCollisionPose();
+}
+static void delayedClearCase() {
+    sampleTime=10;Fixture f;f.entity.curstate.iuser1|=CF_RAGDOLL;
+    receiveRagdoll(f);sampleTime+=0.13f;near(query(f,1).GetOrigin().x,40);
+    auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+    f.entity.curstate.iuser1&=~CF_RAGDOLL;query(f,1);
+    const float started=inst->m_flRagdollExitBlendStartTime;
+    sampleTime+=0.09f;const auto before=query(f,1);near(before.GetOrigin().x,21);
+    clearRagdoll(f,2);
+    near(inst->m_flRagdollExitBlendStartTime,started);same(before,query(f,1));
+    sampleTime+=0.10f;near(query(f,1).GetOrigin().x,2);assert(!inst->m_bRagdollExitBlend);
+    clearRagdoll(f,3);assert(!inst->m_bRagdollExitBlend);near(query(f,1).GetOrigin().x,2);
+}
+static void drawClockCase() {
+    sampleTime=20;Fixture f;f.entity.curstate.iuser1|=CF_RAGDOLL;
+    receiveRagdoll(f);sampleTime+=0.06f;
+    const auto predicted=query(f,1);near(predicted.GetOrigin().x,21);
+    auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+    drawWithClock(f,sampleTime-0.04f);same(predicted,inst->m_pbones[1]);
+    near(inst->m_predictionCollisionStamp.sampleTime,sampleTime);
+    sampleTime+=0.02f;drawWithClock(f,sampleTime+0.04f);
+    const auto drawn=inst->m_pbones[1];same(drawn,query(f,1));
+    // A renderer time before packet receipt must not expire a fresh part pose.
+    f.entity.curstate.iuser1&=~CF_RAGDOLL;
+    g_StudioRenderer.UpdateLatchedVars(&f.entity,true);
+    g_StudioRenderer.StudioSetPartPose(&f.entity,1,false,false,1,Vector(20,0,0),Vector4D(0,0,0,1));
+    sampleTime+=0.06f;drawWithClock(f,sampleTime-0.2f);
+    near(inst->m_pbones[1].GetOrigin().x,11);assert(inst->m_partPoseActive[1]);
+    same(inst->m_pbones[2],query(f,2));
+}
+static void packetClockCase() {
+    sampleTime=30;Fixture f;query(f); // initialization uses its own client sample
+    f.entity.curstate.iuser1|=CF_RAGDOLL;
+    packetClockSamples=0;
+    gEngfuncs.GetClientTime=[]()->float {return sampleTime+0.025f*packetClockSamples++;};
+    receiveRagdoll(f);
+    auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+    assert(packetClockSamples==1);near(inst->m_flRagdollLastSnapshotTime,sampleTime);
+    near(inst->m_flRagdollInterpStartTime,sampleTime);
+    gEngfuncs.GetClientTime=[]()->float {return sampleTime;};
+    f.entity.curstate.iuser1&=~CF_RAGDOLL;g_StudioRenderer.UpdateLatchedVars(&f.entity,true);
+    packetClockSamples=0;gEngfuncs.GetClientTime=[]()->float {return sampleTime+0.025f*packetClockSamples++;};
+    g_StudioRenderer.StudioSetPartPose(&f.entity,1,false,false,1,Vector(20,0,0),Vector4D(0,0,0,1));
+    assert(packetClockSamples==1);near(inst->m_partPoseReceived[1],sampleTime);
+    near(inst->m_partPoseStartTime[1],sampleTime);
+    gEngfuncs.GetClientTime=[]()->float {return sampleTime;};
+}
+static void invalidSnapshotCase() {
+    sampleTime=40;Fixture f;f.entity.curstate.iuser1|=CF_RAGDOLL;
+    receiveRagdoll(f);sampleTime+=0.13f;query(f);
+    auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+    const auto stamp=inst->m_predictionCollisionStamp;
+    // Invalid input must not trigger the implicit exit while decoding a packet.
+    f.entity.curstate.iuser1&=~CF_RAGDOLL;
+    g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,2,99,
+        Vector(50,0,0),Vector4D(0,0,0,1),0,nullptr,nullptr,nullptr);
+    assert(inst->m_bRagdollPose&&!inst->m_bRagdollExitBlend);
+    assert(inst->m_iRagdollSnapshotSequence==1);
+    assert(inst->m_predictionCollisionStamp.valid==stamp.valid);
+    near(inst->m_predictionCollisionStamp.sampleTime,stamp.sampleTime);
+    const byte duplicate[]={2,2};const Vector positions[]={Vector(3,0,0),Vector(3,0,0)};
+    const Vector4D rotations[]={Vector4D(0,0,0,1),Vector4D(0,0,0,1)};
+    g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,2,1,
+        Vector(50,0,0),Vector4D(0,0,0,1),2,duplicate,positions,rotations);
+    assert(inst->m_bRagdollPose&&inst->m_iRagdollSnapshotSequence==1);
+    const auto handedOff=query(f,1);near(handedOff.GetOrigin().x,40);
+    assert(!inst->m_bRagdollPose&&inst->m_bRagdollExitBlend);
+}
+static void implicitCaptureCase() {
+    sampleTime=50;Fixture f;f.entity.curstate.iuser1|=CF_RAGDOLL;
+    receiveRagdoll(f);near(query(f,1).GetOrigin().x,2);
+    // No draw/query between receipt and ownership ending: reconstruct at the
+    // hand-off sample rather than replaying the initial cached animation pose.
+    sampleTime+=0.13f;f.entity.curstate.iuser1&=~CF_RAGDOLL;
+    near(query(f,1).GetOrigin().x,40);near(query(f,0).GetOrigin().x,38);
+    drawWithClock(f,sampleTime-0.1f);
+    auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+    near(inst->m_pbones[1].GetOrigin().x,40);
+    sampleTime+=0.09f;near(query(f,1).GetOrigin().x,21);
+}
+static void reentryCase() {
+    sampleTime=60;Fixture f;f.entity.curstate.iuser1|=CF_RAGDOLL;
+    receiveRagdoll(f);sampleTime+=0.13f;query(f,1);
+    clearRagdoll(f,2);sampleTime+=0.09f;const auto before=query(f,1);
+    receiveRagdoll(f,3,60);same(before,query(f,1));
+    sampleTime+=0.13f;near(query(f,1).GetOrigin().x,60);
+    auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+    assert(inst->m_bRagdollPose&&!inst->m_bRagdollExitBlend);
+}
+static void sharedCacheCase() {
+    sampleTime=70;Fixture f;
+    f.hdr.studiohdr2index=offsetof(Fixture,hdr2);f.hdr2.numikchains=1;
+    f.hdr2.ikchainindex=offsetof(Fixture,ikChains);f.ikChains[0].numlinks=3;
+    f.ikChains[0].linkindex=offsetof(Fixture,ikLinks);
+    for(int i=0;i<3;++i)f.ikLinks[i].bone=i;
+    int before=ikUpdates;const auto predicted=query(f);assert(ikUpdates==before+1);
+    auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+    drawWithClock(f,sampleTime-0.5f);same(predicted,inst->m_pbones[2]);
+    same(inst->m_pbones[2],query(f));assert(ikUpdates==before+1);
+    assert(inst->m_collisionPoseStamp.valid&&inst->m_predictionCollisionStamp.valid);
+    near(inst->m_collisionPoseStamp.sampleTime,sampleTime);
+    sampleTime+=0.01f;before=ikUpdates;
+    drawWithClock(f,sampleTime+0.5f);same(inst->m_pbones[2],query(f));assert(ikUpdates==before+1);
+    // Expiry changes active flags during evaluation. The second consumer shares
+    // the completed result rather than evaluating stateful IK a second time.
+    g_StudioRenderer.StudioSetPartPose(&f.entity,1,false,false,1,Vector(20,0,0),Vector4D(0,0,0,1));
+    sampleTime+=1.01f;before=ikUpdates;query(f);assert(!inst->m_partPoseActive[1]);
+    drawWithClock(f,sampleTime-0.5f);query(f);assert(ikUpdates==before+1);
+    f.entity.curstate.movetype=MOVETYPE_FOLLOW;g_StudioRenderer.StudioPublishCollisionPose();
+    assert(!inst->m_collisionPoseStamp.valid&&!inst->m_predictionCollisionStamp.valid);
+    f.entity.curstate.movetype=0;g_StudioRenderer.StudioPublishCollisionPose();
+    assert(!inst->m_collisionPoseStamp.valid);
+}
+static void fallbackCaptureCase() {
+    for(bool drawFirst:{false,true}) {
+        sampleTime=80;Fixture f;f.entity.curstate.iuser1|=CF_RAGDOLL;
+        f.entity.curstate.sequence=99;receiveRagdoll(f);
+        auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        assert(inst->m_bRagdollEntryBlendPending);
+        sampleTime+=0.3f;f.entity.curstate.sequence=0;
+        if(drawFirst)drawWithClock(f,sampleTime-0.2f);
+        near(query(f,1).GetOrigin().x,2);assert(!inst->m_bRagdollEntryBlendPending);
+        near(inst->m_flRagdollInterpStartTime,sampleTime);
+        sampleTime+=0.06f;near(query(f,1).GetOrigin().x,21);
+        drawWithClock(f,sampleTime+0.2f);same(query(f,1),inst->m_pbones[1]);
+    }
+    for(bool drawFirst:{false,true}) {
+        sampleTime=90;Fixture f;f.entity.curstate.sequence=99;
+        g_StudioRenderer.StudioSetPartPose(&f.entity,1,false,false,1,Vector(20,0,0),Vector4D(0,0,0,1));
+        auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        assert(inst->m_partPosePending[1]);
+        sampleTime+=0.3f;f.entity.curstate.sequence=0;
+        if(drawFirst)drawWithClock(f,sampleTime-0.2f);
+        near(query(f,1).GetOrigin().x,2);assert(!inst->m_partPosePending[1]);
+        near(inst->m_partPoseStartTime[1],sampleTime);
+        sampleTime+=0.06f;near(query(f,1).GetOrigin().x,11);
+        drawWithClock(f,sampleTime+0.2f);same(query(f,1),inst->m_pbones[1]);
+    }
+}
+static void additionalCases() {
+    const char* selected=std::getenv("J1065_POSE_CASE");
+    struct Case {const char* name;void(*run)();};
+    const Case cases[]={{"delayed_clear",delayedClearCase},{"draw_clock",drawClockCase},
+        {"packet_clock",packetClockCase},{"invalid_snapshot",invalidSnapshotCase},
+        {"implicit_capture",implicitCaptureCase},{"reentry",reentryCase},
+        {"shared_cache",sharedCacheCase},{"fallback_capture",fallbackCaptureCase}};
+    for(const auto& test:cases)if(!selected||std::strcmp(selected,test.name)==0) {
+        test.run();std::cout<<"PASS J.10.6.5 production pose "<<test.name<<std::endl;
+    }
+}

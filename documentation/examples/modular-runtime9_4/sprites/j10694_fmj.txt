@@ -1,0 +1,5 @@
+4
+weapon 320 j10694_kill_fmj 0 0 32 16
+weapon_s 320 j10694_kill_fmj 0 0 32 16
+weapon 640 j10694_kill_fmj 0 0 32 16
+weapon_s 640 j10694_kill_fmj 0 0 32 16

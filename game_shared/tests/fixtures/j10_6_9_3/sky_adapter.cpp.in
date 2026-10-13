@@ -1,0 +1,114 @@
+// Actual production control flow; views, GL calls and engine textures adapted.
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <string>
+#include <vector>
+#define BIT(x) (1<<(x))
+#define FBitSet(a,b) ((a)&(b))
+#define SetBits(a,b) ((a)|=(b))
+#define ClearBits(a,b) ((a)&=~(b))
+#define ASSERT(x) assert(x)
+#define HOST_ERROR(x) assert(false)
+#define ZoneScoped ((void)0)
+#define GL_DEBUG_SCOPE() ((void)0)
+@PARAMS@
+@STATE_MACRO@
+constexpr int RF_SKYVISIBLE=1,RF_HASDYNLIGHTS=2,MAX_REF_STACK=8,FRUSTUM_FAR=0,FRUSTUM_NEAR=1;
+constexpr int GL_DEPTH_BUFFER_BIT=1,GL_COLOR_BUFFER_BIT=2,GL_TRUE=1,GL_FALSE=0,GL_LEQUAL=3,GL_FRONT=4;
+#define RP_NORMALPASS() (!FBitSet(RI->params,RP_MIRRORVIEW|RP_ENVVIEW|RP_SKYVIEW|RP_SHADOWVIEW|RP_PORTALVIEW|RP_SCREENVIEW))
+using word=unsigned short;
+struct Vector {float x=0,y=0,z=0;Vector()=default;Vector(float a,float b,float c):x(a),y(b),z(c){}
+    Vector operator+(Vector b)const{return {x+b.x,y+b.y,z+b.z};}Vector operator*(float v)const{return {x*v,y*v,z*v};}Vector& operator+=(Vector b){*this=*this+b;return *this;}};
+struct Port {int width=800,height=600;int GetWidth()const{return width;}int GetHeight()const{return height;}void WriteToArray(int* a)const{a[0]=a[1]=0;a[2]=width;a[3]=height;}};
+struct Frustum {void DisablePlane(int){}};
+struct ref_viewcache_t {int flags=RF_SKYVISIBLE,client_frame=0;Vector origin,angles,pvspoint;float fov_x=90,fov_y=60;Port port;Frustum frustum;float skyMins[2][6]{},skyMaxs[2][6]{};};
+struct ref_glstate_t {int token=0;};
+struct cl_entity_t {void* model=nullptr;struct {float fuser2=0,scale=1;Vector angles,origin;}curstate;};
+struct ref_instance_t {RefParams params=RP_NONE;bool skyPortalRendered=false;ref_viewcache_t view;ref_glstate_t glstate;cl_entity_t* currententity=nullptr;void* currentmodel=nullptr;void* currentlight=nullptr;};
+struct ref_viewpass_t {int flags=0,viewentity=0,viewport[4]{};Vector vieworigin,viewangles;float fov_x=0,fov_y=0;};
+struct Cvar {float value=0;};Cvar clearVar,skyVar{1},specVar;Cvar *r_clear=&clearVar,*r_allow_3dsky=&skyVar,*cv_specular=&specVar;
+#define CVAR_TO_BOOL(x) ((x)->value!=0)
+int engineSky[6]={10,11,12,13,14,15};int textureQueries=0;
+struct TextureHandle {int value=0;static TextureHandle GetSkyboxTextures(int i){++textureQueries;return {engineSky[i]};}bool Initialized()const{return value>0;}int ToInt()const{return value;}};
+struct {ref_instance_t stack[MAX_REF_STACK];int stack_position=0;}glState;
+ref_instance_t* RI=&glState.stack[0];cl_entity_t worldEntity,skyEntity;
+struct {bool ignore_2d_skybox=false,fClearScreen=false,sun_light_enabled=false;float frametime=0,saved_frametime=.02f,fogDensity=0;int waterlevel=0;TextureHandle skyboxTextures[6];word skyboxEnv[2]{};Vector modelorg;cl_entity_t* sky_camera=&skyEntity;}tr;
+struct {int c_sky_passes=0;}r_stats;
+static const int r_skyTexOrder[6]={0,2,1,3,4,5};
+float gldepthmin=0,gldepthmax=1,lastFov=0;int clearBits=0,color=0,sideDraws=0;bool subviewWork=false;
+std::vector<std::string> events;
+RefParams lastSkyParams=RP_NONE;
+void R_RenderScene(const ref_viewpass_t*,RefParams);void R_SyncSkyboxTextures();void R_CheckSkyPortal(cl_entity_t*);void R_DrawSkyBox();
+bool Suppressed(){
+#ifdef PER_VIEW_SKY
+return RI->skyPortalRendered;
+#else
+return tr.ignore_2d_skybox;
+#endif
+}
+void Suppress(bool value){
+#ifdef PER_VIEW_SKY
+RI->skyPortalRendered=value;
+#else
+tr.ignore_2d_skybox=value;
+#endif
+}
+void GL_BindShader(void*){}void R_SetupDynamicLights(){}void R_ClearFrameLists(){}
+void GL_DepthMask(int){}void GL_DepthRange(float,float){}void GL_Cull(int){}void GL_Blend(int){}void GL_AlphaTest(int){}void GL_ClipPlane(bool){}
+void pglClearColor(float,float,float,float){}void pglDepthFunc(int){}
+void pglClear(int bits){clearBits=bits;if(bits&GL_COLOR_BUFFER_BIT)color=0;events.push_back("clear");}
+void GL_DrawSkySide(word,int){++sideDraws;color=100;events.push_back("sky-side");}
+cl_entity_t* GET_ENTITY(int){return &worldEntity;}
+float V_CalcFov(float x,int width,int height){lastFov=x;return float(2*std::atan(std::tan(x*3.141592653589793/360)*height/width)*180/3.141592653589793);}
+void R_BuildViewPassHierarchy(){}
+void R_SetupViewCache(const ref_viewpass_t* pass){if(FBitSet(RI->params,RP_SKYPORTALVIEW))lastSkyParams=RI->params;RI->view.origin=pass->vieworigin;RI->view.angles=pass->viewangles;RI->view.flags=RF_SKYVISIBLE;for(int i=0;i<6;++i){RI->view.skyMins[0][i]=RI->view.skyMins[1][i]=-1;RI->view.skyMaxs[0][i]=RI->view.skyMaxs[1][i]=1;}}
+void R_PushRefState();void R_PopRefState();
+void R_RenderSubview(){events.push_back("subview");if(subviewWork&&!FBitSet(RI->params,RP_SKYPORTALVIEW)){R_PushRefState();RI->params=RP_MIRRORVIEW;R_CheckSkyPortal(nullptr);R_PopRefState();color=99;}}
+void R_RenderShadowmaps(){events.push_back("shadow");}
+void R_SetupGLstate(){events.push_back("setup");}void R_UpdateFogParameters(){}
+void R_RenderSolidBrushList(){if(FBitSet(RI->params,RP_SKYPORTALVIEW)){color=200;events.push_back("portal-geometry");}}
+void R_RenderSolidStudioList(){}void HUD_DrawNormalTriangles(){}void R_RenderSurfOcclusionList(){}
+void R_DrawParticles(bool){}void R_RenderDebugStudioList(bool){}void GL_CheckForErrors(){}void R_RenderTransList(){}
+void R_DrawWeather(){}void HUD_DrawTransparentTriangles(){}void R_ResetGLstate(){}
+@PRODUCTION@
+
+int main(int argc,char** argv){assert(argc==2);const std::string name=argv[1];R_InitRefState();ref_viewpass_t pass;
+    RI->view.flags=RF_SKYVISIBLE;for(int i=0;i<6;++i)tr.skyboxTextures[i]=TextureHandle::GetSkyboxTextures(i);textureQueries=0;
+    if(name=="map-sky-sync"||name=="sky-unload"){
+        for(int i=0;i<6;++i)engineSky[i]=name=="sky-unload"?0:100+i;
+        tr.sky_camera=nullptr;R_RenderScene(&pass,RP_DRAW_WORLD);
+        for(int i=0;i<6;++i)assert(tr.skyboxTextures[i].ToInt()==engineSky[i]);assert(textureQueries>=6);
+    }else if(name=="recursive-state"){
+        Suppress(true);R_PushRefState();assert(!Suppressed());Suppress(false);R_PushRefState();Suppress(true);R_PopRefState();assert(!Suppressed());R_PopRefState();assert(Suppressed());
+    }else if(name=="fresh-frame-state"){
+        Suppress(true);R_InitRefState();assert(!Suppressed());
+    }else if(name=="portal-clear"||name=="ordinary-clear"||name=="masked-clear"){
+        tr.fClearScreen=true;clearVar.value=1;color=200;const bool portal=name!="ordinary-clear";
+        R_Clear(name=="masked-clear"?GL_COLOR_BUFFER_BIT:~0,portal);assert((clearBits&GL_COLOR_BUFFER_BIT)==(portal?0:GL_COLOR_BUFFER_BIT));
+        assert(color==(portal?200:0));if(name=="masked-clear")assert(clearBits==0);else assert(clearBits&GL_DEPTH_BUFFER_BIT);
+    }else if(name=="nested-scene-order"||name=="cubemap-portal-clear"||name=="reflection-portal-clear"){
+        subviewWork=true;tr.fClearScreen=true;clearVar.value=1;
+        const RefParams params=name=="cubemap-portal-clear"?RP_ENVVIEW:name=="reflection-portal-clear"?RP_MIRRORVIEW:RP_DRAW_WORLD;
+        R_RenderScene(&pass,params);assert(color==200&&Suppressed()&&glState.stack_position==0);
+        const auto portal=std::find(events.begin(),events.end(),"portal-geometry");assert(portal!=events.end());
+        assert(std::find(events.begin(),portal,"subview")!=portal&&std::find(events.begin(),portal,"shadow")!=portal);
+    }else if(name=="portal-disabled"||name=="portal-overview"||name=="portal-recursion"||name=="portal-null"){
+        if(name=="portal-disabled")skyVar.value=0;if(name=="portal-overview")RI->params=RP_DRAW_OVERVIEW;if(name=="portal-recursion")RI->params=RP_SKYPORTALVIEW;
+        R_CheckSkyPortal(name=="portal-null"?nullptr:&skyEntity);assert(!Suppressed()&&r_stats.c_sky_passes==0);
+    }else if(name=="portal-fov"){
+        skyEntity.curstate.fuser2=120;R_DrawSkyPortal(&skyEntity);assert(lastFov==120);
+    }else if(name=="portal-pass-flags"){
+        for(const auto flags:{RP_DRAW_WORLD|RP_CLIPPLANE,RP_ENVVIEW|RP_DRAW_WORLD,RP_MIRRORVIEW|RP_CLIPPLANE}){
+            RI->params=flags;R_DrawSkyPortal(&skyEntity);
+            assert(int(lastSkyParams)==((int(flags)|int(RP_SKYPORTALVIEW))&~int(RP_CLIPPLANE)));
+            assert(RI->params==flags&&glState.stack_position==0);
+        }
+    }else if(name=="missing-sky-sides"){
+        for(int i=0;i<6;++i){RI->view.skyMins[0][i]=RI->view.skyMins[1][i]=-1;RI->view.skyMaxs[0][i]=RI->view.skyMaxs[1][i]=1;tr.skyboxTextures[i]={0};}
+        R_DrawSkyBox();assert(sideDraws==0);
+    }else assert(false);
+    std::cout<<"PASS production sky method "<<name<<'\n';
+}

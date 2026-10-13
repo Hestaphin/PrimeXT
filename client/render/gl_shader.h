@@ -20,6 +20,7 @@ GNU General Public License for more details.
 #include "gl_export.h"
 #include <vector>
 #include <string>
+#include <cstddef>
 
 #define MAX_OPTIONS_LENGTH		512
 #define MAX_GLSL_PROGRAMS		4096
@@ -108,6 +109,7 @@ typedef enum
 	UT_BONESARRAY,
 	UT_BONEQUATERNION,
 	UT_BONEPOSITION,
+	UT_BONESCALE,
 	UT_SCREENSIZEINV,
 	UT_ZFAR,
 	UT_LIGHTSTYLEVALUES,
@@ -198,6 +200,11 @@ public:
 	int		unit;	// texture unit
 	int		flags;	// hints
 	unicache_t	cache;
+    // Raw storage: uniforms are allocated by the renderer's POD allocator.
+    void *valueCache;
+    size_t valueCacheCapacity;
+    int valueCacheCount;
+    bool valueCacheValid;
 
 	// helpers
 	void SetValue( float v0 )
@@ -251,6 +258,9 @@ public:
 	// passed any data here
 	void SetValue( const void *pdata, int count = -1 );
 	int GetSizeInBytes( void );
+    bool CachedValue(const void *data, size_t bytes, int count) const;
+    void RememberValue(const void *data, size_t bytes, int count);
+    void FreeValueCache();
 };
 
 struct glsl_prog_include

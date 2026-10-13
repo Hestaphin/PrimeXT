@@ -1,0 +1,56 @@
+#include <algorithm>
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
+#include <map>
+#include <string>
+#include <vector>
+#include <strings.h>
+using SpriteHandle=int;
+struct wrect_t{int left=0,right=0,top=0,bottom=0;};
+#include "ammo.h"
+constexpr int MAX_WEAPONS=64,ScreenWidth=640;
+#define Q_snprintf std::snprintf
+#define Q_strcmp std::strcmp
+#define Q_stricmp strcasecmp
+#define Q_max(a,b) std::max(a,b)
+void Q_strncpy(char* to,const char* from,size_t size){std::snprintf(to,size,"%s",from);}
+struct client_sprite_t{char szName[64],szSprite[64];int iRes;wrect_t rc;};
+std::map<std::string,std::vector<client_sprite_t>> lists;
+int loads=0;
+client_sprite_t* SPR_GetList(const char* path,int* count){++loads;auto found=lists.find(path);if(found==lists.end())return nullptr;*count=found->second.size();return found->second.data();}
+client_sprite_t* GetSpriteList(client_sprite_t* list,const char* role,int res,int count){
+    if(!list)return nullptr;for(int i=0;i<count;++i)if(list[i].iRes==res&&!strcmp(list[i].szName,role))return &list[i];return nullptr;}
+int SPR_Load(const char* path){return std::string(path).find("missing")==std::string::npos?int(std::string(path).size()):0;}
+int SPR_Width(int,int){return 24;}int SPR_Height(int,int){return 16;}
+struct {int iHistoryGap=0;} gHR;
+struct {int m_hHudError=99,m_HUD_error=1;wrect_t GetSpriteRect(int){return {0,8,0,8};}} gHUD;
+struct WeaponsResource{WEAPON rgWeapons[MAX_WEAPONS]{};void LoadWeaponSprites(WEAPON*);void SetModularSprites(int,const char*,const char*);};
+@PRODUCTION@
+int main(){
+    lists["sprites/probe.txt"]={{"weapon","old_weapon",640,{1,33,2,18}},
+        {"weapon_s","old_weapon",640,{2,34,3,19}},{"ammo","old_ammo",640,{0,8,0,8}},
+        {"crosshair","old_crosshair",640,{0,4,0,4}}};
+    lists["sprites/custom.txt"]={{"weapon","new_weapon",640,{4,44,5,25}},
+        {"weapon_s","new_weapon",640,{5,45,6,26}},{"crosshair","new_crosshair",640,{0,6,0,6}}};
+    lists["sprites/ammo.txt"]={{"ammo","new_ammo",640,{3,15,4,16}}};
+    WeaponsResource resource;auto& weapon=resource.rgWeapons[32];weapon.iId=32;strcpy(weapon.szName,"probe");
+    resource.LoadWeaponSprites(&weapon);assert(weapon.rcInactive.left==1&&weapon.rcAmmo.right==8);
+    resource.SetModularSprites(32,"sprites/custom.txt","sprites/ammo.txt");
+    assert(weapon.rcInactive.left==4&&weapon.rcAmmo.left==3&&weapon.rcCrosshair.right==6);
+    const int before=loads;resource.SetModularSprites(32,"sprites/custom.txt","sprites/ammo.txt");assert(loads==before);
+    resource.SetModularSprites(32,"sprites/custom.txt","");assert(weapon.rcAmmo.right==8);
+    resource.SetModularSprites(32,"sprites/whole.spr","sprites/ammo.spr");
+    assert(weapon.rcActive.right==24&&weapon.rcActive.bottom==16&&weapon.rcAmmo.right==24);
+    assert(weapon.rcCrosshair.right==4); // standalone selection icons keep the baseline crosshair
+    resource.SetModularSprites(32,"sprites/missing.txt","sprites/missing.spr");
+    assert(weapon.rcInactive.left==1&&weapon.rcAmmo.right==8);
+    resource.SetModularSprites(32,"","");assert(weapon.rcInactive.left==1&&weapon.rcAmmo.right==8);
+    const int unchanged=loads;resource.SetModularSprites(-1,"","");resource.SetModularSprites(64,"","");assert(loads==unchanged);
+    resource.SetModularSprites(32,"sprites/custom.txt","sprites/ammo.txt");
+    resource.LoadWeaponSprites(&weapon);assert(weapon.rcInactive.left==4&&weapon.rcAmmo.left==3); // VidInit reload
+    resource.SetModularSprites(32,"sprites/whole.spr","sprites/ammo.spr");strcpy(weapon.szName,"absent");
+    resource.LoadWeaponSprites(&weapon);assert(weapon.rcActive.right==24&&weapon.rcAmmo.right==24);
+    std::cout<<"PASS real HUD sprite methods: lists, standalone sprites, missing-resource fallback, cached action, bounds and video reload\n";
+}

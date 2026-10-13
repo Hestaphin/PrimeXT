@@ -34,6 +34,7 @@
 #include "StudioModel.h"
 #include "pakviewer.h"
 #include "FileAssociation.h"
+#include "PhysicsAssetEditor.h"
 #include "file_system.h"
 #include "stringlib.h"
 #include "app_info.h"
@@ -244,7 +245,7 @@ MDLViewer :: MDLViewer() :
 
 	mb->addMenu ("File", menuFile);
 	mb->addMenu ("Options", menuOptions);
-	//mb->addMenu ("Tools", menuView);
+	mb->addMenu ("Tools", menuView);
 	mb->addMenu ("Help", menuHelp);
 
 	mxMenu *menuRecentModels = new mxMenu ();
@@ -293,6 +294,7 @@ MDLViewer :: MDLViewer() :
 	//menuOptions->add ("Dump Model Info", IDC_OPTIONS_DUMP);
 #endif
 
+	menuView->add ("Physics Asset Editor...", IDC_VIEW_PHYSICSASSETEDITOR);
 	//menuView->add ("File Associations...", IDC_VIEW_FILEASSOCIATIONS);
 
 #ifdef WIN32
@@ -320,6 +322,9 @@ MDLViewer :: MDLViewer() :
 	d_cpl->setGlWindow (d_GlWindow);
 	d_GlWindow->setControlPanel(d_cpl);
 	g_GlWindow = d_GlWindow;
+
+	// Physics Asset Editor shares the model viewer viewport for visualization.
+	d_physicsEditor = new PhysicsAssetEditor(this, *m_studioModel, m_settings);
 
 	// finally create the pakviewer window
 	d_PAKViewer = new PAKViewer (this, *m_studioModel);
@@ -624,6 +629,14 @@ MDLViewer::handleEvent (mxEvent *event)
 
 		case IDC_OPTIONS_DUMP:
 			d_cpl->dumpModelInfo ();
+			break;
+
+		case IDC_VIEW_PHYSICSASSETEDITOR:
+			if( d_physicsEditor )
+			{
+				d_physicsEditor->setVisible(true);
+				d_physicsEditor->redraw();
+			}
 			break;
 
 		case IDC_VIEW_FILEASSOCIATIONS:

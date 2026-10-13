@@ -26,7 +26,7 @@ public:
 	// ENUMS
 	enum { Action, Size, Timer, Idle, Show, Hide,
 		MouseUp, MouseDown, MouseMove, MouseDrag,
-		KeyUp, KeyDown, MouseWheel
+		KeyUp, KeyDown, MouseWheel, Close
 	};
 
 	enum { MouseLeftButton = 1, MouseRightButton = 2, MouseMiddleButton = 4};

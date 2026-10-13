@@ -1,0 +1,139 @@
+// Engine/GL/view adapters. Matrices, view state and subview functions are real.
+#include "event_api.h"
+#undef GL_DEBUG_SCOPE
+#define GL_DEBUG_SCOPE() ((void)0)
+#define MIRROR_PLANE_EPSILON 0.1f
+ref_stats_t r_stats;
+engine_studio_api_t IEngineStudio = {};
+int r_currentMessageNum = 100;
+static cvar_t recursion = {};
+cvar_t *r_recursion_depth = &recursion;
+static cl_entity_t *selectedCamera;
+static int allocationResult = 1, capturedCalls, matrixCalls, metadataCalls, firstPersonCalls;
+static ref_viewpass_t capturedView;
+static gl_state_t mirrorCache;
+gl_state_t *GL_GetCache(word) { return &mirrorCache; }
+void GL_BindShader(glsl_program_t *s) { RI->currentshader = s; }
+void R_SetupDynamicLights() {}
+void GL_BindFBO(GLuint f) { glState.frameBuffer = f; }
+bool R_CheckOutside() { return false; }
+int R_AllocateSubviewTexture(const CViewport &, texFlags_t) {
+    if(allocationResult > 0) {
+        tr.num_subview_used = allocationResult;
+        tr.subviewTextures[allocationResult-1].texframe = tr.realframecount;
+    }
+    return allocationResult;
+}
+void R_RenderScene(const ref_viewpass_t *v, RefParams) { capturedView = *v; ++capturedCalls; }
+void V_CalcFirstPersonRefdef(ref_params_t *p) {
+    ++firstPersonCalls;
+    VectorCopy(Vector(40,50,60), p->vieworg); VectorCopy(Vector(10,20,30), p->viewangles);
+}
+
+/* SUBVIEW_MAIN */
+static Vector portalOrigin(/* PORTAL_ORIGIN */);
+static Vector destinationOrigin(/* DESTINATION_ORIGIN */);
+static Vector destinationAngles(/* DESTINATION_ANGLES */);
+static Vector monitorOrigin(/* MONITOR_ORIGIN */);
+static Vector cameraOrigin(/* CAMERA_ORIGIN */);
+static Vector cameraAngles(/* CAMERA_ANGLES */);
+static const char *textureNames[] = {/* PORTAL_TEXTURE_NAMES */};
+
+int main(int argc, char **argv) {
+    assert(argc == 2); SetupApi(); R_InitRefState(); recursion.value = 2;
+    std::string test = argv[1]; tr.realframecount = 100; tr.time = 1;
+    world->features = WORLD_HAS_PORTALS | WORLD_HAS_SCREENS | WORLD_HAS_MIRRORS;
+    RI->view.entity = 1; RI->view.port = CViewport(0,0,640,480);
+    RI->view.fov_x = 90; RI->view.fov_y = 60; RI->view.farClip = 4096;
+    VectorCopy(Vector(1,0,0), RI->view.matrix[0]);
+    VectorCopy(Vector(0,-1,0), RI->view.matrix[1]);
+    VectorCopy(Vector(0,0,1), RI->view.matrix[2]);
+    RI->view.origin = portalOrigin;
+    model_t brush = {}, sprite = {}; brush.type = mod_brush; sprite.type = mod_sprite;
+    texture_t texture = {}; texture.width = texture.height = 64;
+    mtexinfo_t texinfo = {}; texinfo.texture = &texture;
+    msurface_t surface = {}; mextrasurf_t extra = {}; mplane_t plane = {};
+    cl_entity_t parent = {}, camera = {}, otherParent = {};
+    parent.model = &brush; parent.origin = portalOrigin;
+    parent.curstate.sequence = 10; parent.curstate.messagenum = 100;
+    camera.index = camera.curstate.number = 10; camera.model = &sprite;
+    camera.curstate.messagenum = 100; camera.origin = destinationOrigin; camera.angles = destinationAngles;
+    selectedCamera = &camera;
+    static event_api_t eventApi = {};
+    eventApi.EV_IsLocal = [](int index) { return index == 9 ? 1 : 0; };
+    gEngfuncs.pEventAPI = &eventApi;
+    gEngfuncs.GetEntityByIndex = [](int index) { return index == 10 ? selectedCamera : nullptr; };
+    gEngfuncs.GetLocalPlayer = []() { return selectedCamera; };
+    IEngineStudio.Mod_Extradata = [](model_t *) -> void * { ++metadataCalls; return nullptr; };
+    surface.info = &extra; surface.texinfo = &texinfo; surface.plane = &plane;
+    surface.flags = SURF_PORTAL; extra.surf = &surface; extra.parent = &parent;
+    RI->frame.num_subview_faces = 1; RI->frame.subview_faces[0] = &surface;
+    if(test == "bsp_portal" || test == "bsp_monitor") {
+        bool found = false;
+        for(const char *name : textureNames) {
+            std::strcpy(texture.name, name); surface.flags = 0; world->features = 0;
+            Mod_SetWorldSurfaceTextureFlags(&surface);
+            if(test == "bsp_portal" && !std::strcmp(name,"PORTAL")) {
+                assert((surface.flags&SURF_PORTAL) && (world->features&WORLD_HAS_PORTALS)); found = true;
+            }
+            if(test == "bsp_monitor" && !std::strcmp(name,"MONITOR")) {
+                assert((surface.flags&SURF_SCREEN) && (world->features&WORLD_HAS_SCREENS)); found = true;
+            }
+        }
+        assert(found);
+    } else if(test == "portal_clone_same" || test == "portal_clone_distinct") {
+        msurface_t source = surface; mextrasurf_t sourceExtra = extra;
+        source.info = &sourceExtra; sourceExtra.subtexture[0] = 1;
+        otherParent = parent;
+        sourceExtra.parent = test == "portal_clone_same" ? &parent : &otherParent;
+        glState.stack_position = 1;
+        assert(R_CheckPortalSource(&surface,&source) == (test == "portal_clone_same"));
+    } else {
+        const bool screen = test.find("screen_") == 0;
+        if(screen) {
+            surface.flags = SURF_SCREEN; parent.origin = monitorOrigin;
+            camera.origin = cameraOrigin; camera.angles = cameraAngles;
+        }
+        if(test.find("camera_missing") != std::string::npos) selectedCamera = nullptr;
+        if(test.find("camera_stale") != std::string::npos) camera.curstate.messagenum = 99;
+        if(test == "parent_stale") parent.curstate.messagenum = 99;
+        if(test == "screen_local" || test == "screen_local_thirdperson") {
+            camera.player = true;
+            VectorCopy(Vector(10,20,30), tr.viewparams.vieworg);
+            VectorCopy(Vector(1,2,3), tr.viewparams.viewangles);
+            tr.viewparams.maxclients = 1;
+            tr.viewparams.viewentity = test == "screen_local" ? 1 : 5;
+        }
+        if(test == "fallback_allocation_failure") { fbo = false; allocationResult = 0; }
+        if(test == "fbo_allocation_failure") allocationResult = 0;
+        extra.subtexture[0] = 7;
+        R_RenderSubview();
+        assert(glState.stack_position == 0 && RI == &glState.stack[0]);
+        if(test.find("camera_") != std::string::npos || test == "parent_stale") {
+            assert(capturedCalls == 0 && extra.subtexture[0] == 0);
+        } else if(test == "fallback_allocation_failure") {
+            assert(capturedCalls == 1 && extra.subtexture[0] == 0);
+        } else if(test == "fbo_allocation_failure") {
+            assert(capturedCalls == 0 && extra.subtexture[0] == 0);
+            assert(glState.stack[1].currententity == nullptr && glState.stack[1].currentmodel == nullptr);
+        } else {
+            assert(capturedCalls == 1 && extra.subtexture[0] == 1);
+            assert(capturedView.viewport[2] > 0 && capturedView.viewport[3] > 0);
+            assert(capturedView.fov_x > 0 && capturedView.fov_y > 0);
+            if(test == "portal_valid") {
+                assert((capturedView.vieworigin-destinationOrigin).Length() < 0.01f);
+                assert(capturedView.flags&RP_PORTALVIEW);
+            } else if(test == "screen_remote") {
+                assert(capturedView.vieworigin == cameraOrigin);
+                assert(capturedView.flags&RP_SCREENVIEW); assert(metadataCalls == 0);
+                assert(capturedView.viewentity == 10);
+            } else if(test == "screen_local" || test == "screen_local_thirdperson") {
+                assert(capturedView.vieworigin == (test == "screen_local" ? Vector(10,20,30) : Vector(40,50,60)));
+                assert((capturedView.viewangles - (test == "screen_local" ? Vector(1,2,3) : Vector(10,20,30))).Length() < 0.02f);
+                assert(capturedView.flags&RP_FORCE_NOPLAYER);
+                assert(firstPersonCalls == (test == "screen_local_thirdperson" ? 1 : 0));
+            } else { assert(false && "Unknown case"); }
+        }
+    }
+    std::printf("PASS %s\n", test.c_str());
+}
