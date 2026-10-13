@@ -23,6 +23,8 @@
 #include "r_efx.h"
 #include "gl_studio.h"
 #include "postfx_controller.h"
+#include "ragdoll_net.h"
+#include "physics_part_net.h"
 
 // CHud message handlers
 DECLARE_HUDMESSAGE( Logo );
@@ -44,6 +46,9 @@ DECLARE_HUDMESSAGE( KillDecals );
 DECLARE_HUDMESSAGE( CustomDecal );
 DECLARE_HUDMESSAGE( StudioDecal );
 DECLARE_HUDMESSAGE( SetupBones );
+DECLARE_HUDMESSAGE( RagdollPose );
+DECLARE_HUDMESSAGE( PartPose );
+DECLARE_HUDMESSAGE( RagdollDecal );
 DECLARE_HUDMESSAGE( PostFxSettings );
 
 int CHud :: InitHUDMessages( void )
@@ -67,6 +72,11 @@ int CHud :: InitHUDMessages( void )
 	HOOK_MESSAGE( CustomDecal );
 	HOOK_MESSAGE( StudioDecal );
 	HOOK_MESSAGE( SetupBones );
+	HOOK_MESSAGE( RagdollPose );
+	HOOK_MESSAGE( PartPose );
+	HOOK_MESSAGE( RagdollDecal );
+    extern int __MsgFunc_ModCfg(const char*, int, void*);
+    gEngfuncs.pfnHookUserMsg("ModCfg", __MsgFunc_ModCfg);
 	HOOK_MESSAGE( PostFxSettings );
 
 	m_iFOV = 0;
@@ -485,6 +495,110 @@ int CHud :: MsgFunc_SetupBones( const char *pszName, int iSize, void *pbuf )
 	return 1;
 }
 
+
+int CHud :: MsgFunc_RagdollPose( const char *pszName, int iSize, void *pbuf )
+{
+	if( iSize < ragdollnet::kHeaderBytes )
+	{
+		ALERT(at_error, "MsgFunc_RagdollPose: truncated header (%d bytes)\n", iSize);
+		return 1;
+	}
+
+	static byte boneIndex[MAXSTUDIOBONES];
+	static Vector relPos[MAXSTUDIOBONES];
+	static Vector4D relQuat[MAXSTUDIOBONES];
+
+	BEGIN_READ(pszName, pbuf, iSize);
+		const int entityIndex = READ_SHORT();
+		const int version = READ_BYTE();
+		const int flags = READ_BYTE();
+		const uint32_t sequence = static_cast<uint32_t>( READ_LONG() );
+		const int rootBone = READ_BYTE();
+		const int boneCount = READ_BYTE();
+
+		if( version != ragdollnet::kProtocolVersion )
+		{
+			END_READ();
+			ALERT(at_error, "MsgFunc_RagdollPose: unsupported protocol %d\n", version);
+			return 1;
+		}
+		if( boneCount < 0 || boneCount >= MAXSTUDIOBONES )
+		{
+			END_READ();
+			ALERT(at_error, "MsgFunc_RagdollPose: invalid bone count %d\n", boneCount);
+			return 1;
+		}
+		const int requiredBytes = ragdollnet::kHeaderBytes + boneCount * ragdollnet::kBoneRecordBytes;
+		if( iSize != requiredBytes )
+		{
+			END_READ();
+			ALERT(at_error, "MsgFunc_RagdollPose: malformed size (%d != %d)\n", iSize, requiredBytes);
+			return 1;
+		}
+
+		Vector rootPos;
+		rootPos.x = READ_FLOAT(); rootPos.y = READ_FLOAT(); rootPos.z = READ_FLOAT();
+		Vector4D rootQuat;
+		rootQuat.x = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseQuaternionScale;
+		rootQuat.y = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseQuaternionScale;
+		rootQuat.z = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseQuaternionScale;
+		rootQuat.w = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseQuaternionScale;
+
+		for( int i = 0; i < boneCount; ++i )
+		{
+			boneIndex[i] = READ_BYTE();
+			relPos[i].x = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseRelativePositionScale;
+			relPos[i].y = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseRelativePositionScale;
+			relPos[i].z = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseRelativePositionScale;
+			relQuat[i].x = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseQuaternionScale;
+			relQuat[i].y = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseQuaternionScale;
+			relQuat[i].z = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseQuaternionScale;
+			relQuat[i].w = static_cast<int16_t>( READ_SHORT() ) * ragdollnet::kInverseQuaternionScale;
+		}
+	END_READ();
+
+	cl_entity_t *ent = GET_ENTITY(entityIndex);
+	if( !ent ) return 1;
+
+	R_StudioSetRagdollPose(
+		ent,
+		(flags & ragdollnet::SnapshotClear) != 0,
+		(flags & ragdollnet::SnapshotSleeping) != 0,
+		(flags & ragdollnet::SnapshotFrozen) != 0,
+		sequence,
+		rootBone,
+		rootPos,
+		rootQuat,
+		boneCount,
+		boneIndex,
+		relPos,
+		relQuat );
+	return 1;
+}
+
+int CHud :: MsgFunc_RagdollDecal( const char *pszName, int iSize, void *pbuf )
+{
+	BEGIN_READ(pszName, pbuf, iSize);
+		const int entityIndex = READ_SHORT();
+		const int modelIndex = READ_SHORT();
+		const int boneIndex = READ_BYTE();
+		Vector localPosition;
+		localPosition.x = READ_COORD(); localPosition.y = READ_COORD(); localPosition.z = READ_COORD();
+		Vector localNormal;
+		localNormal.x = READ_COORD() * 0.001f; localNormal.y = READ_COORD() * 0.001f; localNormal.z = READ_COORD() * 0.001f;
+		char name[80];
+		Q_strncpy( name, READ_STRING(), sizeof( name ));
+		const int flags = READ_BYTE();
+	END_READ();
+
+	cl_entity_t *ent = GET_ENTITY( entityIndex );
+	if( !ent ) return 1;
+	if( !ent->model && modelIndex > 0 ) ent->model = IEngineStudio.GetModelByIndex( modelIndex );
+	if( !ent->model || ent->model->type != mod_studio ) return 1;
+	g_StudioRenderer.StudioRagdollDecalShoot( boneIndex, localPosition, localNormal, name, ent, flags );
+	return 1;
+}
+
 int _cdecl CHud::MsgFunc_PostFxSettings(const char * pszName, int iSize, void * pbuf)
 {
 	CPostFxParameters postFxParams;
@@ -517,4 +631,28 @@ int CHud :: MsgFunc_MusicFade( const char *pszName, int iSize, void *pbuf )
 	END_READ();
 
 	return 1;
+}
+
+// I.8: independent from full-ragdoll messages. One authoritative Studio bone
+// per message lets a moving door be physical while the chassis stays animated.
+int CHud::MsgFunc_PartPose(const char *pszName, int iSize, void *pbuf)
+{
+    if (iSize != partnet::kWireBytes) return 1;
+    BEGIN_READ(pszName,pbuf,iSize);
+    const int index=READ_SHORT();
+    const int version=READ_BYTE();
+    const int flags=READ_BYTE();
+    const uint32_t sequence=static_cast<uint32_t>(READ_LONG());
+    const int bone=READ_BYTE();
+    Vector position; position.x=READ_FLOAT(); position.y=READ_FLOAT(); position.z=READ_FLOAT();
+    Vector4D rotation; rotation.x=READ_FLOAT(); rotation.y=READ_FLOAT(); rotation.z=READ_FLOAT(); rotation.w=READ_FLOAT();
+    END_READ();
+    if (version != partnet::kVersion || (flags & ~(partnet::kClear|partnet::kDetached)) ||
+        bone < 0 || bone >= MAXSTUDIOBONES ||
+        !partnet::ValidPosition(position.x,position.y,position.z) ||
+        !partnet::ValidQuat(rotation.x,rotation.y,rotation.z,rotation.w)) return 1;
+    cl_entity_t *ent=GET_ENTITY(index);
+    if (ent) R_StudioSetPartPose(ent,bone,(flags & partnet::kClear)!=0,
+        (flags & partnet::kDetached)!=0,sequence,position,rotation);
+    return 1;
 }

@@ -62,7 +62,8 @@
 #define FTRACE_SIMPLEBOX		(1<<0)	// Traceline with a simple box
 #define FTRACE_IGNORE_GLASS		(1<<1)	// traceline will be ignored entities with rendermode != kRenderNormal
 #define FTRACE_IGNORE_ALPHATEST	(1<<2)	// all the studio models with transparent surfaces will be traced like normal surfaces
-#define FTRACE_MATERIAL_TRACE	(1<<3)	// use original (not cooked with physics engine) mesh for tracing, to trace studiomodel materials
+#define FTRACE_MATERIAL_TRACE	(1<<3)	// request studiomodel impact material; original mesh remains authoritative when no collision proxy exists
+#define FTRACE_BULLET_PHYSICS	(1<<4)	// bullet traces skip animated hitboxes of active ragdolls; .phys raycasts own bullet hits
 
 // walkmove modes
 #define WALKMOVE_NORMAL		0	// normal walkmove
@@ -142,6 +143,7 @@
 // custom flags for entities
 #define CF_STATIC_ENTITY		(1<<0)	// this entity is completely static (non-moving brush or env_static)
 #define CF_STATIC_LIGHTMAPPED	(1<<1)	// this entity have a baked lightmaps
+#define CF_RAGDOLL			(1<<8)	// skeletal entity is currently driven by a networked ragdoll pose
 
 // custom flags for func_monitor
 #define CF_NOASPECT			(1<<0)	// don't calc fov_y for func_monitor

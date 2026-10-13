@@ -1,0 +1,13 @@
+# Available verification and limits
+
+The release runner executes nine groups when both supplied Barney inputs are present: production preview/CPU skinning/reference fitting; production packet/prediction/draw; compact GLSL expression math; runtime capture with a mathematical SDK facade; actual MDL generation/passive poses/vertices/authoring; three complete Linux client translation units; and the F3/F2/F1/F0 inherited chain.
+
+Focused cases cover scales 0.5/1/2.5, ancestor/descendant/side branches, reflected preview, 100 stationary evaluations, out-of-order hierarchies, cycles/nonfinite matrices, byte-weight shortfall/overshoot, invalid CPU indices, first-query entry, changing driven masks, interpolation, exit and physical parts. The shader test compiles the actual GLSL helper expressions as CPU arithmetic; **it does not compile GLSL in a graphics driver**. The runtime test executes CaptureSimulationPose with SDK-style mathematical getters; **it does not integrate PhysX**.
+
+The actual MDL test validates all 24 bone matrices and 382 filtered rigid vertices under controlled transforms at scales 0.5/1/2. Peak errors are recorded in examples/barney_generation.json. It generates concrete Human Standard/Free Rotation v5 bodies/joints/pairs, saves/reloads them, and reuses the 23 actual authoring/edit/persistence checks. Weighted skinning/reference extraction is covered separately by synthetic production-method fixtures because the uploaded MDL uses rigid weights.
+
+The baseline reproducer runs extracted F3 preview/skin methods against the same synthetic skeleton: ancestor error 99.1879, passive child error 7.81188 at scale 2.5, unit physical basis instead of 2.5, and a CPU palette rounding error 0.0823526. These are isolated transform failures, not screenshots or solver measurements.
+
+Native build evidence is BLOCKED before configuration/link because CMake is unavailable. No Windows/MSVC, Qt native GUI, real SDK solver drop, live GPU shader, game, network/save engine, second real skeleton or FPS run is claimed. Three inherited unchanged Xash syntax groups may report BLOCKED due to missing generated library_suffix.h; route verification checks all Xash source bytes/modes independently.
+
+The ZIP includes full logs/JSON and manifest-based patch routes. Use one route matching your current exact release. Route verification rebuilds from both original ZIPs and each earlier cumulative bundle, compares every source byte/executable mode and rejects missing/extra files. No binaries are shipped. The native runner, existing F3 real-SDK capture target and ACCEPTANCE.md enable follow-up on a configured build/game machine.

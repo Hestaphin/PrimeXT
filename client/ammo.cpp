@@ -29,6 +29,65 @@ WEAPON		*gpLastSel;	// Last weapon menu selection
 static wrect_t	nullRc;
 WeaponsResource	gWR;
 
+static void SelectHudWeapon( const WEAPON *pWeapon )
+{
+	if( !pWeapon || !pWeapon->szName[0] )
+		return;
+
+	// WeaponList names are IDs, not commands. Keep the name to one bounded
+	// console token, including for legacy weapon_ names.
+	size_t length = 0;
+	for( ; length < sizeof( pWeapon->szName ); ++length )
+	{
+		const unsigned char c = pWeapon->szName[length];
+		if( !c ) break;
+		if( !( ( c >= 'a' && c <= 'z' ) || ( c >= 'A' && c <= 'Z' ) ||
+			( c >= '0' && c <= '9' ) || c == '_' || c == '-' ))
+			return;
+	}
+	if( length == sizeof( pWeapon->szName ))
+		return;
+
+	char command[MAX_WEAPON_NAME + sizeof( "use " )];
+	Q_snprintf( command, sizeof( command ), "use %s", pWeapon->szName );
+	ServerCmd( command );
+}
+
+static bool ModularSpriteIsList(const char* path) {
+    const size_t length = strlen(path);
+    return length >= 4 && !Q_stricmp(path + length - 4, ".txt");
+}
+static void LoadModularIcon(const char* path, const char* role, int resolution,
+                            SpriteHandle& handle, wrect_t& rect) {
+    if (!path || !path[0]) return;
+    char spritePath[256];
+    if (ModularSpriteIsList(path)) {
+        int count = 0;
+        auto* list = SPR_GetList(const_cast<char*>(path), &count);
+        auto* sprite = list ? GetSpriteList(list, role, resolution, count) : nullptr;
+        if (!sprite) return;
+        Q_snprintf(spritePath, sizeof(spritePath), "sprites/%s.spr", sprite->szSprite);
+        const auto loaded = SPR_Load(spritePath);
+        if (loaded) { handle = loaded; rect = sprite->rc; }
+    } else {
+        const auto loaded = SPR_Load(path);
+        if (loaded) {
+            handle = loaded;
+            rect.left = rect.top = 0;
+            rect.right = SPR_Width(loaded, 0);
+            rect.bottom = SPR_Height(loaded, 0);
+        }
+    }
+}
+void WeaponsResource::SetModularSprites(int id, const char* hud, const char* ammo) {
+    if (id < 1 || id >= MAX_WEAPONS || rgWeapons[id].iId != id) return;
+    auto& weapon = rgWeapons[id];
+    if (!Q_strcmp(weapon.modularHudSprite, hud) && !Q_strcmp(weapon.modularAmmoSprite, ammo)) return;
+    Q_strncpy(weapon.modularHudSprite, hud, sizeof(weapon.modularHudSprite));
+    Q_strncpy(weapon.modularAmmoSprite, ammo, sizeof(weapon.modularAmmoSprite));
+    LoadWeaponSprites(&weapon);
+}
+
 int WeaponsResource :: HasAmmo( WEAPON *p )
 {
 	if( !p )
@@ -44,13 +103,13 @@ int WeaponsResource :: HasAmmo( WEAPON *p )
 
 void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 {
-	int i, iRes;
+	int i = 0, iRes;
 	
 	if( ScreenWidth < 640 )
 		iRes = 320;
 	else iRes = 640;
 
-	char sz[128];
+	char sz[256];
 
 	if ( !pWeapon ) return;
 
@@ -65,12 +124,22 @@ void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 	
 	Q_snprintf( sz, sizeof( sz ), "sprites/%s.txt", pWeapon->szName );
 	client_sprite_t *pList = SPR_GetList( sz, &i );
-
-	if( !pList ) return;
+    auto* baseList = pList;
+    const int baseCount = pList ? i : 0;
+    if (pWeapon->modularHudSprite[0] && ModularSpriteIsList(pWeapon->modularHudSprite)) {
+        int customCount = 0;
+        auto* custom = SPR_GetList(pWeapon->modularHudSprite, &customCount);
+        if (custom) { pList = custom; i = customCount; }
+    }
+    if (!pList) i = 0;
+    auto spriteFor = [&](const char* role) {
+        auto* sprite = GetSpriteList(pList, role, iRes, i);
+        return sprite ? sprite : GetSpriteList(baseList, role, iRes, baseCount);
+    };
 
 	client_sprite_t *p;
 	
-	p = GetSpriteList( pList, "crosshair", iRes, i );
+	p = spriteFor("crosshair");
 	if( p )
 	{
 		Q_snprintf( sz, sizeof( sz ), "sprites/%s.spr", p->szSprite );
@@ -79,7 +148,7 @@ void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 	}
 	else pWeapon->hCrosshair = 0;
 
-	p = GetSpriteList( pList, "autoaim", iRes, i );
+	p = spriteFor("autoaim");
 	if( p )
 	{
 		Q_snprintf( sz, sizeof( sz ), "sprites/%s.spr", p->szSprite );
@@ -88,7 +157,7 @@ void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 	}
 	else pWeapon->hAutoaim = 0;
 
-	p = GetSpriteList( pList, "zoom", iRes, i );
+	p = spriteFor("zoom");
 	if( p )
 	{
 		Q_snprintf( sz, sizeof( sz ), "sprites/%s.spr", p->szSprite );
@@ -101,7 +170,7 @@ void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 		pWeapon->rcZoomedCrosshair = pWeapon->rcCrosshair;
 	}
 
-	p = GetSpriteList( pList, "zoom_autoaim", iRes, i );
+	p = spriteFor("zoom_autoaim");
 	if( p )
 	{
 		Q_snprintf( sz, sizeof( sz ), "sprites/%s.spr", p->szSprite );
@@ -114,7 +183,7 @@ void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 		pWeapon->rcZoomedAutoaim = pWeapon->rcZoomedCrosshair;
 	}
 
-	p = GetSpriteList( pList, "weapon", iRes, i );
+	p = spriteFor("weapon");
 	if( p )
 	{
 		Q_snprintf( sz, sizeof( sz ), "sprites/%s.spr", p->szSprite );
@@ -129,7 +198,7 @@ void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 		gHR.iHistoryGap = Q_max( gHR.iHistoryGap, pWeapon->rcActive.bottom - pWeapon->rcActive.top );
 	}
 
-	p = GetSpriteList( pList, "weapon_s", iRes, i );
+	p = spriteFor("weapon_s");
 	if( p )
 	{
 		Q_snprintf( sz, sizeof( sz ), "sprites/%s.spr", p->szSprite );
@@ -142,7 +211,7 @@ void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 		pWeapon->rcActive = gHUD.GetSpriteRect( gHUD.m_HUD_error );
 	}
 
-	p = GetSpriteList( pList, "ammo", iRes, i );
+	p = spriteFor("ammo");
 	if( p )
 	{
 		Q_snprintf( sz, sizeof( sz ), "sprites/%s.spr", p->szSprite );
@@ -152,7 +221,7 @@ void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 	}
 	else pWeapon->hAmmo = 0;
 
-	p = GetSpriteList( pList, "ammo2", iRes, i );
+	p = spriteFor("ammo2");
 	if( p )
 	{
 		Q_snprintf( sz, sizeof( sz ), "sprites/%s.spr", p->szSprite );
@@ -161,6 +230,11 @@ void WeaponsResource :: LoadWeaponSprites( WEAPON *pWeapon )
 		gHR.iHistoryGap = Q_max( gHR.iHistoryGap, pWeapon->rcActive.bottom - pWeapon->rcActive.top );
 	}
 	else pWeapon->hAmmo2 = 0;
+    if (pWeapon->modularHudSprite[0] && !ModularSpriteIsList(pWeapon->modularHudSprite)) {
+        LoadModularIcon(pWeapon->modularHudSprite, "weapon", iRes, pWeapon->hInactive, pWeapon->rcInactive);
+        LoadModularIcon(pWeapon->modularHudSprite, "weapon_s", iRes, pWeapon->hActive, pWeapon->rcActive);
+    }
+    LoadModularIcon(pWeapon->modularAmmoSprite, "ammo", iRes, pWeapon->hAmmo, pWeapon->rcAmmo);
 }
 
 // Returns the first weapon for a given slot.
@@ -346,7 +420,7 @@ void CHudAmmo::Think( void )
 	{
 		if( gpActiveSel != (WEAPON *)1 )
 		{
-			ServerCmd( gpActiveSel->szName );
+			SelectHudWeapon( gpActiveSel );
 			g_weaponselect = gpActiveSel->iId;
 		}
 
@@ -420,7 +494,7 @@ void WeaponsResource :: SelectSlot( int iSlot, int fAdvance, int iDirection )
 			if( !p2 )
 			{	
 				// only one active item in bucket, so change directly to weapon
-				ServerCmd( p->szName );
+				SelectHudWeapon( p );
 				g_weaponselect = p->iId;
 				return;
 			}

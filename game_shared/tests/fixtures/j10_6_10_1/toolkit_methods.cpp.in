@@ -1,0 +1,91 @@
+// Execute production getter and native close-dispatch snippets with explicit
+// service adapters; not a Qt or Windows build or native event-loop test.
+#include <mx/mxEvent.h>
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <string>
+struct QByteArray
+{
+    std::string bytes;
+    QByteArray()=default;explicit QByteArray(std::string s):bytes(std::move(s)) {}
+    void clear() { bytes.clear(); }
+    const char *constData() const { return bytes.c_str(); }
+};
+struct QString
+{
+    std::string bytes;
+    explicit QString(std::string s):bytes(std::move(s)) {}
+    QByteArray toLocal8Bit() const { return QByteArray(bytes); }
+};
+struct QWidget
+{
+    std::string type,value;
+    explicit QWidget(std::string name="Widget"):type(std::move(name)) {}
+    virtual ~QWidget()=default;
+    bool inherits(const char *name) const { return type==name; }
+    QString windowTitle() const { return QString(value); }
+};
+#define TEXT_WIDGET(Name) struct Name:QWidget { Name():QWidget(#Name){} QString text() const {return QString(value);} };
+TEXT_WIDGET(QPushButton)
+TEXT_WIDGET(QCheckBox)
+TEXT_WIDGET(QRadioButton)
+TEXT_WIDGET(QLineEdit)
+TEXT_WIDGET(QLabel)
+struct QGroupBox:QWidget { QGroupBox():QWidget("QGroupBox"){} QString title() const {return QString(value);} };
+struct mxWidget_i { QWidget *d_widget=nullptr; };
+class mxWidget
+{
+public:
+    mxWidget_i data;mxWidget_i *d_this=&data;
+    const char *getLabel() const;
+};
+@LABEL@
+class mxWindow
+{
+public:
+    unsigned closeEvents=0;bool visible=true;
+    void *getHandle() { return this; }
+    int handleEvent(mxEvent *e) { if(e->event==mxEvent::Close) {++closeEvents;visible=false;}return 1; }
+};
+struct QCloseEvent {};
+struct QMainWindow { unsigned defaultCloses=0;void closeEvent(QCloseEvent *) {++defaultCloses;} };
+struct QtWindow:QMainWindow
+{
+    mxWindow *d_window;
+    explicit QtWindow(mxWindow &w):d_window(&w) {}
+    @QT_CLOSE@
+};
+using HWND=void*;
+constexpr int WM_CLOSE=99,GWLP_USERDATA=0,SW_HIDE=0;
+mxWindow *g_mainWindow=nullptr;
+unsigned quitCalls=0,hideCalls=0;
+namespace mx { void quit() {++quitCalls;} }
+std::intptr_t GetWindowLongPtr(HWND hwnd,int) {return reinterpret_cast<std::intptr_t>(hwnd);}
+void ShowWindow(HWND hwnd,int) {++hideCalls;auto *w=static_cast<mxWindow*>(hwnd);assert(w->closeEvents==1);w->visible=false;}
+int Dispatch(HWND hwnd)
+{
+    switch(WM_CLOSE)
+    {
+        @WIN_CLOSE@
+    }
+    return 0;
+}
+int main()
+{
+    QLineEdit line;line.value=std::string(180,'L');mxWidget widget;widget.data.d_widget=&line;
+    const char *label=widget.getLabel();assert(std::strlen(label)==180);
+    line.value="edited after read";assert(std::strlen(label)==180); // bytes are owned by getter storage
+    assert(std::string(widget.getLabel())==line.value);
+    QPushButton b;QCheckBox c;QRadioButton r;QLabel l;QGroupBox g;QWidget other;
+    QWidget *all[]={&b,&c,&r,&l,&g,&other};
+    for(auto *w:all) {w->value="saved label";widget.data.d_widget=w;assert(std::string(widget.getLabel())==w->value);}
+    widget.data.d_widget=nullptr;assert(std::string(widget.getLabel()).empty());
+    mxWindow qt;QtWindow qtAdapter(qt);QCloseEvent event;qtAdapter.closeEvent(&event);
+    assert(qt.closeEvents==1&&!qt.visible&&qtAdapter.defaultCloses==1);
+    mxWindow owner,dialog;g_mainWindow=&owner;
+    Dispatch(dialog.getHandle());assert(dialog.closeEvents==1&&!dialog.visible&&hideCalls==1&&quitCalls==0);
+    Dispatch(owner.getHandle());assert(quitCalls==1&&owner.closeEvents==0&&hideCalls==1);
+    std::cout<<"PASS actual Qt label lifetime, Qt close notification and Win32 secondary close-before-hide/main quit (service adapters)\n";
+}

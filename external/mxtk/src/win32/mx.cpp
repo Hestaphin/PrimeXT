@@ -600,7 +600,16 @@ static LRESULT CALLBACK WndProc (HWND hwnd, UINT uMessage, WPARAM wParam, LPARAM
 				mx::quit ();
 			}
 			else
+			{
+				mxWindow *window = (mxWindow *) GetWindowLongPtr (hwnd, GWLP_USERDATA);
+				if (window)
+				{
+					mxEvent event;
+					event.event = mxEvent::Close;
+					window->handleEvent (&event);
+				}
 				ShowWindow (hwnd, SW_HIDE);
+			}
 		}
 		//else // shouldn't happen
 			//DestroyWindow (hwnd);

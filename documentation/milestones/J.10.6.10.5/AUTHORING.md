@@ -1,0 +1,14 @@
+# F5 authoring workflow
+
+1. Load the matching model and open Physics Asset Editor → Auto Generate. Choose Human Standard, Heavy/Armored, Loose, Quadruped/Animal, Creature/Monster, Free Rotation or Custom.
+2. Duplicate a built-in or import a template to edit it. Set roles, parents, aliases/explicit bones, hitgroups, region weights, shapes, frames and limits. Required or ambiguous mappings must be resolved before generation.
+3. For a tail/limb/wing seed, set Chain edges (0 disables discovery). Keep Expand branches off for a linear chain. If branching is intentional, enable it and inspect every reported descendant. Explicit roles take precedence over discovery; use them to omit or tune specific branches.
+4. Physics profile/pairs edits the existing profile, per-role overrides and semantic pair rules transactionally. Pair edits/defaults, body/joint inheritance and stale snapshots retain F3's behavior. Off and Selective remain useful comparison modes.
+5. Generate Preview. Review body/joint diff, mass budget/ratios, geometry/overlap/contact-clearance, inferred flexion axes, expanded mappings and depth truncation. Passive Studio bones remain in the model. No preset is solver certified from generation alone.
+6. Select a joint in the main editor with Joint guides enabled. Red/green/blue are parent-frame X/Y/Z; cyan is child X; yellow joins the two anchors. Twist/swing/hinge arcs show individual angular ranges. A yellow gap under simulation indicates connection drift. The arcs do not display the complete coupled PhysX swing cone or certify anatomical direction.
+7. Simulate with Off and Selective contacts; inspect body/mesh agreement and diagnostics. Confirm the inferred-axis/expanded-chain review checkbox, then Apply. Main body/joint panels can further tune the resolved rig. Save writes sibling v5 .phys; Cancel and Undo protect previous authoring data.
+8. Save As exports reusable .ragtemplate. A saved runtime asset does not depend on the template. New template edits invalidate a previous preview and require regeneration. Imported/duplicated copies occupy the final dynamic selector slot, after all built-ins.
+
+Quadruped starts with pelvis/chest/head and four upper/lower limb chains; Standard adds optional feet/neck/tail, Detailed adds optional jaw. Creature is an editable core plus bounded optional limb/tail/wing seeds; unfamiliar anatomy needs explicit roles and frames. Heavy and Loose retain human anatomy and locked translations. Their tuning values are experiments to review for the actual mass/geometry, not universal drop guarantees.
+
+The two Barney files match the supplied MDL and require four axis reviews plus pair/overlap checks. The files under test_fixtures are synthetic test data with no matching MDL; do not install them as game sidecars. Regenerate any nonhuman rig from its actual model in updated pxmv.

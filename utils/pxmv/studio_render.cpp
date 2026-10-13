@@ -18,6 +18,8 @@
 #include "ControlPanel.h"
 #include "GlWindow.h"
 #include "cmdlib.h"
+#include "studio_pose_diagnostics.h"
+#include "studio_physical_hierarchy.h"
 
 typedef struct sortedmesh_s
 {
@@ -229,6 +231,11 @@ int StudioModel :: SetFrame( int frame )
 	return frame;
 }
 
+const matrix3x4 &StudioModel::GetToolModelTransform() const
+{
+	return m_protationmatrix;
+}
+
 void StudioModel :: SetupTransform( bool bMirror )
 {
 	Vector origin, angles;
@@ -280,6 +287,47 @@ void StudioModel :: BlendSequence( Vector pos[], Vector4D q[], blend_sequence_t 
 
 		m_boneSetup.AccumulatePose( &m_ik, pos, q, seqblend->sequence, seqblend->cycle, s );
 	}
+}
+
+void StudioModel::ApplyToolBoneOverrides(bool mirrored)
+{
+    if(!m_hasToolBoneOverrides || !m_pstudiohdr) return;
+    const int count=m_pstudiohdr->numbones;
+    if(count<=0 || count>MAXSTUDIOBONES) return;
+    const mstudiobone_t *bones=(const mstudiobone_t*)((const byte*)m_pstudiohdr+m_pstudiohdr->boneindex);
+    std::array<matrix3x4,MAXSTUDIOBONES> animated;
+    for(int i=0;i<count;++i)
+    {
+        animated[i]=m_toolAnimationFrozen&&m_toolFrozenBoneCount==count
+            ?m_protationmatrix.ConcatTransforms(m_toolFrozenModelBones[i]):m_pbonetransform[i];
+        // Also freeze branches that have no physical body or physical ancestor.
+        m_pbonetransform[i]=animated[i];
+    }
+    const float scale=physicsasset::StudioPhysicalRenderScale(m_protationmatrix);
+    matrix3x4 reflection;reflection.Identity();
+    if(mirrored)
+    {
+        matrix3x4 normalRoot=m_protationmatrix;
+        normalRoot.SetUp(-normalRoot.GetUp());
+        reflection=m_protationmatrix.ConcatTransforms(normalRoot.Invert());
+    }
+    for(int i=0;i<count;++i) if(m_toolBoneOverrideMask[i])
+    {
+        m_pbonetransform[i]=physicsasset::StudioUnitWorldBone(m_toolBoneOverrides[i]);
+        m_pbonetransform[i].SetForward(m_pbonetransform[i].GetForward()*scale);
+        m_pbonetransform[i].SetRight(m_pbonetransform[i].GetRight()*scale);
+        m_pbonetransform[i].SetUp(m_pbonetransform[i].GetUp()*scale);
+        if(mirrored) m_pbonetransform[i]=reflection.ConcatTransforms(m_pbonetransform[i]);
+    }
+    const bool valid=physicsasset::StudioReconstructPhysicalHierarchy(count,bones,animated.data(),
+        m_toolBoneOverrideMask.data(),m_toolPhysicalRootBone,scale,m_pbonetransform);
+    if(!valid) for(int i=0;i<count;++i) m_pbonetransform[i]=animated[i];
+    if(m_toolPoseDiagnosticsEnabled && !mirrored)
+    {
+        m_toolPoseDiagnostics=ragdolldiag::MeasureStudioPose(count,bones,animated.data(),m_pbonetransform,
+            m_toolBoneOverrideMask,m_toolBoneOverrides.data(),m_toolPhysicalRootBone);
+        if(!valid) ++m_toolPoseDiagnostics.invalidComparisons;
+    }
 }
 
 void StudioModel :: SetUpBones( bool bMirror )
@@ -444,6 +492,8 @@ void StudioModel :: SetUpBones( bool bMirror )
 			m_pbonetransform[i] = m_pbonetransform[pbones[i].parent].ConcatTransforms( bonematrix );
 		}
 	}
+
+	ApplyToolBoneOverrides(bMirror);
 
 	for( i = 0; i < m_pstudiohdr->numbones; i++ )
 	{

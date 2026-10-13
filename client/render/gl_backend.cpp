@@ -674,28 +674,37 @@ int R_AllocFrameBuffer(const CViewport &viewport)
 	}
 
 	gl_fbo_t *fbo = &tr.frame_buffers[i];
-	tr.num_framebuffers++;
 
 	if( fbo->init )
 	{
 		ALERT( at_warning, "R_AllocFrameBuffer: buffer %i already initialized\n", i );
+		tr.num_framebuffers++;
 		return i;
 	}
 
 	// create a depth-buffer
 	pglGenRenderbuffers( 1, &fbo->renderbuffer );
+	if(!fbo->renderbuffer) return -1;
 	pglBindRenderbuffer( GL_RENDERBUFFER_EXT, fbo->renderbuffer );
 	pglRenderbufferStorage( GL_RENDERBUFFER_EXT, GL_DEPTH_COMPONENT24, viewport.GetWidth(), viewport.GetHeight() );
 	pglBindRenderbuffer( GL_RENDERBUFFER_EXT, 0 );
 
 	// create frame-buffer
 	pglGenFramebuffers( 1, &fbo->framebuffer );
+	if(!fbo->framebuffer)
+	{
+		pglDeleteRenderbuffers(1, &fbo->renderbuffer);
+		memset(fbo, 0, sizeof(*fbo));
+		return -1;
+	}
+	const GLuint previous = glState.frameBuffer;
 	pglBindFramebuffer( GL_FRAMEBUFFER_EXT, fbo->framebuffer );
 	pglFramebufferRenderbuffer( GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT, GL_RENDERBUFFER_EXT, fbo->renderbuffer );
 	pglDrawBuffer( GL_COLOR_ATTACHMENT0_EXT );
 	pglReadBuffer( GL_COLOR_ATTACHMENT0_EXT );
-	pglBindFramebuffer( GL_FRAMEBUFFER_EXT, 0 );
+	pglBindFramebuffer( GL_FRAMEBUFFER_EXT, previous );
 	fbo->init = true;
+	tr.num_framebuffers++;
 
 	return i;
 }
@@ -710,6 +719,8 @@ void R_FreeFrameBuffer( int buffer )
 
 	gl_fbo_t *fbo = &tr.frame_buffers[buffer];
 
+	if(fbo->framebuffer && glState.frameBuffer == fbo->framebuffer)
+		GL_BindFBO(0);
 	pglDeleteRenderbuffers( 1, &fbo->renderbuffer );
 	pglDeleteFramebuffers( 1, &fbo->framebuffer );
 	memset( fbo, 0, sizeof( *fbo ));
@@ -719,13 +730,14 @@ void GL_BindFrameBuffer( int buffer, TextureHandle texture )
 {
 	gl_fbo_t *fbo = NULL;
 
-	if( buffer >= 0 && buffer < MAX_FRAMEBUFFERS )
+	if( buffer >= 0 && buffer < MAX_FRAMEBUFFERS &&
+		tr.frame_buffers[buffer].init && texture.Initialized() )
 		fbo = &tr.frame_buffers[buffer];
 
 	if( !fbo )
 	{
 		pglBindFramebuffer( GL_FRAMEBUFFER_EXT, 0 );
-		glState.frameBuffer = buffer;
+		glState.frameBuffer = 0;
 		return;
 	}
 

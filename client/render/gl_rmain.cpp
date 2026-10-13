@@ -50,6 +50,52 @@ void R_InitRefState( void )
 {
 	glState.stack_position = 0;
 	RI = &glState.stack[glState.stack_position];
+	RI->skyPortalRendered = false;
+}
+
+void R_RenderReport( void )
+{
+	ALERT( at_console, "PrimeXT render report K.11.4: initialized=%d instances=%d\n",
+		g_fRenderInitialized, g_StudioRenderer.CacheCount() );
+	const char *names[] = { "gl_renderer", "gl_allow_3dsky", "gl_allow_mirrors",
+		"gl_allow_portals", "gl_allow_screens", "gl_recursion_depth", "gl_bump",
+		"gl_specular", "gl_waterblur", "gl_hdr", "r_fullbright", "r_drawentities",
+		"r_cubemap_reflection", "r_cubemap_realtime", "r_occlusion_culling" };
+	for( const char *name : names )
+	{
+		cvar_t *value = CVAR_GET_POINTER( name );
+		if( value ) ALERT( at_console, "%s=%s\n", name, value->string );
+	}
+	if( !RI || !worldmodel || !RENDER_GET_PARM( PARM_CLIENT_ACTIVE, 0 ))
+	{
+		ALERT( at_console, "No active map render state\n" );
+		return;
+	}
+	int skySides = 0, validCubes = 0;
+	for( int side = 0; side < 6; ++side )
+		if( RI->view.skyMins[0][side] < RI->view.skyMaxs[0][side] &&
+			RI->view.skyMins[1][side] < RI->view.skyMaxs[1][side] ) ++skySides;
+	for( int i = 0; i < world->num_cubemaps; ++i )
+		if( world->cubemaps[i].valid ) ++validCubes;
+	ALERT( at_console, "map=%s features=0x%x skyVisible=%d skySides=%d suppressed2d=%d\n",
+		worldmodel->name, static_cast<unsigned>( world->features ), R_SkyIsVisible(), skySides, RI->skyPortalRendered );
+	ALERT( at_console, "subviewPasses: mirror=%d portal=%d screen=%d textures=%d\n",
+		r_stats.c_mirror_passes, r_stats.c_portal_passes, r_stats.c_screen_passes, tr.num_subview_used );
+	ALERT( at_console, "skyTextures=%d,%d,%d,%d,%d,%d\n",
+		static_cast<int>( RENDER_GET_PARM( PARM_TEX_SKYBOX, 0 )), static_cast<int>( RENDER_GET_PARM( PARM_TEX_SKYBOX, 1 )),
+		static_cast<int>( RENDER_GET_PARM( PARM_TEX_SKYBOX, 2 )), static_cast<int>( RENDER_GET_PARM( PARM_TEX_SKYBOX, 3 )),
+		static_cast<int>( RENDER_GET_PARM( PARM_TEX_SKYBOX, 4 )), static_cast<int>( RENDER_GET_PARM( PARM_TEX_SKYBOX, 5 )));
+	if( tr.sky_camera )
+		ALERT( at_console, "skyCamera=%d origin=%.2f,%.2f,%.2f scale=%.3f\n", tr.sky_camera->index,
+			tr.sky_camera->curstate.origin[0], tr.sky_camera->curstate.origin[1],
+			tr.sky_camera->curstate.origin[2], tr.sky_camera->curstate.scale );
+	else ALERT( at_console, "skyCamera=none\n" );
+	ALERT( at_console, "cubemaps=%d valid=%d defaultValid=%d loading=%d defaultTexture=%d\n",
+		world->num_cubemaps, validCubes, world->defaultCubemap.valid, world->loading_cubemaps,
+		world->defaultCubemap.texture.ToInt() );
+	ALERT( at_console, "lastFrame=%u skyPasses=%u mirrorPasses=%u triangles=%u worldlights=%d\n",
+		static_cast<unsigned>( tr.realframecount ), r_stats.c_sky_passes, r_stats.c_mirror_passes, r_stats.c_total_tris,
+		world->numworldlights );
 }
 
 const char *R_GetNameForView( void )
@@ -130,6 +176,7 @@ void R_ResetRefState( void )
 
 	// copy params from old refresh
 	RI->params = RP_NONE;
+	RI->skyPortalRendered = false;
 	memcpy( &RI->view, &prevRI->view, sizeof( ref_viewcache_t ));
 	memcpy( &RI->glstate, &prevRI->glstate, sizeof( ref_glstate_t ));
 
@@ -784,8 +831,9 @@ void R_Clear( int bitMask, bool skyPortalRendered )
 	else pglClearColor( 0.5f, 0.5f, 0.5f, 1.0f );
 
 	// force to clearing screen to avoid ugly blur
-	bool forceClear = CVAR_TO_BOOL(r_clear) && !skyPortalRendered;
-	if (tr.fClearScreen || forceClear) {
+	// A completed sky portal owns the color background, including cubemap
+	// passes that set fClearScreen. Only depth should be reset before the world.
+	if (!skyPortalRendered && (tr.fClearScreen || CVAR_TO_BOOL(r_clear))) {
 		bits |= GL_COLOR_BUFFER_BIT;
 	}
 
@@ -947,6 +995,8 @@ void R_RenderScene( const ref_viewpass_t *rvp, RefParams params )
 
 	// now we know about pass specific
 	RI->params = params;
+	RI->skyPortalRendered = false;
+	R_SyncSkyboxTextures();
 
 	// frametime is valid only for normal pass
 	if( RP_NORMALPASS( ))
@@ -957,12 +1007,15 @@ void R_RenderScene( const ref_viewpass_t *rvp, RefParams params )
 	R_BuildViewPassHierarchy();
 	R_SetupViewCache( rvp );
 
-	R_CheckSkyPortal(tr.sky_camera);
 	R_RenderSubview(); // prepare subview frames
 	R_RenderShadowmaps(); // draw all the shadowmaps
 
+	// Subviews/shadows may change render targets and overwrite their contents.
+	// Draw the sky background only after returning to this view's GL state.
 	R_SetupGLstate();
-	R_Clear(~0, tr.ignore_2d_skybox);
+	R_CheckSkyPortal(tr.sky_camera);
+	R_SetupGLstate();
+	R_Clear(~0, RI->skyPortalRendered);
 
 	R_UpdateFogParameters();
 	R_DrawSkyBox();
@@ -1112,7 +1165,7 @@ void HUD_ProcessEntData( qboolean allocate )
 
 void HUD_BuildLightmaps( void )
 {
-	if (!g_fRenderInitialized ) 
+	if( !g_fRenderInitialized || !worldmodel )
 		return;
 
 	// put the gamma into GLSL-friendly array

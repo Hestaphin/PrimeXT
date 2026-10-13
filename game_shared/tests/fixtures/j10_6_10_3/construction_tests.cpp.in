@@ -1,0 +1,134 @@
+#include "physics_asset_construction.h"
+#include "physics_asset_contact_filter.h"
+#include "collision_filter_data.h"
+#include <atomic>
+#include <iostream>
+#include <thread>
+#include <cstdlib>
+using namespace physx;
+using namespace physicsasset;
+static int checks=0;
+static void Check(bool v,const char *name) {++checks;if(!v) {std::cerr<<"FAIL "<<name<<'\n';std::abort();}}
+static bool Near(float a,float b) {return std::fabs(a-b)<.0002f;}
+struct Resettable {bool reset=false;void Reset() {reset=true;}};
+struct AuditGlobals {float time=1;};static AuditGlobals globals;static AuditGlobals *gpGlobals=&globals;
+class PhysicsAssetInstance
+{
+public:
+    struct Body {PxRigidDynamic *actor=nullptr;PxShape *shape=nullptr;bool hasSimulationPose=true,hasCurrentAnimationPose=false,hasAnimationVelocity=false;float physicsWeight=1;int boneIndex=0;PxTransform currentAnimationPose;PxVec3 animationLinearVelocity,animationAngularVelocity;};
+    const AssetDef *m_def=nullptr;std::vector<Body> m_bodies;std::vector<PxJoint *> m_joints;std::unique_ptr<ContactGroup> m_contactGroup;
+    bool m_diagnosticsStarted=true,m_actorsCreated=true,m_ragdoll=true,m_frozen=true,m_hasSimulationPose=true,m_hasSimulationBounds=true;
+    float m_diagnosticsBindSpan=1,m_sleepStartTime=1;Resettable m_diagnosticsCadence,m_diagnosticsWindow;
+    PxTransform BoneWorldTransform(int,const BodyDef &) const {return PxTransform(PxIdentity);}
+    PxVec3 FallbackLinearVelocity() const {return PxVec3(0);}PxVec3 FallbackAngularVelocity() const {return PxVec3(0);}
+    float m_currentSampleTime=0;
+    void UpdateAnimationPose(float){} void SnapToAnimationPose(){} void SetSimulationEnabled(bool){} void InvalidateAnimationHistory(bool){}
+    bool SetRagdoll(bool);void DestroyActors();void SetBodyKinematicState(size_t,bool,bool);
+};
+@PRODUCTION@
+static PhysicsAssetInstance *destroying=nullptr;static unsigned releaseCount=0;
+static void ObserveRelease(PxRigidDynamic *actor)
+{
+    Check(destroying&&destroying->m_contactGroup!=nullptr,"tokens live during actor release");
+    if(!actor->shapes.empty()) {auto *token=static_cast<BodyContactToken *>(actor->shapes[0]->userData);Check(token&&token->group->Owns(token,token->index+1),"shape token still owned during release");}
+    ++releaseCount;
+}
+int main()
+{
+    PxPhysics sdk;PxMaterial material;AssetDef a;
+    auto *sharedMaterial=CreateAssetMaterial(sdk);Check(sharedMaterial&&sharedMaterial->staticFriction==.5f&&sharedMaterial->dynamicFriction==.5f&&sharedMaterial->restitution==0,"runtime preview and native harness share default material");
+    for(int i=0;i<3;++i) {BodyDef b;b.name=b.bone="body"+std::to_string(i);b.mass=4;b.shape.type=ShapeType(i);b.shape.halfExtents={2,3,4};b.shape.radius=2;b.shape.halfHeight=3;a.bodies.push_back(b);}
+    for(int i=1;i<3;++i) {JointDef edge;edge.name="edge"+std::to_string(i);edge.parent="body0";edge.child="body"+std::to_string(i);a.joints.push_back(edge);}
+    a.selfCollision=SelfCollisionMode::Custom;a.collisionPairs={{"body0","body2",true},{"body0","body1",false}};
+    a.simulation.linearDamping=.15f;a.simulation.angularDamping=.7f;a.simulation.maxLinearVelocity=500;a.simulation.maxAngularVelocity=12;a.simulation.maxDepenetrationVelocity=40;a.simulation.sleepThreshold=.25f;a.simulation.contactOffset=.6f;a.simulation.restOffset=.1f;
+    a.simulation.positionIterations=24;a.simulation.velocityIterations=6;a.simulation.angularResistance=3;a.simulation.maxTorque=600;
+    a.simulation.projection=ProjectionMode::On;a.simulation.projectionLinearTolerance=.2f;a.simulation.projectionAngularTolerance=5;
+    std::string error;if(!Validate(a,&error)) std::cerr<<error<<"\n";Check(Validate(a,&error),"construction input valid");
+    std::vector<PxRigidDynamic *> actors;std::vector<PxShape *> shapes;
+    for(size_t i=0;i<3;++i)
+    {
+        PxRigidDynamic *actor=nullptr;PxShape *shape=nullptr;
+        Check(CreatePrimitiveBody(sdk,material,PxTransform(PxVec3(float(i)*10,0,50)),a,i,2,actor,shape),"primitive construction succeeds");actors.push_back(actor);shapes.push_back(shape);
+        Check(shape->geometry==int(i),"box sphere capsule geometry route");
+        Check(Near(shape->dimensions.x,4),"primitive dimensions scaled");
+        Check(Near(shape->contactOffset,1.2f)&&Near(shape->restOffset,.2f),"resolved scaled contact margins");
+        Check(actor->mass==4&&Near(actor->linearDamping,.15f)&&Near(actor->angularDamping,.7f),"mass and damping resolved");
+        Check(actor->positionIterations==24&&actor->velocityIterations==6,"solver counts match profile");
+        Check(actor->maxLinearVelocity==1000&&actor->maxAngularVelocity==12&&actor->maxDepenetrationVelocity==80&&actor->sleepThreshold==1,"dimensioned speeds and sleep scaling");
+        Check(actor->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD)&&!(shape->flags&PxShapeFlag::eSCENE_QUERY_SHAPE),"CCD on; body scene queries off");
+    }
+    auto &b=a.bodies[0];b.linearDamping=0;b.tuning.positionIterations=31;b.tuning.ccd=0;b.tuning.contactOffset=.4f;b.tuning.restOffset=0;
+    Check(ConfigureBodyStability(*actors[0],a,b)&&ConfigureBodyContact(*shapes[0],a,b),"overrides configure existing dynamic body");
+    Check(actors[0]->linearDamping==0&&actors[0]->positionIterations==31&&!actors[0]->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD)&&Near(shapes[0]->contactOffset,.4f)&&shapes[0]->restOffset==0,"explicit zeros and body overrides win");
+    auto *sentinel=actors[0];auto *shapeSentinel=shapes[0];auto failure=[&](float scale,size_t index){auto *actor=sentinel;auto *shape=shapeSentinel;bool ok=CreatePrimitiveBody(sdk,material,PxTransform(PxIdentity),a,index,scale,actor,shape);return !ok&&actor==sentinel&&shape==shapeSentinel;};
+    Check(failure(0,0)&&failure(-1,0)&&failure(1,99),"invalid scale/index output transaction");
+    sdk.actorFailure=true;Check(failure(1,0),"actor allocation failure output transaction");sdk.actorFailure=false;
+    PxRigidActorExt::shapeFailure=true;Check(failure(1,0)&&sdk.actors.back()->released,"shape failure releases actor");PxRigidActorExt::shapeFailure=false;
+    PxRigidBodyExt::massResult=false;Check(failure(1,0)&&sdk.actors.back()->released,"mass failure releases shape/actor");PxRigidBodyExt::massResult=true;
+    b.shape.radius=-1;b.shape.type=ShapeType::Sphere;Check(failure(1,0)&&sdk.actors.back()->released,"invalid geometry cleanup");b.shape.radius=2;
+    b.tuning.restOffset=.5f;Check(failure(1,0)&&sdk.actors.back()->released,"invalid override cleanup");b.tuning.restOffset=0;
+    JointDef d;d.name="join";d.parent="body0";d.child="body2";d.twistLow=-20;d.twistHigh=110;d.swing1=35;d.swing2=75;
+    d.twistMotion=AngularMotion::Free;d.swing1Motion=AngularMotion::Locked;d.swing2Motion=AngularMotion::Limited;d.frameAnchor={1,2,3};d.frameAngles={20,40,-10};
+    const PxTransform p0(PxVec3(10,0,0)),p1(PxVec3(0,20,0)),bone(PxVec3(4,5,6));
+    auto *joint=CreateAssetJoint(sdk,*actors[0],*actors[2],p0,p1,bone,a,d,2);Check(joint!=nullptr,"shared D6 factory");auto &j=*static_cast<PxD6Joint *>(joint);
+    for(int i=0;i<3;++i) Check(j.motions[i]==PxD6Motion::eLOCKED,"D6 translation remains locked");
+    Check(j.motions[3]==PxD6Motion::eFREE&&j.motions[4]==PxD6Motion::eLOCKED&&j.motions[5]==PxD6Motion::eLIMITED,"all three angular modes respected");
+    Check(Near(j.twist.lower,-20*PxPi/180)&&Near(j.twist.upper,110*PxPi/180)&&Near(j.swing.yAngle,35*PxPi/180)&&Near(j.swing.zAngle,75*PxPi/180),"asymmetric limits use radians");
+    for(auto drive:{PxD6Drive::eTWIST,PxD6Drive::eSWING}) {const auto v=j.drives[drive];Check(v.stiffness==0&&v.damping==12&&v.forceLimit==2400&&!v.acceleration,"velocity resistance uses force units and scale squared");}
+    Check(j.drives[PxD6Drive::eSLERP].damping==0&&!j.autowake&&j.driveLinear.magnitude()==0&&j.driveAngular.magnitude()==0,"split drive targets zero without autowake");
+    Check((j.flags&PxConstraintFlag::eDRIVE_LIMITS_ARE_FORCES)&&(j.flags&PxConstraintFlag::eCOLLISION_ENABLED)&&(j.flags&PxConstraintFlag::ePROJECTION),"constraint flags and allowed connected contact");
+    Check(Near(j.projectionLinear,.4f)&&Near(j.projectionAngular,5*PxPi/180),"projection scale and radians");
+    const auto w0=p0*j.frame0,w1=p1*j.frame1;Check((w0.p-w1.p).magnitude()<.0001f&&Near(w0.q.w,w1.q.w),"reference joint frames coincide");
+    d.tuning.angularResistance=0;d.tuning.projection=ProjectionMode::Off;Check(ConfigureD6Joint(j,a,d,1,false)&&j.drives[PxD6Drive::eTWIST].damping==0&&!(j.flags&PxConstraintFlag::ePROJECTION)&&!(j.flags&PxConstraintFlag::eCOLLISION_ENABLED),"zero resistance and projection off are explicit");
+    d.twistMotion=AngularMotion(99);Check(!CreateAssetJoint(sdk,*actors[0],*actors[2],p0,p1,bone,a,d),"invalid angular enum factory rollback");d.twistMotion=AngularMotion::Free;
+    d.kind=JointKind::Hinge;d.hingeAxis={0,0,1};d.hingeMin=-15;d.hingeMax=80;
+    auto *hinge=static_cast<PxRevoluteJoint *>(CreateAssetJoint(sdk,*actors[0],*actors[2],p0,p1,bone,a,d));
+    Check(hinge&&hinge->limitEnabled&&Near(hinge->limit.lower,-15*PxPi/180)&&Near(hinge->limit.upper,80*PxPi/180),"hinge limit behavior retained");
+    d.tuning.angularResistance=1;Check(!CreateAssetJoint(sdk,*actors[0],*actors[2],p0,p1,bone,a,d),"D6 resistance rejected for hinge");
+    ContactGroup group(a),other(a);AssetContactFilter filter;PxPairFlags pairFlags=123;
+    for(size_t i=0;i<3;++i) {shapes[i]->userData=const_cast<BodyContactToken *>(group.Token(i));shapes[i]->setSimulationFilterData(AssetBodyFilterData(7,i,group));}
+    auto pair=[&](size_t i,size_t k){return filter.pairFound(1,0,shapes[i]->filter,actors[i],shapes[i],0,shapes[k]->filter,actors[k],shapes[k],pairFlags);};
+    Check(AssetPairFilter(shapes[0]->filter,shapes[2]->filter)==PxFilterFlag::eCALLBACK,"same owner selects callback");
+    Check(pair(0,2)==PxFilterFlag::eDEFAULT&&pair(2,0)==PxFilterFlag::eDEFAULT&&pairFlags==123,"symmetric allowed contact preserves flags");
+    Check(pair(0,1)==PxFilterFlag::eSUPPRESS&&pair(1,2)==PxFilterFlag::eSUPPRESS&&pair(0,0)==PxFilterFlag::eSUPPRESS,"denied unlisted and self pairs suppressed");
+    shapes[2]->userData=const_cast<BodyContactToken *>(other.Token(2));Check(pair(0,2)==PxFilterFlag::eDEFAULT,"recycled owner with distinct live groups allowed");shapes[2]->userData=const_cast<BodyContactToken *>(group.Token(2));
+    shapes[2]->filter.word2=999;Check(pair(0,2)==PxFilterFlag::eSUPPRESS,"bad encoded index suppressed");shapes[2]->filter=AssetBodyFilterData(7,2,group);
+    BodyContactToken forged{&group,2};shapes[2]->userData=&forged;Check(pair(0,2)==PxFilterFlag::eSUPPRESS,"forged token address rejected");shapes[2]->userData=nullptr;Check(pair(0,2)==PxFilterFlag::eSUPPRESS,"missing token rejected");shapes[2]->userData=const_cast<BodyContactToken *>(group.Token(2));
+    Check(AssetPairFilter(shapes[0]->filter,PxFilterData())==PxFilterFlag::eDEFAULT,"world contact unchanged");
+    auto cross=shapes[2]->filter;cross.word1=8;Check(AssetPairFilter(shapes[0]->filter,cross)==PxFilterFlag::eDEFAULT,"different entity contact unchanged");
+    auto proxy=PxFilterData(kAssetBodyFlag,7,0,0);Check(AssetPairFilter(shapes[0]->filter,proxy)==PxFilterFlag::eSUPPRESS,"same owner collision proxy remains suppressed");
+    PxPairFlags flags=0;auto conveyor=shapes[0]->filter;conveyor.word0|=kConveyorFlag;
+    conveyor.word0|=0x80;CollisionFilterData wrapped(conveyor);auto words=wrapped.ToNativeType();
+    Check(words.word0==conveyor.word0&&words.word1==7&&words.word2==1&&words.word3==kAssetPolicyCookie,"actual filter wrapper preserves all four words");
+    wrapped.SetConveyorFlag(false);words=wrapped.ToNativeType();Check(!wrapped.HasConveyorFlag()&&(words.word0&0x80)&&words.word2==1&&words.word3==kAssetPolicyCookie,"conveyor toggle preserves token metadata and unknown flags");
+    wrapped.SetConveyorFlag(true);wrapped.SetPhysicsAssetOwner(7);words=wrapped.ToNativeType();Check(words.word2==1&&words.word3==kAssetPolicyCookie,"same owner retains live token metadata");
+    wrapped.SetPhysicsAssetOwner(8);words=wrapped.ToNativeType();Check(words.word1==8&&!words.word2&&!words.word3&&!(words.word0&kAssetPolicyFlag),"owner mutation invalidates stale policy identity");
+    wrapped.SetPhysicsAssetBody(false);words=wrapped.ToNativeType();Check(!wrapped.IsPhysicsAssetBody()&&wrapped.HasConveyorFlag()&&(words.word0&0x80),"body flag removal retains unrelated conveyor state");
+    Check(RuntimeShader(0,conveyor,0,shapes[2]->filter,flags,nullptr,0)==PxFilterFlag::eCALLBACK&&(flags&PxPairFlag::eMODIFY_CONTACTS)&&(flags&PxPairFlag::eNOTIFY_CONTACT_POINTS)&&(flags&PxPairFlag::eNOTIFY_TOUCH_CCD),"actual runtime shader preserves conveyor and notification bits");
+    Check(RuntimeShader(1,conveyor,0,shapes[2]->filter,flags,nullptr,0)==PxFilterFlag::eDEFAULT&&flags==PxPairFlag::eTRIGGER_DEFAULT,"actual runtime trigger path preserved");
+    Check(PreviewShader(0,shapes[0]->filter,0,shapes[2]->filter,flags,nullptr,0)==PxFilterFlag::eCALLBACK&&(flags&PxPairFlag::eDETECT_CCD_CONTACT),"actual preview shader resolves same contact path");
+    std::atomic<unsigned> bad{0};std::vector<std::thread> readers;
+    for(int t=0;t<8;++t) readers.emplace_back([&]{for(int i=0;i<20000;++i) if(pair(0,2)!=PxFilterFlag::eDEFAULT||pair(0,1)!=PxFilterFlag::eSUPPRESS) ++bad;});for(auto &t:readers) t.join();
+    Check(bad==0,"160000 concurrent immutable filter reads");
+    PhysicsAssetInstance instance;instance.m_def=&a;instance.m_contactGroup.reset(new ContactGroup(a));
+    for(size_t i=0;i<actors.size();++i) {PhysicsAssetInstance::Body body;body.actor=actors[i];body.shape=shapes[i];instance.m_bodies.push_back(body);shapes[i]->userData=const_cast<BodyContactToken *>(instance.m_contactGroup->Token(i));}
+    instance.SetBodyKinematicState(1,true,false);Check(!actors[1]->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD),"documented SDK kinematic flag clears CCD");
+    instance.SetBodyKinematicState(1,false,true);Check(actors[1]->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD),"actual animation to physics method restores inherited CCD");
+    instance.SetBodyKinematicState(0,true,false);instance.SetBodyKinematicState(0,false,false);Check(!actors[0]->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD),"explicit CCD off survives kinematic handoff");
+    for(int i=0;i<20;++i) {instance.SetBodyKinematicState(1,true,false);instance.SetBodyKinematicState(1,false,false);}Check(actors[1]->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD),"CCD restored after repeated transitions");
+    instance.m_ragdoll=false;instance.m_frozen=false;
+    for(auto *actor:actors) actor->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC,true);
+    for(int repeat=0;repeat<3;++repeat) {
+        Check(instance.SetRagdoll(true),"full ragdoll activation succeeds");
+        Check(actors[1]->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD),"full activation restores profile CCD");
+        Check(!actors[0]->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD),"full activation respects body CCD off");
+        Check(instance.SetRagdoll(false),"return to animation succeeds");
+        Check(!actors[1]->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD),"animation clears CCD per SDK rule");
+    }
+    Check(instance.SetRagdoll(true),"final activation succeeds");
+    instance.m_joints={joint,hinge};destroying=&instance;PxRigidDynamic::releaseObserver=ObserveRelease;instance.DestroyActors();PxRigidDynamic::releaseObserver=nullptr;
+    Check(releaseCount==3&&joint->released&&hinge->released&&!instance.m_contactGroup&&!instance.m_actorsCreated,"actual DestroyActors releases joints/shapes before tokens");
+    Check(instance.m_diagnosticsCadence.reset&&instance.m_diagnosticsWindow.reset&&!instance.m_hasSimulationPose&&!instance.m_bodies[0].hasSimulationPose,"destruction resets diagnostic/pose state");
+    instance.DestroyActors();Check(releaseCount==3,"destruction idempotent");
+    std::cout<<"F3 shared construction/filter/CCD/lifetime: "<<checks<<" checks PASS (recording SDK facade; no solver)\n";
+}

@@ -1,0 +1,34 @@
+SYNTHETIC TEST FIXTURE; no matching MDL and no solver/game acceptance.
+CHAIN REVIEW left_limb_chain_1 -> lower_l; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW left_limb_chain_2 -> tip_l; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW left_wing_chain_1 -> feather_l_a; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW left_wing_chain_2 -> feather_l_b; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW left_wing_chain_3 -> feather_tip_l_a; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW left_wing_chain_4 -> feather_tip_l_b; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW right_limb_chain_1 -> lower_r; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW right_limb_chain_2 -> tip_r; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW right_wing_chain_1 -> feather_r_a; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW right_wing_chain_2 -> feather_r_b; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW right_wing_chain_3 -> feather_tip_r_a; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW right_wing_chain_4 -> feather_tip_r_b; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW tail_chain_1 -> tail_02; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW tail_chain_2 -> tail_03; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW tail_chain_3 -> tail_04; inherited angular/body profile, inferred segment frame.
+No anatomical segment for jaw; capsule used bounds axis, review it.
+No anatomical segment for tip_l; capsule used bounds axis, review it.
+No anatomical segment for feather_tip_l_a; capsule used bounds axis, review it.
+No anatomical segment for feather_tip_l_b; capsule used bounds axis, review it.
+No anatomical segment for tip_r; capsule used bounds axis, review it.
+No anatomical segment for feather_tip_r_a; capsule used bounds axis, review it.
+No anatomical segment for feather_tip_r_b; capsule used bounds axis, review it.
+No anatomical segment for tail_04; capsule used bounds axis, review it.
+Resolved self collision=selective; configured allow pairs=219. Off suppresses the matrix.
+MASS RATIO chest_to_wing_l = 24.999998; rebalance neighbors or merge the small link.
+MASS RATIO chest_to_wing_r = 24.999998; rebalance neighbors or merge the small link.
+OVERLAP lower_l / tip_l depth estimate=0.580000; trim/offset colliders before enabling contact.
+OVERLAP feather_l_a / feather_tip_l_a depth estimate=0.211929; trim/offset colliders before enabling contact.
+OVERLAP feather_l_b / feather_tip_l_b depth estimate=0.211929; trim/offset colliders before enabling contact.
+OVERLAP lower_r / tip_r depth estimate=1.854214; trim/offset colliders before enabling contact.
+OVERLAP feather_r_a / feather_tip_r_a depth estimate=1.062007; trim/offset colliders before enabling contact.
+OVERLAP feather_r_b / feather_tip_r_b depth estimate=1.062007; trim/offset colliders before enabling contact.
+F2 candidate: inspect axes, overlaps and live drops. No solver or visual stability certification.

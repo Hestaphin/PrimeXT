@@ -14,37 +14,24 @@ GNU General Public License for more details.
 */
 
 #include "collision_filter_data.h"
+#include "physics_asset_contact_policy.h"
 
 using namespace physx;
 
-enum ColllisionFlags : PxU32
+enum CollisionFlags : PxU32
 {
-	ConveyorActor = (1 << 0),
+    ConveyorActor = (1u << 0),
+    PhysicsAssetBody = (1u << 1),
 };
 
-CollisionFilterData::CollisionFilterData() :
-	m_conveyorFlag(false)
-{
-}
-
-CollisionFilterData::CollisionFilterData(const physx::PxFilterData &data)
-{
-	m_conveyorFlag = data.word0 & ColllisionFlags::ConveyorActor;
-}
-
-bool CollisionFilterData::HasConveyorFlag() const
-{
-	return m_conveyorFlag;
-}
-
-void CollisionFilterData::SetConveyorFlag(bool state)
-{
-	m_conveyorFlag = state;
-}
-
-PxFilterData CollisionFilterData::ToNativeType() const
-{
-	PxFilterData filterData;
-	filterData.word0 |= m_conveyorFlag ? ColllisionFlags::ConveyorActor : 0;
-	return filterData;
-}
+CollisionFilterData::CollisionFilterData():m_native(0,0,0,0) {}
+CollisionFilterData::CollisionFilterData(const PxFilterData &data):m_native(data) {}
+bool CollisionFilterData::HasConveyorFlag() const {return (m_native.word0&ConveyorActor)!=0;}
+void CollisionFilterData::SetConveyorFlag(bool on) {if(on) m_native.word0|=ConveyorActor;else m_native.word0&=~PxU32(ConveyorActor);}
+bool CollisionFilterData::IsPhysicsAssetBody() const {return (m_native.word0&PhysicsAssetBody)!=0;}
+void CollisionFilterData::SetPhysicsAssetBody(bool on)
+{if(on) m_native.word0|=PhysicsAssetBody;else {m_native.word0&=~PxU32(PhysicsAssetBody|physicsasset::kAssetPolicyFlag);m_native.word2=m_native.word3=0;}}
+PxU32 CollisionFilterData::GetPhysicsAssetOwner() const {return m_native.word1;}
+void CollisionFilterData::SetPhysicsAssetOwner(PxU32 owner)
+{if(owner!=m_native.word1) {m_native.word0&=~physicsasset::kAssetPolicyFlag;m_native.word2=m_native.word3=0;}m_native.word1=owner;}
+PxFilterData CollisionFilterData::ToNativeType() const {return m_native;}

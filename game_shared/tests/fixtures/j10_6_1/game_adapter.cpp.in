@@ -1,0 +1,115 @@
+#include <cassert>
+#include <iostream>
+#include <cstring>
+#include <string>
+#include <utility>
+#include <algorithm>
+#include <cmath>
+#include "vector.h"
+#include "ballistic_flight.h"
+#include "ballistic_penetration.h"
+#include "ballistic_timing.h"
+#include "ballistic_world_query.h"
+extern "C" {
+void TestWorldSetup(int,float,float,int);
+int TestWorldMaterial(const struct msurface_s*);
+int TestWorldContents(const float*);
+void TestWorldServiceChecks();
+}
+const Vector g_vecZero(0,0,0);
+constexpr double kUnitsPerMeter=39.37007874015748;
+constexpr int kMaxPenetrations=4;
+constexpr float kMaxReverseDepthUnits=96,kSurfaceOffsetUnits=.5f;
+constexpr double kMaxLifetime=10;
+constexpr int mod_brush=1,mod_studio=3,SOLID_CUSTOM=6,CONTENTS_SOLID=-2,FL_CLIENT=1,FL_MONSTER=2;
+struct entvars_t {int modelindex=1,solid=1,flags=0;};
+struct CBaseEntity {entvars_t data; entvars_t* pev=&data; int index=0;
+    static CBaseEntity* Instance(void* p){return static_cast<CBaseEntity*>(p);}
+    int entindex() const{return index;}
+};
+struct TraceResult {int fStartSolid=0,fAllSolid=0; Vector vecEndPos{0,0,0},vecPlaneNormal{-1,0,0};
+    void* pHit=nullptr; unsigned materialHash=0;};
+struct matdef_t {char name[32];};
+struct matdesc_t {const char* name;};
+static matdef_t materials[]={{"glass"},{"concrete"},{"default"}};
+static matdesc_t* COM_FindMaterial(unsigned){return nullptr;}
+static msurface_s* TRACE_SURFACE(void*,const Vector&,const Vector&){return nullptr;}
+static matdef_t* COM_DefaultMatdef(){return &materials[2];}
+static matdef_t* COM_MatDefFromSurface(msurface_s* s,const Vector&){
+    if(!s)return nullptr;int kind=TestWorldMaterial(s);return kind>=0&&kind<3?&materials[kind]:nullptr;
+}
+static bool UTIL_IsValidEntity(void* p){return p!=nullptr;}
+static int UTIL_GetModelType(int index){return index==1?mod_brush:mod_studio;}
+static int UTIL_PointContents(const Vector& p){return TestWorldContents(&p.x);}
+static float CVAR_GET_FLOAT(const char*){return 1;}
+static bool serviceAvailable=true;
+static void* NativeObject(const char* name) {
+    if(!serviceAvailable||std::strcmp(name,WORLD_BALLISTIC_QUERY_OBJECT))return nullptr;
+    return const_cast<world_ballistic_query_api_t*>(SV_GetWorldBallisticQuery());
+}
+struct {void* (*pfnGetNativeObject)(const char*)=NativeObject;} g_physfuncs;
+struct Shot {CBaseEntity* owner=nullptr;modular::BallisticState state;
+    modular::BallisticParameters physics;modular::BallisticTransit transit;int penetrations=0;double projectileFactor=1;};
+struct BallisticExitCandidate{Vector position;float thicknessUnits=0;};
+static bool FindModularBallisticExit(CBaseEntity* target,const TraceResult& entry,int,
+    const Vector& direction,float,BallisticExitCandidate& out) {
+    if(target->index!=1)return false;out.position=entry.vecEndPos+direction*2;out.thicknessUnits=2;return true;
+}
+
+// @PRODUCTION_CODE@
+int main() {
+    TestWorldServiceChecks();
+    CBaseEntity owner,worldEntity;
+    Shot shot;shot.owner=&owner;shot.physics.massKg=.008;
+    modular::BallisticState contact;contact.velocity={1000,0,0};
+    TraceResult entry;entry.pHit=&worldEntity;entry.vecEndPos=Vector(-.03125f,0,0);
+    const Vector from(-1,0,0),incoming(20,0,0);
+    contact.position=SI(entry.vecEndPos);
+    for(int bits:{16,32}) {
+        TestWorldSetup(bits,2.18f,4,0);
+        PenetrationCandidate candidate{};
+        assert(PreparePenetration(shot,entry,-1,incoming,from,contact,candidate));
+        assert(std::abs(candidate.exitPoint.x-2.08f)<1e-5);
+        assert(std::abs(candidate.postExitOffsetUnits-.05f)<1e-5);
+        assert(BeginPenetration(shot,contact,incoming,candidate));
+        assert(std::abs(GamePoint(shot.transit.exitPosition).x-2.13f)<1e-5);
+        assert(GamePoint(shot.transit.exitPosition).x<2.18f);
+        const double duration=shot.transit.durationSeconds;
+        modular::AdvanceTransit(shot.state,shot.transit,duration/2,100,10);
+        assert(shot.transit.active && shot.state.seconds<duration);
+        modular::AdvanceTransit(shot.state,shot.transit,duration,100,10);
+        assert(!shot.transit.active);
+        assert(std::abs(GamePoint(shot.state.position).x-2.13f)<1e-5);
+    }
+    TestWorldSetup(16,2.18f,4,0);PenetrationCandidate candidate{};
+    assert(PreparePenetration(shot,entry,-1,incoming,from,contact,candidate));
+    TraceResult concreteEntry=entry;concreteEntry.vecEndPos=Vector(2.14875f,0,0);
+    auto concreteContact=contact;concreteContact.position=SI(concreteEntry.vecEndPos);
+    concreteContact.velocity={candidate.exitSpeed,0,0};
+    const Vector resume=candidate.exitPoint+incoming.Normalize()*candidate.postExitOffsetUnits;
+    assert(resume.x<2.18f);
+    PenetrationCandidate concreteCandidate{};
+    assert(!PreparePenetration(shot,concreteEntry,-1,incoming,resume,concreteContact,concreteCandidate));
+    TestWorldSetup(16,2.08f,4,0);
+    assert(!PreparePenetration(shot,entry,-1,incoming,from,contact,candidate)); // touching glass/concrete
+    TestWorldSetup(16,2.18f,2.22f,0);
+    assert(PreparePenetration(shot,entry,-1,incoming,from,contact,candidate));
+    assert(candidate.exitPoint.x+candidate.postExitOffsetUnits<2.18f);
+    TestWorldSetup(16,20,22,0);
+    assert(PreparePenetration(shot,entry,-1,incoming,from,contact,candidate));
+    assert(candidate.postExitOffsetUnits==.5f && candidate.exitPoint.x<2.09f);
+    // Two world faces with zero trace materialHash still have distinct materials.
+    TestWorldSetup(16,20,22,1);assert(entry.materialHash==0);
+    assert(!PreparePenetration(shot,entry,-1,incoming,from,contact,candidate));
+    TestWorldSetup(16,20,22,2);
+    assert(!PreparePenetration(shot,entry,-1,incoming,from,contact,candidate));
+    TestWorldSetup(16,20,22,0);serviceAvailable=false;
+    assert(!PreparePenetration(shot,entry,-1,incoming,from,contact,candidate));
+    serviceAvailable=true;g_physfuncs.pfnGetNativeObject=nullptr;
+    assert(!PreparePenetration(shot,entry,-1,incoming,from,contact,candidate));
+    // Older engines continue to use the existing non-world exit path.
+    worldEntity.index=1;worldEntity.data.modelindex=2;
+    assert(PreparePenetration(shot,entry,-1,incoming,from,contact,candidate));
+    assert(candidate.postExitOffsetUnits==.5f);
+    std::cout<<"PASS J.10.6.1 actual Prepare/Begin: exact first exit, 16/32-bit service, material rejection, offset clipping, deferred transit, old-engine fallback\n";
+}

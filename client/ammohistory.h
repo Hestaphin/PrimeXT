@@ -57,6 +57,7 @@ public:
 	byte	iOldWeaponBits[MAX_WEAPON_BYTES];
 
 	WEAPON *GetWeapon( int iId ) { return &rgWeapons[iId]; }
+    void SetModularSprites(int id, const char* hud, const char* ammo);
 	void AddWeapon( WEAPON *wp ) 
 	{ 
 		rgWeapons[wp->iId] = *wp;	

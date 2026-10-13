@@ -1,0 +1,281 @@
+ragdoll_template
+{
+    template_version 1
+    id "creature"
+    name "Creature / Monster"
+    description "Editable core and optional limb/tail/wing seeds. Only declared descendants expand; unknown anatomy needs explicit mappings."
+    anatomy "creature"
+    mass_budget 90
+    linear_damping 0.0500000007
+    angular_damping 0.5
+    solver_position_iterations 16
+    solver_velocity_iterations 4
+    max_linear_velocity 2000
+    max_angular_velocity 20
+    max_depenetration_velocity 200
+    sleep_threshold 0.5
+    contact_offset 0.787401557
+    rest_offset 0
+    ccd 1
+    angular_resistance 1.5
+    drive_max_torque 1000
+    projection off
+    projection_linear_tolerance 0.25
+    projection_angular_tolerance 10
+    self_collision selective
+    collision_neighbor_depth 2
+    collision_overlap_margin 0.100000001
+    radius_ratio 0.219999999
+    end_trim 0.0599999987
+    mass_ratio_warning 10
+    mass_region "torso" 0.5
+    mass_region "head" 0.100000001
+    mass_region "left_limb" 0.100000001
+    mass_region "right_limb" 0.100000001
+    mass_region "tail" 0.100000001
+    mass_region "left_wing" 0.0500000007
+    mass_region "right_wing" 0.0500000007
+    exclude_section "weapon"
+    exclude_section "gun"
+    exclude_section "accessory"
+
+    role "root"
+    {
+        parent ""
+        alias "root"
+        alias "pelvis"
+        alias "Bip01 Pelvis"
+        override ""
+        required 1
+        minimum_detail 0
+        shape box
+        hitgroup 3
+        mass_weight 5
+        region "torso"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "chest"
+    {
+        parent "root"
+        alias "chest"
+        alias "torso"
+        alias "Bip01 Spine3"
+        override ""
+        required 0
+        minimum_detail 0
+        shape box
+        hitgroup 2
+        mass_weight 5
+        region "torso"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "head"
+    {
+        parent "chest"
+        alias "head"
+        alias "Bip01 Head"
+        override ""
+        required 0
+        minimum_detail 0
+        shape sphere
+        hitgroup 1
+        mass_weight 2
+        region "head"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "left_limb"
+    {
+        parent "chest"
+        alias "limb_l"
+        alias "arm_l"
+        alias "Bip01 L Arm1"
+        override ""
+        required 0
+        minimum_detail 1
+        shape capsule
+        hitgroup 4
+        mass_weight 1
+        chain_depth 3
+        chain_branches 0
+        region "left_limb"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "left_wing"
+    {
+        parent "chest"
+        alias "wing_l"
+        alias "left_wing"
+        override ""
+        required 0
+        minimum_detail 2
+        shape capsule
+        hitgroup 4
+        mass_weight 1
+        chain_depth 3
+        chain_branches 1
+        region "left_wing"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "right_limb"
+    {
+        parent "chest"
+        alias "limb_r"
+        alias "arm_r"
+        alias "Bip01 R Arm1"
+        override ""
+        required 0
+        minimum_detail 1
+        shape capsule
+        hitgroup 5
+        mass_weight 1
+        chain_depth 3
+        chain_branches 0
+        region "right_limb"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "right_wing"
+    {
+        parent "chest"
+        alias "wing_r"
+        alias "right_wing"
+        override ""
+        required 0
+        minimum_detail 2
+        shape capsule
+        hitgroup 5
+        mass_weight 1
+        chain_depth 3
+        chain_branches 1
+        region "right_wing"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "tail"
+    {
+        parent "root"
+        alias "tail"
+        alias "tail_01"
+        alias "Bip01 Tail1"
+        override ""
+        required 0
+        minimum_detail 1
+        shape capsule
+        hitgroup 0
+        mass_weight 1
+        chain_depth 6
+        chain_branches 0
+        region "tail"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "jaw"
+    {
+        parent "head"
+        alias "jaw"
+        alias "Bip01 Jaw"
+        override ""
+        required 0
+        minimum_detail 2
+        shape capsule
+        hitgroup 1
+        mass_weight 0.300000012
+        region "head"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+}

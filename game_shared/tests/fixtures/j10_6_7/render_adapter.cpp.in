@@ -1,0 +1,165 @@
+#include "gl_world.h"
+#include "entity_types.h"
+glState_t glState{};
+ref_buildstats_t r_buildstats{};
+ref_stats_t r_stats{};
+bool g_fRenderInitialized=true;
+model_t* worldmodel=nullptr;
+static gl_world_t fixtureWorld{};
+gl_world_t* world=&fixtureWorld;
+static mcubemap_t selectedCubes[2]{};
+static cl_entity_t worldEntity{};
+static cl_entity_t* localPlayer=nullptr;
+static int cubeSearches=0,cacheCreates=0,cacheDestroys=0;
+static float temporaryPose[MAXSTUDIOPOSEPARAM]{};
+static mstudiocache_t modelCache{};
+static studiohdr_t* engineHeader=nullptr;
+static model_t* engineModel=nullptr;
+static bool clientActive=false;
+void CL_FindTwoNearestCubeMap(const Vector&,mcubemap_t** first,mcubemap_t** second) {
+    ++cubeSearches; *first=&selectedCubes[0]; *second=&selectedCubes[1];
+}
+void CStudioModelRenderer::UpdateInstanceMaterials() {
+    m_pModelInstance->materials=static_cast<mstudiomaterial_t*>(std::calloc(1,sizeof(mstudiomaterial_t)));
+}
+mstudiocache_t* CStudioModelRenderer::CreateStudioCache(void*,int) {
+    assert(RI && RI->currentmodel && m_pStudioHeader==RI->currentmodel->cache.data);
+    ++cacheCreates;
+    // GPU work uses temporary pose sliders, exactly as the real cache builder.
+    m_boneSetup.SetStudioPointers(m_pStudioHeader,temporaryPose);
+    return &modelCache;
+}
+void CStudioModelRenderer::DestroyMeshCache() { ++cacheDestroys; }
+#define LIGHT_INTERP_UPDATE 0.1f
+
+@CASES@
+static void setupServices() {
+    gEngfuncs.GetClientTime=[]()->float {return sampleTime;};
+    gEngfuncs.GetMaxClients=[]()->int {return 1;};
+    gEngfuncs.GetLocalPlayer=[]()->cl_entity_t* {return localPlayer;};
+    gEngfuncs.GetEntityByIndex=[](int index)->cl_entity_t* {return index==0 ? &worldEntity : nullptr;};
+    gEngfuncs.pfnSys_FloatTime=[]()->double {return 1.0;};
+    IEngineStudio.Mod_Extradata=[](model_t* model)->void* {return model->cache.data;};
+    IEngineStudio.StudioSetHeader=[](void* header) {engineHeader=static_cast<studiohdr_t*>(header);};
+    IEngineStudio.SetRenderModel=[](model_t* model) {engineModel=model;};
+    gRenderfuncs.pfnMemFree=[](void* pointer,const char*,int) {std::free(pointer);};
+    gRenderfuncs.pfnFileBufferCRC32=[](const void*,int length)->unsigned int {return length;};
+    gEngfuncs.pfnGetCvarPointer=[](const char*)->cvar_t* {return nullptr;};
+    gRenderfuncs.RenderGetParm=[](int parameter,int index)->intptr_t {
+        if(parameter==PARM_CLIENT_ACTIVE) return clientActive;
+        if(parameter==PARM_TEX_SKYBOX) return 100+index;
+        return 0;
+    };
+    selectedCubes[0].origin=Vector(10,0,0);
+    selectedCubes[1].origin=Vector(20,0,0);
+}
+static void checkGL(CStudioModelRenderer::ModelInstance_t* inst) {
+    float expected[16]; inst->m_protationmatrix.CopyToArray(expected);
+    for(int i=0;i<16;++i) near(inst->m_glmatrix[i],expected[i]);
+}
+int main(int argc,char** argv) {
+    assert(argc==2); setupServices(); const std::string mode=argv[1];
+    Fixture f;
+    if(mode=="player-index") {
+        IEngineStudio.SetupPlayerModel=[](int index)->model_t* {assert(index>=0 && index<1); return nullptr;};
+        f.entity.player=true; f.entity.curstate.number=0;
+        assert(!g_StudioRenderer.StudioEnsureCpuInstance(&f.entity));
+        f.entity.player=false; f.entity.curstate.renderfx=kRenderFxDeadPlayer;
+        f.entity.curstate.renderamt=2;
+        assert(!g_StudioRenderer.StudioEnsureCpuInstance(&f.entity));
+    } else if(mode=="model-context" || mode=="model-null" || mode=="model-no-buffer") {
+        studiohdr_t previousHeader{}; model_t previousModel{}; cl_entity_t previousEntity{};
+        float previousParams[MAXSTUDIOPOSEPARAM]{};
+        RI->currententity=&previousEntity; RI->currentmodel=&previousModel;
+        g_StudioRenderer.m_pStudioHeader=&previousHeader;
+        g_StudioRenderer.m_boneSetup.SetStudioPointers(&previousHeader,previousParams);
+        engineHeader=&previousHeader; engineModel=&previousModel;
+        if(mode=="model-null") RI=nullptr;
+        const byte* buffer=mode=="model-no-buffer" ? nullptr : reinterpret_cast<const byte*>(&f.hdr);
+        g_StudioRenderer.ProcessUserData(&f.model,true,buffer);
+        assert(RI);
+        if(mode=="model-null") {
+            assert(RI->currententity==nullptr && RI->currentmodel==nullptr);
+        } else assert(RI->currententity==&previousEntity && RI->currentmodel==&previousModel);
+        assert(g_StudioRenderer.m_pStudioHeader==&previousHeader);
+        assert(g_StudioRenderer.m_boneSetup.m_flPoseParams==previousParams);
+        assert(g_StudioRenderer.m_boneSetup.m_pStudioHeader==&previousHeader);
+        assert(engineHeader==&previousHeader);
+        if(mode=="model-no-buffer") assert(cacheCreates==0);
+        else {
+            assert(cacheCreates==1 && f.model.studiocache==&modelCache);
+            assert(f.model.modelCRC==static_cast<unsigned>(f.hdr.length));
+            g_StudioRenderer.ProcessUserData(&f.model,false,nullptr);
+            assert(cacheDestroys==1 && g_StudioRenderer.m_boneSetup.m_flPoseParams==previousParams);
+        }
+    } else if(mode=="instance-cubemap") {
+        RI->currententity=&f.entity; RI->currentmodel=&f.model;
+        g_StudioRenderer.m_pStudioHeader=&f.hdr;
+        assert(g_StudioRenderer.StudioSetupInstance());
+        auto* inst=g_StudioRenderer.m_pModelInstance;
+        inst->cubemap[0]=&selectedCubes[0]; inst->cubemap[1]=&selectedCubes[1]; inst->lerpFactor=0.75f;
+        inst->info_flags|=MF_VERTEX_LIGHTING;
+        assert(g_StudioRenderer.StudioSetupInstance());
+        assert(inst->cubemap[0]==&selectedCubes[0] && inst->cubemap[1]==&selectedCubes[1]);
+        near(inst->lerpFactor,0.75f); assert(inst->info_flags&MF_VERTEX_LIGHTING);
+    } else if(mode=="physical-gl") {
+        auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        RI->currententity=&f.entity; g_StudioRenderer.m_pModelInstance=inst;
+        for(int reason=0;reason<6;++reason) {
+            inst->m_partPoseActive[1]=reason==0;
+            inst->m_bExternalBones=reason==1; inst->m_bRagdollPose=reason==2; inst->m_bRagdollExitBlend=reason==3;
+            if(reason==4) {localPlayer=&f.entity; f.entity.curstate.entityType=ET_PLAYER;}
+            else localPlayer=nullptr;
+            if(reason==5) inst->m_pJiggleBones=new CJiggleBones;
+            inst->m_protationmatrix=matrix3x4(Vector(30+reason,0,0),Vector(0,90,0),Vector(0.1f));
+            assert(!g_StudioRenderer.CheckBoneCache(1)); checkGL(inst);
+            same(inst->bonecache.transform,inst->m_protationmatrix);
+        }
+    } else if(mode=="coincident-cube" || mode=="initial-cube") {
+        auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        RI->currententity=&f.entity; g_StudioRenderer.m_pModelInstance=inst;
+        const float x=mode=="initial-cube" ? 0.0f : 10.0f;
+        inst->m_protationmatrix=matrix3x4(Vector(x,0,0),g_vecZero,1.0f);
+        inst->absmin=inst->absmax=selectedCubes[0].origin=selectedCubes[1].origin=Vector(x,0,0);
+        g_StudioRenderer.CheckBoneCache(1);
+        assert(cubeSearches==1 && inst->cubemap[0]==&selectedCubes[0]);
+        assert(std::isfinite(inst->lerpFactor)); near(inst->lerpFactor,0);
+        checkGL(inst); assert(g_StudioRenderer.CheckBoneCache(1)); assert(cubeSearches==1);
+    } else if(mode=="sky-model") {
+        f.sequences[0].numblends=1; f.sequences[0].groupsize[0]=f.sequences[0].groupsize[1]=1;
+        f.entity.curstate.iuser1|=CF_STATIC_ENTITY; f.entity.curstate.startpos=Vector(0.1f);
+        auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        g_StudioRenderer.m_pModelInstance=inst; g_StudioRenderer.m_pStudioHeader=&f.hdr;
+        RI->currententity=&f.entity; RI->currentmodel=&f.model;
+        for(int yaw=0;yaw<360;yaw+=90) {
+            inst->m_protationmatrix=matrix3x4(Vector(-67,921,-622),Vector(0,yaw,0),Vector(0.1f));
+            f.entity.angles=Vector(0,yaw,0); g_StudioRenderer.StudioSetupBones();
+            const Vector expected=inst->m_protationmatrix.VectorTransform(Vector(5,0,0));
+            near(inst->m_studiopos[2].x,expected.x); near(inst->m_studiopos[2].y,expected.y);
+            near(inst->m_studiopos[2].z,expected.z); checkGL(inst);
+        }
+    }
+#ifdef J1067_RENDER_REPORT
+    else if(mode=="report-menu" || mode=="report-map") {
+        if(mode=="report-map") {
+            clientActive=true;worldmodel=&f.model;std::strcpy(f.model.name,"maps/env_cubemap.bsp");
+            RI->view.flags|=RF_SKYVISIBLE;
+            for(int i=0;i<2;++i) RI->view.skyMaxs[0][i]=RI->view.skyMaxs[1][i]=1;
+            world->num_cubemaps=2;world->cubemaps[0].valid=true;
+            tr.sky_camera=&f.entity;f.entity.index=17;f.entity.curstate.scale=64;
+            f.entity.curstate.origin=Vector(-54,889,-618);r_stats.c_sky_passes=1;
+        } else RI=nullptr;
+        R_RenderReport();
+        assert(capturedReport.find("PrimeXT render report K.11")!=std::string::npos);
+        if(mode=="report-menu") assert(capturedReport.find("No active map")!=std::string::npos);
+        else {
+            assert(capturedReport.find("skyVisible=1 skySides=2")!=std::string::npos);
+            assert(capturedReport.find("skyTextures=100,101,102,103,104,105")!=std::string::npos);
+            assert(capturedReport.find("skyCamera=17 origin=-54.00,889.00,-618.00 scale=64.000")!=std::string::npos);
+            assert(capturedReport.find("cubemaps=2 valid=1")!=std::string::npos);
+        }
+    }
+#endif
+    else assert(false);
+    std::cout<<mode<<" production method checks passed\n";
+}

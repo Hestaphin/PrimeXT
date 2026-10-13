@@ -16,6 +16,7 @@ GNU General Public License for more details.
 #include "server_weapon_layer_impl.h"
 #include "gamerules.h"
 #include "game.h"
+#include "modular_damage_scope.h"
 
 CServerWeaponLayerImpl::CServerWeaponLayerImpl(CBasePlayerWeapon *weaponEntity) :
 	m_pWeapon(weaponEntity)
@@ -131,7 +132,7 @@ Vector CServerWeaponLayerImpl::GetAutoaimVector(float delta)
 	return gpGlobals->v_forward;
 }
 
-Vector CServerWeaponLayerImpl::FireBullets(int bullets, Vector origin, matrix3x3 orientation, float distance, float spread, int bulletType, uint32_t seed, int damage)
+Vector CServerWeaponLayerImpl::FireBullets(int bullets, Vector origin, matrix3x3 orientation, float distance, float spread, int bulletType, uint32_t seed, float damage)
 {
 	float x, y, z;
 	TraceResult tr;
@@ -152,21 +153,30 @@ Vector CServerWeaponLayerImpl::FireBullets(int bullets, Vector origin, matrix3x3
 						y * spread * orientation.GetUp();
 		Vector vecEnd = origin + vecDir * distance;
 
-		SetBits(gpGlobals->trace_flags, FTRACE_MATERIAL_TRACE);
+		SetBits(gpGlobals->trace_flags, FTRACE_MATERIAL_TRACE | FTRACE_BULLET_PHYSICS);
 		UTIL_TraceLine(origin, vecEnd, dont_ignore_monsters, ENT(player->pev), &tr);
-		ClearBits(gpGlobals->trace_flags, FTRACE_MATERIAL_TRACE);
+		ClearBits(gpGlobals->trace_flags, FTRACE_MATERIAL_TRACE | FTRACE_BULLET_PHYSICS);
+		const int ragdollBody = ResolveRagdollBulletCollision( &tr, origin, vecEnd, ENT(player->pev) );
 
 		// do damage, paint decals
 		if (tr.flFraction != 1.0)
 		{
 			CBaseEntity *pEntity = CBaseEntity::Instance(tr.pHit);
+			TraceResult impactTrace;
+			ResolveBulletImpactEffects( &tr, origin, vecEnd, &impactTrace );
 
 			if ( damage )
 			{
-				pEntity->TraceAttack(player->pev, damage, vecDir, &tr, DMG_BULLET | ((damage > 16) ? DMG_ALWAYSGIB : DMG_NEVERGIB) );
+				ApplyPhysicsBulletImpulse( &tr, ragdollBody, origin, vecEnd, vecDir, damage );
+				// Authored v4 bullet damage does not itself force gibs.
+				const bool modularV4 = g_modularDamageSource && g_modularDamageSource->weapon &&
+				    g_modularDamageSource->weapon->schemaVersion >= 4;
+				const int damageFlags = modularV4 ? DMG_BULLET :
+				    DMG_BULLET | ((damage > 16) ? DMG_ALWAYSGIB : DMG_NEVERGIB);
+				pEntity->TraceAttack(player->pev, damage, vecDir, &tr, damageFlags);
 				
-				TEXTURETYPE_PlaySound(&tr, origin, vecEnd, bulletType);
-				DecalGunshot( &tr, bulletType, origin, vecEnd );
+				TEXTURETYPE_PlaySound(&impactTrace, origin, vecEnd, bulletType);
+				DecalGunshot( &impactTrace, bulletType, origin, vecEnd );
 			} 
 			else
 			{
@@ -174,29 +184,34 @@ Vector CServerWeaponLayerImpl::FireBullets(int bullets, Vector origin, matrix3x3
 				{
 					default:
 					case BULLET_PLAYER_9MM:
+						ApplyPhysicsBulletImpulse( &tr, ragdollBody, origin, vecEnd, vecDir, gSkillData.plrDmg9MM );
 						pEntity->TraceAttack(player->pev, gSkillData.plrDmg9MM, vecDir, &tr, DMG_BULLET);
 						break;
 
 					case BULLET_PLAYER_MP5:
+						ApplyPhysicsBulletImpulse( &tr, ragdollBody, origin, vecEnd, vecDir, gSkillData.plrDmgMP5 );
 						pEntity->TraceAttack(player->pev, gSkillData.plrDmgMP5, vecDir, &tr, DMG_BULLET);
 						break;
 
 					case BULLET_PLAYER_BUCKSHOT:
 						// make distance based!
+						ApplyPhysicsBulletImpulse( &tr, ragdollBody, origin, vecEnd, vecDir, gSkillData.plrDmgBuckshot );
 						pEntity->TraceAttack(player->pev, gSkillData.plrDmgBuckshot, vecDir, &tr, DMG_BULLET);
 						break;
 
 					case BULLET_PLAYER_357:
+						ApplyPhysicsBulletImpulse( &tr, ragdollBody, origin, vecEnd, vecDir, gSkillData.plrDmg357 );
 						pEntity->TraceAttack(player->pev, gSkillData.plrDmg357, vecDir, &tr, DMG_BULLET);
 						break;
 
 					case BULLET_NONE: // FIX 
+						ApplyPhysicsBulletImpulse( &tr, ragdollBody, origin, vecEnd, vecDir, 50.0f );
 						pEntity->TraceAttack(player->pev, 50, vecDir, &tr, DMG_CLUB);
 						break;
 				}
 
-				TEXTURETYPE_PlaySound(&tr, origin, vecEnd, bulletType);
-				DecalGunshot(&tr, bulletType, origin, vecEnd);
+				TEXTURETYPE_PlaySound(&impactTrace, origin, vecEnd, bulletType);
+				DecalGunshot(&impactTrace, bulletType, origin, vecEnd);
 			}
 		}
 		// make bullet trails
@@ -206,6 +221,8 @@ Vector CServerWeaponLayerImpl::FireBullets(int bullets, Vector origin, matrix3x3
 	ApplyMultiDamage(player->pev, player->pev);
 	return Vector( x * spread, y * spread, 0.0 );
 }
+
+int CServerWeaponLayerImpl::FindAmmoType(const char* name) { return CBasePlayer::GetAmmoIndex(name); }
 
 int CServerWeaponLayerImpl::GetPlayerAmmo(int ammoType)
 {
@@ -224,7 +241,8 @@ void CServerWeaponLayerImpl::SetPlayerWeaponAnim(int anim)
 
 void CServerWeaponLayerImpl::SetPlayerViewmodel(std::string_view model)
 {
-	m_pWeapon->m_pPlayer->pev->viewmodel = MAKE_STRING(model.data());
+	if (model != STRING(m_pWeapon->m_pPlayer->pev->viewmodel))
+		m_pWeapon->m_pPlayer->pev->viewmodel = ALLOC_STRING(std::string(model).c_str());
 }
 
 void CServerWeaponLayerImpl::DisablePlayerViewmodel()

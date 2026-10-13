@@ -67,6 +67,7 @@ void CSentry::Spawn()
 
 void CSentry::Shoot(Vector &vecSrc, Vector &vecDirToEnemy)
 {
+	if (TryModularShoot(vecSrc, vecDirToEnemy)) return;
 	FireBullets( 1, vecSrc, vecDirToEnemy, TURRET_SPREAD, TURRET_RANGE, BULLET_MONSTER_MP5, 1 );
 	
 	switch(RANDOM_LONG(0,2))

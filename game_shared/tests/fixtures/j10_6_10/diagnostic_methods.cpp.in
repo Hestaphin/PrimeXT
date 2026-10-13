@@ -1,0 +1,158 @@
+// Compile actual production recorder/export methods with getter-only actors
+// and explicit engine/UI adapters. No SDK, GUI or physics solver is simulated.
+#include "physics_asset_diagnostics.h"
+#include "physics_asset_format.h"
+#include "physics_asset_settings.h"
+#include <cassert>
+#include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <cerrno>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <vector>
+using namespace physx;
+static std::vector<std::string> alerts;
+enum { at_console };
+static void ALERT(int,const char *format,...)
+{
+    char buffer[8192]; va_list args; va_start(args,format); std::vsnprintf(buffer,sizeof(buffer),format,args); va_end(args);
+    alerts.emplace_back(buffer);
+}
+static const char *va(const char *format,...)
+{
+    static char buffer[8192]; va_list args; va_start(args,format); std::vsnprintf(buffer,sizeof(buffer),format,args); va_end(args); return buffer;
+}
+struct Owner { int entindex()const{return 7;} };
+struct RuntimeBody
+{
+    int boneIndex=1;
+    PxRigidDynamic *actor=nullptr;
+    PxTransform referenceBonePose,bodyToBonePose,simulatedBonePose;
+    bool hasSimulationPose=true;
+};
+class PhysicsAssetInstance
+{
+public:
+    bool m_ragdoll=true,m_actorsCreated=true,m_diagnosticsStarted=false;
+    double m_diagnosticsBindSpan=0;
+    int m_rootBodyIndex=0;
+    Owner *m_owner=nullptr;
+    std::shared_ptr<physicsasset::AssetDef> m_def=std::make_shared<physicsasset::AssetDef>();
+    std::vector<RuntimeBody> m_bodies;
+    std::vector<PxJoint *> m_joints;
+    ragdolldiag::Cadence m_diagnosticsCadence;
+    ragdolldiag::Window m_diagnosticsWindow;
+    void RecordDiagnostics(float,const PxSimulationStatistics *,float,float=-1,float=-1);
+};
+struct Model
+{
+    bool diagnostics=false; int root=-1;
+    ragdolldiag::PoseMetrics pose;
+    void SetToolPoseDiagnostics(bool e,int r=-1){diagnostics=e;root=r;pose=ragdolldiag::PoseMetrics{};}
+    const ragdolldiag::PoseMetrics &GetToolPoseDiagnostics()const{return pose;}
+};
+struct Button { std::string label; void setLabel(const char *s){label=s;} };
+class PhysicsAssetEditor
+{
+public:
+    struct Preview
+    {
+        ragdolldiag::Cadence diagnosticsCadence;
+        ragdolldiag::Window diagnosticsWindow;
+        double diagnosticsBindSpan=64;
+        int diagnosticsRootBody=0,diagnosticsRootBone=1;
+    };
+    Model m_model;
+    Button button;
+    Button *m_diagnosticsButton=&button;
+    std::unique_ptr<Preview> m_preview=std::make_unique<Preview>();
+    physicsasset::AssetDef m_asset;
+    std::unique_ptr<physicsasset::AssetDef> m_generationPreview;
+    const physicsasset::AssetDef &ActivePreviewAsset() const { return m_generationPreview ? *m_generationPreview : m_asset; }
+    bool m_dirty=true,m_simulating=true,m_diagnosticsEnabled=false,m_diagnosticsReportDue=false;
+    unsigned m_diagnosticsDroppedRows=0;
+    std::string m_modelPath="fixture.mdl",m_assetPath,m_diagnosticsMetadata,status;
+    std::vector<std::string> m_diagnosticsRows;
+    ragdolldiag::Snapshot m_lastDiagnostics;
+    void UpdateStatus(const char *s){status=s;}
+    void ToggleDiagnostics(); void BeginDiagnosticCapture(); void RecordPreviewDiagnostics(); void SaveDiagnostics();
+};
+@PRODUCTION@
+
+static std::vector<std::string> Split(const std::string &s)
+{
+    std::vector<std::string> out; std::istringstream in(s); std::string value;
+    while(std::getline(in,value,','))out.push_back(value);
+    return out;
+}
+static double Column(const std::string &line,const std::string &name)
+{
+    const auto fields=Split(ragdolldiag::CsvHeader()),row=Split(line.substr(line.find("data=")+5));
+    const auto where=std::find(fields.begin(),fields.end(),name);assert(where!=fields.end());
+    return std::stod(row.at(static_cast<size_t>(where-fields.begin())));
+}
+static std::string Read(const std::string &path){std::ifstream f(path);return {std::istreambuf_iterator<char>(f),{}};}
+int main(int argc,char **argv)
+{
+    assert(argc==2);
+    Owner owner; PxRigidDynamic actor;
+    actor.pose=PxTransform(PxVec3(10,0,0));actor.angular=PxVec3(0,0,9);
+    PhysicsAssetInstance instance;instance.m_owner=&owner;instance.m_def->sourcePath="fixture.phys";
+    RuntimeBody body;body.actor=&actor;body.bodyToBonePose=PxTransform(PxVec3(-3,0,0));
+    body.simulatedBonePose=PxTransform(PxVec3(7,0,0));instance.m_bodies.push_back(body);
+    body.referenceBonePose.p.z=64;body.boneIndex=2;instance.m_bodies.push_back(body);
+    const PxTransform unchangedPose=actor.pose;
+    instance.RecordDiagnostics(0.01f,nullptr,0);
+    assert(actor.reads==0&&alerts.empty()&&!instance.m_diagnosticsStarted);
+    instance.RecordDiagnostics(0.01f,nullptr,std::numeric_limits<float>::quiet_NaN());assert(actor.reads==0);
+    instance.RecordDiagnostics(0.01f,nullptr,1);
+    assert(alerts.size()==3&&instance.m_diagnosticsStarted);
+    assert(Column(alerts.back(),"driven_position_delta")==0);
+    assert(Column(alerts.back(),"bind_span")==64);
+    instance.m_bodies[0].simulatedBonePose.p.x+=5;actor.angular.z=30;
+    for(int i=0;i<100;++i)instance.RecordDiagnostics(0.01f,nullptr,1);
+    assert(alerts.size()==4);assert(Column(alerts.back(),"angular_peak")==30);
+    assert(Column(alerts.back(),"driven_position_delta")==5);
+    assert(actor.pose.p.x==unchangedPose.p.x&&actor.pose.q.w==unchangedPose.q.w); // recorder did not alter simulation
+    const unsigned reads=actor.reads;
+    instance.RecordDiagnostics(0.01f,nullptr,0);assert(actor.reads==reads&&!instance.m_diagnosticsStarted);
+    instance.RecordDiagnostics(0.01f,nullptr,2);assert(alerts.size()==7);
+    instance.RecordDiagnostics(0.01f,nullptr,2);assert(alerts.size()==8);
+    instance.m_ragdoll=false;const unsigned after=actor.reads;instance.RecordDiagnostics(0.01f,nullptr,2);assert(actor.reads==after);
+
+    PhysicsAssetEditor editor;
+    editor.m_assetPath=(std::filesystem::path(argv[1])/"fixture.phys").string();
+    physicsasset::BodyDef assetBody;assetBody.name="pelvis";assetBody.bone="fixture_pelvis";editor.m_asset.bodies.push_back(assetBody);
+    {std::ofstream asset(editor.m_assetPath);asset<<"original_asset_bytes";}
+#ifdef PHYSICS_ASSET_EDITOR_PHYSX
+    editor.ToggleDiagnostics();assert(editor.m_diagnosticsEnabled&&editor.m_model.diagnostics);
+    assert(editor.m_diagnosticsMetadata.find("# unsaved 1")!=std::string::npos);
+    ragdolldiag::Snapshot sample;sample.stepSeconds=1.0/60;sample.bindSpan=64;sample.maxAnchorSeparation=0.25;
+    editor.m_preview->diagnosticsWindow.Push(sample);editor.m_preview->diagnosticsCadence.Advance(sample.stepSeconds,0.25);
+    editor.m_diagnosticsReportDue=true;editor.m_model.pose.valid=true;editor.m_model.pose.ancestorPositionDelta=2;
+    editor.RecordPreviewDiagnostics();assert(editor.m_diagnosticsRows.size()==1);
+    assert(editor.m_lastDiagnostics.pose.ancestorPositionDelta==2);
+    {std::ofstream prior(editor.m_assetPath+".f0.1.csv");prior<<"previous_recording";}
+    editor.SaveDiagnostics();assert(Read(editor.m_assetPath+".f0.1.csv")=="previous_recording");
+    assert(Read(editor.m_assetPath+".f0.2.csv").find(ragdolldiag::CsvHeader())!=std::string::npos);
+    editor.SaveDiagnostics();assert(std::filesystem::exists(editor.m_assetPath+".f0.3.csv"));
+    assert(Read(editor.m_assetPath)=="original_asset_bytes");
+    editor.m_diagnosticsRows.resize(4096,"existing_row");editor.m_preview->diagnosticsWindow.Push(sample);editor.m_diagnosticsReportDue=true;
+    editor.RecordPreviewDiagnostics();assert(editor.m_diagnosticsRows.size()==4096&&editor.m_diagnosticsDroppedRows==1);
+    editor.ToggleDiagnostics();assert(!editor.m_model.diagnostics&&!editor.m_diagnosticsEnabled);
+    assert(editor.m_diagnosticsRows.size()==4096);
+    editor.m_assetPath=(std::filesystem::path(argv[1])/"nonexistent"/"fixture.phys").string();editor.SaveDiagnostics();
+    assert(editor.status.find("Cannot create")!=std::string::npos);
+    std::cout<<"PASS actual runtime recorder and pxmv diagnostic toggle/capture/exclusive export/cap/failure methods (getter/UI adapters; NO solver/GUI)\n";
+#else
+    editor.ToggleDiagnostics();assert(!editor.m_diagnosticsEnabled&&!editor.m_model.diagnostics);
+    assert(editor.status.find("require a PhysX-enabled")!=std::string::npos);
+    editor.SaveDiagnostics();assert(editor.status.find("No F0 samples")!=std::string::npos);
+    std::cout<<"PASS actual runtime recorder and PhysX-disabled pxmv diagnostic methods (getter/UI adapters; NO SDK/GUI)\n";
+#endif
+    assert(Read(editor.m_assetPath.empty() ? "" : (std::filesystem::path(argv[1])/"fixture.phys").string())=="original_asset_bytes");
+}

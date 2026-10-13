@@ -1,0 +1,864 @@
+physics_asset
+{
+    version 5
+
+    simulation
+    {
+        linear_damping 0.0500000007
+        angular_damping 0.5
+        solver_position_iterations 16
+        solver_velocity_iterations 4
+        max_linear_velocity 2000
+        max_angular_velocity 20
+        max_depenetration_velocity 200
+        sleep_threshold 0.5
+        contact_offset 0.787401557
+        rest_offset 0
+        ccd 1
+        angular_resistance 1.5
+        drive_max_torque 1000
+        projection off
+        projection_linear_tolerance 0.25
+        projection_angular_tolerance 10
+    }
+
+    self_collision selective
+    collision_pair "root" "chest" deny
+    collision_pair "root" "head" deny
+    collision_pair "root" "limb_l" deny
+    collision_pair "root" "wing_l" deny
+    collision_pair "root" "limb_r" deny
+    collision_pair "root" "wing_r" deny
+    collision_pair "root" "tail" deny
+    collision_pair "root" "jaw" allow
+    collision_pair "root" "lower_l" allow
+    collision_pair "root" "tip_l" allow
+    collision_pair "root" "feather_l_a" allow
+    collision_pair "root" "feather_l_b" allow
+    collision_pair "root" "feather_tip_l_a" allow
+    collision_pair "root" "feather_tip_l_b" allow
+    collision_pair "root" "lower_r" allow
+    collision_pair "root" "tip_r" allow
+    collision_pair "root" "feather_r_a" allow
+    collision_pair "root" "feather_r_b" allow
+    collision_pair "root" "feather_tip_r_a" allow
+    collision_pair "root" "feather_tip_r_b" allow
+    collision_pair "root" "tail_02" deny
+    collision_pair "root" "tail_03" allow
+    collision_pair "root" "tail_04" allow
+    collision_pair "chest" "head" deny
+    collision_pair "chest" "limb_l" deny
+    collision_pair "chest" "wing_l" deny
+    collision_pair "chest" "limb_r" deny
+    collision_pair "chest" "wing_r" deny
+    collision_pair "chest" "tail" deny
+    collision_pair "chest" "jaw" deny
+    collision_pair "chest" "lower_l" deny
+    collision_pair "chest" "tip_l" allow
+    collision_pair "chest" "feather_l_a" deny
+    collision_pair "chest" "feather_l_b" deny
+    collision_pair "chest" "feather_tip_l_a" allow
+    collision_pair "chest" "feather_tip_l_b" allow
+    collision_pair "chest" "lower_r" deny
+    collision_pair "chest" "tip_r" allow
+    collision_pair "chest" "feather_r_a" deny
+    collision_pair "chest" "feather_r_b" deny
+    collision_pair "chest" "feather_tip_r_a" allow
+    collision_pair "chest" "feather_tip_r_b" allow
+    collision_pair "chest" "tail_02" allow
+    collision_pair "chest" "tail_03" allow
+    collision_pair "chest" "tail_04" allow
+    collision_pair "head" "limb_l" deny
+    collision_pair "head" "wing_l" deny
+    collision_pair "head" "limb_r" deny
+    collision_pair "head" "wing_r" deny
+    collision_pair "head" "tail" allow
+    collision_pair "head" "jaw" deny
+    collision_pair "head" "lower_l" allow
+    collision_pair "head" "tip_l" allow
+    collision_pair "head" "feather_l_a" allow
+    collision_pair "head" "feather_l_b" allow
+    collision_pair "head" "feather_tip_l_a" allow
+    collision_pair "head" "feather_tip_l_b" allow
+    collision_pair "head" "lower_r" allow
+    collision_pair "head" "tip_r" allow
+    collision_pair "head" "feather_r_a" allow
+    collision_pair "head" "feather_r_b" allow
+    collision_pair "head" "feather_tip_r_a" allow
+    collision_pair "head" "feather_tip_r_b" allow
+    collision_pair "head" "tail_02" allow
+    collision_pair "head" "tail_03" allow
+    collision_pair "head" "tail_04" allow
+    collision_pair "limb_l" "wing_l" deny
+    collision_pair "limb_l" "limb_r" deny
+    collision_pair "limb_l" "wing_r" deny
+    collision_pair "limb_l" "tail" allow
+    collision_pair "limb_l" "jaw" allow
+    collision_pair "limb_l" "lower_l" deny
+    collision_pair "limb_l" "tip_l" deny
+    collision_pair "limb_l" "feather_l_a" allow
+    collision_pair "limb_l" "feather_l_b" allow
+    collision_pair "limb_l" "feather_tip_l_a" allow
+    collision_pair "limb_l" "feather_tip_l_b" allow
+    collision_pair "limb_l" "lower_r" allow
+    collision_pair "limb_l" "tip_r" allow
+    collision_pair "limb_l" "feather_r_a" allow
+    collision_pair "limb_l" "feather_r_b" allow
+    collision_pair "limb_l" "feather_tip_r_a" allow
+    collision_pair "limb_l" "feather_tip_r_b" allow
+    collision_pair "limb_l" "tail_02" allow
+    collision_pair "limb_l" "tail_03" allow
+    collision_pair "limb_l" "tail_04" allow
+    collision_pair "wing_l" "limb_r" deny
+    collision_pair "wing_l" "wing_r" deny
+    collision_pair "wing_l" "tail" allow
+    collision_pair "wing_l" "jaw" allow
+    collision_pair "wing_l" "lower_l" allow
+    collision_pair "wing_l" "tip_l" allow
+    collision_pair "wing_l" "feather_l_a" deny
+    collision_pair "wing_l" "feather_l_b" deny
+    collision_pair "wing_l" "feather_tip_l_a" deny
+    collision_pair "wing_l" "feather_tip_l_b" deny
+    collision_pair "wing_l" "lower_r" allow
+    collision_pair "wing_l" "tip_r" allow
+    collision_pair "wing_l" "feather_r_a" allow
+    collision_pair "wing_l" "feather_r_b" allow
+    collision_pair "wing_l" "feather_tip_r_a" allow
+    collision_pair "wing_l" "feather_tip_r_b" allow
+    collision_pair "wing_l" "tail_02" allow
+    collision_pair "wing_l" "tail_03" allow
+    collision_pair "wing_l" "tail_04" allow
+    collision_pair "limb_r" "wing_r" deny
+    collision_pair "limb_r" "tail" allow
+    collision_pair "limb_r" "jaw" allow
+    collision_pair "limb_r" "lower_l" allow
+    collision_pair "limb_r" "tip_l" allow
+    collision_pair "limb_r" "feather_l_a" allow
+    collision_pair "limb_r" "feather_l_b" allow
+    collision_pair "limb_r" "feather_tip_l_a" allow
+    collision_pair "limb_r" "feather_tip_l_b" allow
+    collision_pair "limb_r" "lower_r" deny
+    collision_pair "limb_r" "tip_r" deny
+    collision_pair "limb_r" "feather_r_a" allow
+    collision_pair "limb_r" "feather_r_b" allow
+    collision_pair "limb_r" "feather_tip_r_a" allow
+    collision_pair "limb_r" "feather_tip_r_b" allow
+    collision_pair "limb_r" "tail_02" allow
+    collision_pair "limb_r" "tail_03" allow
+    collision_pair "limb_r" "tail_04" allow
+    collision_pair "wing_r" "tail" allow
+    collision_pair "wing_r" "jaw" allow
+    collision_pair "wing_r" "lower_l" allow
+    collision_pair "wing_r" "tip_l" allow
+    collision_pair "wing_r" "feather_l_a" allow
+    collision_pair "wing_r" "feather_l_b" allow
+    collision_pair "wing_r" "feather_tip_l_a" allow
+    collision_pair "wing_r" "feather_tip_l_b" allow
+    collision_pair "wing_r" "lower_r" allow
+    collision_pair "wing_r" "tip_r" allow
+    collision_pair "wing_r" "feather_r_a" deny
+    collision_pair "wing_r" "feather_r_b" deny
+    collision_pair "wing_r" "feather_tip_r_a" deny
+    collision_pair "wing_r" "feather_tip_r_b" deny
+    collision_pair "wing_r" "tail_02" allow
+    collision_pair "wing_r" "tail_03" allow
+    collision_pair "wing_r" "tail_04" allow
+    collision_pair "tail" "jaw" allow
+    collision_pair "tail" "lower_l" allow
+    collision_pair "tail" "tip_l" allow
+    collision_pair "tail" "feather_l_a" allow
+    collision_pair "tail" "feather_l_b" allow
+    collision_pair "tail" "feather_tip_l_a" allow
+    collision_pair "tail" "feather_tip_l_b" allow
+    collision_pair "tail" "lower_r" allow
+    collision_pair "tail" "tip_r" allow
+    collision_pair "tail" "feather_r_a" allow
+    collision_pair "tail" "feather_r_b" allow
+    collision_pair "tail" "feather_tip_r_a" allow
+    collision_pair "tail" "feather_tip_r_b" allow
+    collision_pair "tail" "tail_02" deny
+    collision_pair "tail" "tail_03" deny
+    collision_pair "tail" "tail_04" allow
+    collision_pair "jaw" "lower_l" allow
+    collision_pair "jaw" "tip_l" allow
+    collision_pair "jaw" "feather_l_a" allow
+    collision_pair "jaw" "feather_l_b" allow
+    collision_pair "jaw" "feather_tip_l_a" allow
+    collision_pair "jaw" "feather_tip_l_b" allow
+    collision_pair "jaw" "lower_r" allow
+    collision_pair "jaw" "tip_r" allow
+    collision_pair "jaw" "feather_r_a" allow
+    collision_pair "jaw" "feather_r_b" allow
+    collision_pair "jaw" "feather_tip_r_a" allow
+    collision_pair "jaw" "feather_tip_r_b" allow
+    collision_pair "jaw" "tail_02" allow
+    collision_pair "jaw" "tail_03" allow
+    collision_pair "jaw" "tail_04" allow
+    collision_pair "lower_l" "tip_l" deny
+    collision_pair "lower_l" "feather_l_a" allow
+    collision_pair "lower_l" "feather_l_b" allow
+    collision_pair "lower_l" "feather_tip_l_a" allow
+    collision_pair "lower_l" "feather_tip_l_b" allow
+    collision_pair "lower_l" "lower_r" allow
+    collision_pair "lower_l" "tip_r" allow
+    collision_pair "lower_l" "feather_r_a" allow
+    collision_pair "lower_l" "feather_r_b" allow
+    collision_pair "lower_l" "feather_tip_r_a" allow
+    collision_pair "lower_l" "feather_tip_r_b" allow
+    collision_pair "lower_l" "tail_02" allow
+    collision_pair "lower_l" "tail_03" allow
+    collision_pair "lower_l" "tail_04" allow
+    collision_pair "tip_l" "feather_l_a" allow
+    collision_pair "tip_l" "feather_l_b" allow
+    collision_pair "tip_l" "feather_tip_l_a" allow
+    collision_pair "tip_l" "feather_tip_l_b" allow
+    collision_pair "tip_l" "lower_r" allow
+    collision_pair "tip_l" "tip_r" allow
+    collision_pair "tip_l" "feather_r_a" allow
+    collision_pair "tip_l" "feather_r_b" allow
+    collision_pair "tip_l" "feather_tip_r_a" allow
+    collision_pair "tip_l" "feather_tip_r_b" allow
+    collision_pair "tip_l" "tail_02" allow
+    collision_pair "tip_l" "tail_03" allow
+    collision_pair "tip_l" "tail_04" allow
+    collision_pair "feather_l_a" "feather_l_b" deny
+    collision_pair "feather_l_a" "feather_tip_l_a" deny
+    collision_pair "feather_l_a" "feather_tip_l_b" allow
+    collision_pair "feather_l_a" "lower_r" allow
+    collision_pair "feather_l_a" "tip_r" allow
+    collision_pair "feather_l_a" "feather_r_a" allow
+    collision_pair "feather_l_a" "feather_r_b" allow
+    collision_pair "feather_l_a" "feather_tip_r_a" allow
+    collision_pair "feather_l_a" "feather_tip_r_b" allow
+    collision_pair "feather_l_a" "tail_02" allow
+    collision_pair "feather_l_a" "tail_03" allow
+    collision_pair "feather_l_a" "tail_04" allow
+    collision_pair "feather_l_b" "feather_tip_l_a" allow
+    collision_pair "feather_l_b" "feather_tip_l_b" deny
+    collision_pair "feather_l_b" "lower_r" allow
+    collision_pair "feather_l_b" "tip_r" allow
+    collision_pair "feather_l_b" "feather_r_a" allow
+    collision_pair "feather_l_b" "feather_r_b" allow
+    collision_pair "feather_l_b" "feather_tip_r_a" allow
+    collision_pair "feather_l_b" "feather_tip_r_b" allow
+    collision_pair "feather_l_b" "tail_02" allow
+    collision_pair "feather_l_b" "tail_03" allow
+    collision_pair "feather_l_b" "tail_04" allow
+    collision_pair "feather_tip_l_a" "feather_tip_l_b" allow
+    collision_pair "feather_tip_l_a" "lower_r" allow
+    collision_pair "feather_tip_l_a" "tip_r" allow
+    collision_pair "feather_tip_l_a" "feather_r_a" allow
+    collision_pair "feather_tip_l_a" "feather_r_b" allow
+    collision_pair "feather_tip_l_a" "feather_tip_r_a" allow
+    collision_pair "feather_tip_l_a" "feather_tip_r_b" allow
+    collision_pair "feather_tip_l_a" "tail_02" allow
+    collision_pair "feather_tip_l_a" "tail_03" allow
+    collision_pair "feather_tip_l_a" "tail_04" allow
+    collision_pair "feather_tip_l_b" "lower_r" allow
+    collision_pair "feather_tip_l_b" "tip_r" allow
+    collision_pair "feather_tip_l_b" "feather_r_a" allow
+    collision_pair "feather_tip_l_b" "feather_r_b" allow
+    collision_pair "feather_tip_l_b" "feather_tip_r_a" allow
+    collision_pair "feather_tip_l_b" "feather_tip_r_b" allow
+    collision_pair "feather_tip_l_b" "tail_02" allow
+    collision_pair "feather_tip_l_b" "tail_03" allow
+    collision_pair "feather_tip_l_b" "tail_04" allow
+    collision_pair "lower_r" "tip_r" deny
+    collision_pair "lower_r" "feather_r_a" allow
+    collision_pair "lower_r" "feather_r_b" allow
+    collision_pair "lower_r" "feather_tip_r_a" allow
+    collision_pair "lower_r" "feather_tip_r_b" allow
+    collision_pair "lower_r" "tail_02" allow
+    collision_pair "lower_r" "tail_03" allow
+    collision_pair "lower_r" "tail_04" allow
+    collision_pair "tip_r" "feather_r_a" allow
+    collision_pair "tip_r" "feather_r_b" allow
+    collision_pair "tip_r" "feather_tip_r_a" allow
+    collision_pair "tip_r" "feather_tip_r_b" allow
+    collision_pair "tip_r" "tail_02" allow
+    collision_pair "tip_r" "tail_03" allow
+    collision_pair "tip_r" "tail_04" allow
+    collision_pair "feather_r_a" "feather_r_b" deny
+    collision_pair "feather_r_a" "feather_tip_r_a" deny
+    collision_pair "feather_r_a" "feather_tip_r_b" allow
+    collision_pair "feather_r_a" "tail_02" allow
+    collision_pair "feather_r_a" "tail_03" allow
+    collision_pair "feather_r_a" "tail_04" allow
+    collision_pair "feather_r_b" "feather_tip_r_a" allow
+    collision_pair "feather_r_b" "feather_tip_r_b" deny
+    collision_pair "feather_r_b" "tail_02" allow
+    collision_pair "feather_r_b" "tail_03" allow
+    collision_pair "feather_r_b" "tail_04" allow
+    collision_pair "feather_tip_r_a" "feather_tip_r_b" allow
+    collision_pair "feather_tip_r_a" "tail_02" allow
+    collision_pair "feather_tip_r_a" "tail_03" allow
+    collision_pair "feather_tip_r_a" "tail_04" allow
+    collision_pair "feather_tip_r_b" "tail_02" allow
+    collision_pair "feather_tip_r_b" "tail_03" allow
+    collision_pair "feather_tip_r_b" "tail_04" allow
+    collision_pair "tail_02" "tail_03" deny
+    collision_pair "tail_02" "tail_04" deny
+    collision_pair "tail_03" "tail_04" deny
+
+    body "root"
+    {
+        bone "root"
+        shape box
+        half_extents 1.79999995 0.899999976 0.899999976
+        offset 1 0 0
+        angles 0 0 0
+        mass 22.5
+        hitgroup 3
+    }
+
+    body "chest"
+    {
+        bone "chest"
+        shape box
+        half_extents 1.79999995 0.899999976 0.899999976
+        offset 1 0 0
+        angles 0 0 0
+        mass 22.5
+        hitgroup 2
+    }
+
+    body "head"
+    {
+        bone "head"
+        shape sphere
+        radius 1.79999995
+        offset 1 0 0
+        angles 0 0 0
+        mass 7.826087
+        hitgroup 1
+    }
+
+    body "limb_l"
+    {
+        bone "limb_l"
+        shape capsule
+        radius 1.37840486
+        half_height 2.79580164
+        offset 4.4000001 0 -1.79999995
+        angles 18.434948 0 90
+        mass 3
+        hitgroup 4
+    }
+
+    body "wing_l"
+    {
+        bone "wing_l"
+        shape capsule
+        radius 1.80574715
+        half_height 2.43745923
+        offset 3.90491748 2.81557322 0.591397762
+        angles -11.9694633 32.0053825 90
+        mass 0.900000036
+        hitgroup 4
+    }
+
+    body "limb_r"
+    {
+        bone "limb_r"
+        shape capsule
+        radius 1.37840497
+        half_height 2.79580164
+        offset -4.19999981 0 -2.4000001
+        angles 18.434948 180 90
+        mass 3
+        hitgroup 5
+    }
+
+    body "wing_r"
+    {
+        bone "wing_r"
+        shape capsule
+        radius 1.98791206
+        half_height 2.25529432
+        offset -4.18013763 2.23758626 0.935483813
+        angles -11.9694633 147.994629 90
+        mass 0.900000036
+        hitgroup 5
+    }
+
+    body "tail"
+    {
+        bone "tail"
+        shape capsule
+        radius 1.55563486
+        half_height 1.55563498
+        offset 0.999999821 -3.48000002 -0.639999986
+        angles 8.13010311 -90 90
+        mass 2.25
+        hitgroup 0
+    }
+
+    body "jaw"
+    {
+        bone "jaw"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 1.17391312
+        hitgroup 1
+    }
+
+    body "lower_l"
+    {
+        bone "lower_l"
+        shape capsule
+        radius 1.41421354
+        half_height 1.6657865
+        offset 3.5 0 0
+        angles -0 0 90
+        mass 3
+        hitgroup 4
+    }
+
+    body "tip_l"
+    {
+        bone "tip_l"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 3
+        hitgroup 4
+    }
+
+    body "feather_l_a"
+    {
+        bone "feather_l_a"
+        shape capsule
+        radius 1.38727379
+        half_height 1.81597459
+        offset 3.72641516 0 0.207547069
+        angles -15.9453955 0 90
+        mass 0.900000036
+        hitgroup 4
+    }
+
+    body "feather_l_b"
+    {
+        bone "feather_l_b"
+        shape capsule
+        radius 1.38727379
+        half_height 1.81597459
+        offset 3.72641516 0 0.207547069
+        angles -15.9453955 0 90
+        mass 0.900000036
+        hitgroup 4
+    }
+
+    body "feather_tip_l_a"
+    {
+        bone "feather_tip_l_a"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.900000036
+        hitgroup 4
+    }
+
+    body "feather_tip_l_b"
+    {
+        bone "feather_tip_l_b"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.900000036
+        hitgroup 4
+    }
+
+    body "lower_r"
+    {
+        bone "lower_r"
+        shape capsule
+        radius 1.41421354
+        half_height 1.6657865
+        offset -3.5 0 0
+        angles -0 180 90
+        mass 3
+        hitgroup 5
+    }
+
+    body "tip_r"
+    {
+        bone "tip_r"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 3
+        hitgroup 5
+    }
+
+    body "feather_r_a"
+    {
+        bone "feather_r_a"
+        shape capsule
+        radius 1.38727367
+        half_height 1.81597471
+        offset -3.57547164 0 0.735848963
+        angles -15.9453955 180 90
+        mass 0.900000036
+        hitgroup 5
+    }
+
+    body "feather_r_b"
+    {
+        bone "feather_r_b"
+        shape capsule
+        radius 1.38727367
+        half_height 1.81597471
+        offset -3.57547164 0 0.735848963
+        angles -15.9453955 180 90
+        mass 0.900000036
+        hitgroup 5
+    }
+
+    body "feather_tip_r_a"
+    {
+        bone "feather_tip_r_a"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.900000036
+        hitgroup 5
+    }
+
+    body "feather_tip_r_b"
+    {
+        bone "feather_tip_r_b"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.900000036
+        hitgroup 5
+    }
+
+    body "tail_02"
+    {
+        bone "tail_02"
+        shape capsule
+        radius 1.55563486
+        half_height 1.55563498
+        offset 0.999999821 -3.48000002 -0.639999986
+        angles 8.13010311 -90 90
+        mass 2.25
+        hitgroup 0
+    }
+
+    body "tail_03"
+    {
+        bone "tail_03"
+        shape capsule
+        radius 1.55563486
+        half_height 1.55563498
+        offset 0.999999821 -3.48000002 -0.639999986
+        angles 8.13010311 -90 90
+        mass 2.25
+        hitgroup 0
+    }
+
+    body "tail_04"
+    {
+        bone "tail_04"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 2.25
+        hitgroup 0
+    }
+
+    joint "root_to_chest"
+    {
+        parent "root"
+        child "chest"
+        frame_anchor 0 0 0
+        frame_angles -90 -0 0
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "chest_to_head"
+    {
+        parent "chest"
+        child "head"
+        frame_anchor 0 0 0
+        frame_angles 26.565052 90 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "chest_to_limb_l"
+    {
+        parent "chest"
+        child "limb_l"
+        frame_anchor 0 0 0
+        frame_angles 18.434948 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "chest_to_wing_l"
+    {
+        parent "chest"
+        child "wing_l"
+        frame_anchor 0 0 0
+        frame_angles -11.9694633 32.0053825 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "chest_to_limb_r"
+    {
+        parent "chest"
+        child "limb_r"
+        frame_anchor 0 0 0
+        frame_angles 18.434948 180 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "chest_to_wing_r"
+    {
+        parent "chest"
+        child "wing_r"
+        frame_anchor 0 0 0
+        frame_angles -11.9694633 147.994629 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "root_to_tail"
+    {
+        parent "root"
+        child "tail"
+        frame_anchor 0 0 0
+        frame_angles 8.13010311 -90 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "head_to_jaw"
+    {
+        parent "head"
+        child "jaw"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "limb_l_to_lower_l"
+    {
+        parent "limb_l"
+        child "lower_l"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "lower_l_to_tip_l"
+    {
+        parent "lower_l"
+        child "tip_l"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "wing_l_to_feather_l_a"
+    {
+        parent "wing_l"
+        child "feather_l_a"
+        frame_anchor 0 0 0
+        frame_angles -15.9453955 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "wing_l_to_feather_l_b"
+    {
+        parent "wing_l"
+        child "feather_l_b"
+        frame_anchor 0 0 0
+        frame_angles -15.9453955 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "feather_l_a_to_feather_tip_l_a"
+    {
+        parent "feather_l_a"
+        child "feather_tip_l_a"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "feather_l_b_to_feather_tip_l_b"
+    {
+        parent "feather_l_b"
+        child "feather_tip_l_b"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "limb_r_to_lower_r"
+    {
+        parent "limb_r"
+        child "lower_r"
+        frame_anchor 0 0 0
+        frame_angles -0 180 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "lower_r_to_tip_r"
+    {
+        parent "lower_r"
+        child "tip_r"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "wing_r_to_feather_r_a"
+    {
+        parent "wing_r"
+        child "feather_r_a"
+        frame_anchor 0 0 0
+        frame_angles -15.9453955 180 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "wing_r_to_feather_r_b"
+    {
+        parent "wing_r"
+        child "feather_r_b"
+        frame_anchor 0 0 0
+        frame_angles -15.9453955 180 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "feather_r_a_to_feather_tip_r_a"
+    {
+        parent "feather_r_a"
+        child "feather_tip_r_a"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "feather_r_b_to_feather_tip_r_b"
+    {
+        parent "feather_r_b"
+        child "feather_tip_r_b"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "tail_to_tail_02"
+    {
+        parent "tail"
+        child "tail_02"
+        frame_anchor 0 0 0
+        frame_angles 8.13010311 -90 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "tail_02_to_tail_03"
+    {
+        parent "tail_02"
+        child "tail_03"
+        frame_anchor 0 0 0
+        frame_angles 8.13010311 -90 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "tail_03_to_tail_04"
+    {
+        parent "tail_03"
+        child "tail_04"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+}

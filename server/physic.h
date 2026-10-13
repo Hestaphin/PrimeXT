@@ -15,14 +15,81 @@ GNU General Public License for more details.
 #ifndef PHYSIC_H
 #define PHYSIC_H
 
+#include <cstdint>
+
 class Vector;
 class Vector4D;
 class CBaseEntity;
 class matrix4x4;
 
+// I.8 savegame snapshot; independent of PhysX SDK. Bounded per-entity storage.
+// Entries are matched by stable .phys part name, never by a transient actor ID.
+constexpr int kSavedPhysicsPartLimit = 8;
+struct PhysicsPartSaveRecord
+{
+    char name[32] = {};
+    int mode = 0;
+    int detached = 0;
+    float damage = 0;
+    float pose[7] = {};
+    float linear[3] = {};
+    float angular[3] = {};
+};
+static_assert(sizeof(PhysicsPartSaveRecord)==96,
+    "Physics part savegame record layout unexpectedly changed");
+
+// I.9.5: whole-articulation save format, independent of PhysX headers.
+// Serialized as raw characters by the existing GoldSrc save system.
+// An over-capacity or mismatching asset restores to the pre-ragdoll entity
+// state instead of leaving a non-solid ghost with no articulated actors.
+constexpr int kSavedRagdollBodyLimit = 64;
+struct PhysicsRagdollBodySaveRecord
+{
+    char name[32] = {};
+    float pose[7] = {};  // world actor position and quaternion
+    float linear[3] = {};
+    float angular[3] = {};
+    float weight = 1.0f;
+    int sleeping = 0;
+};
+struct PhysicsRagdollSaveState
+{
+    int active = 0;
+    int valid = 0;
+    int full = 0;
+    int frozen = 0;
+    int count = 0;
+    int oldSolid = 0;
+    int oldMovetype = 0;
+    int hasRootRelation = 0;
+    float oldMins[3] = {};
+    float oldMaxs[3] = {};
+    float oldAngles[3] = {};
+    float savedEntityOrigin[3] = {}; // correct world poses for savegame landmark offsets
+    float rootToEntity[16] = {};
+    char model[128] = {};
+};
+
 class IPhysicLayer
 {
 public:
+    enum class PhysicsPartMode { Animated, Driven, Free };
+
+	enum class CollisionQueryPurpose
+	{
+		Movement,
+		BulletDamage,
+		PrecisionQuery,
+		PhysicsSimulation,
+	};
+
+	enum class CollisionRepresentation
+	{
+		Legacy,
+		Hitboxes,
+		PhysicsAsset,
+	};
+
 	enum class ForceMode
 	{
 		Force,			//!< parameter is a force (N) or torque (Nm) — depends on mass/inertia
@@ -45,6 +112,11 @@ public:
 	virtual void	*CreateTriggerFromEntity( CBaseEntity *pEntity ) = 0;
 	virtual void	*RestoreBody( CBaseEntity *pEntity ) = 0;
 	virtual void	SaveBody( CBaseEntity *pObject ) = 0;
+    virtual bool CaptureRagdollState( CBaseEntity *, PhysicsRagdollSaveState &,
+        PhysicsRagdollBodySaveRecord *, int ) { return false; }
+    virtual bool RestoreRagdollState( CBaseEntity *, const PhysicsRagdollSaveState &,
+        const PhysicsRagdollBodySaveRecord *, int ) { return false; }
+
 	virtual void	SetOrigin( CBaseEntity *pEntity, const Vector &origin ) = 0;
 	virtual void	SetAngles( CBaseEntity *pEntity, const Vector &angles ) = 0;
 	virtual void	SetVelocity( CBaseEntity *pEntity, const Vector &velocity ) = 0;
@@ -66,6 +138,8 @@ public:
 	virtual int		BuildCollisionTree( char *szMapName ) = 0;
 	virtual bool	UpdateEntityTransform( CBaseEntity *pEntity ) = 0;
 	virtual void	UpdateEntityAABB( CBaseEntity *pEntity ) = 0;
+	virtual void	UpdateCollisionBodygroup( CBaseEntity *pEntity ) = 0;
+	virtual bool	ResolveRenderImpact( CBaseEntity *pEntity, const Vector &start, const Vector &end, Vector &impactPoint, Vector &impactNormal, std::uint32_t &materialHash ) = 0;
 	virtual bool	UpdateActorPos( CBaseEntity *pEntity ) = 0;
 	virtual void	SetupWorld( void ) = 0;	
 	virtual void	FreeWorld( void ) = 0;
@@ -80,6 +154,43 @@ public:
 	virtual bool	IsBodySleeping( CBaseEntity *pEntity ) = 0;
 	virtual void	*GetCookingInterface( void ) = 0;
 	virtual void	*GetPhysicInterface( void ) = 0;
+	virtual bool	CreatePhysicsAsset( CBaseEntity *pEntity ) = 0;
+	virtual bool	HasPhysicsAsset( CBaseEntity *pEntity ) = 0;
+	virtual void	UpdatePhysicsAssetPose( CBaseEntity *pEntity ) = 0;
+    // Server-owned per-part transition; no automatic damage trigger in I.4.
+    virtual bool SetPhysicsPartMode( CBaseEntity *entity, const char *partName, PhysicsPartMode mode ) = 0;
+    virtual bool GetPhysicsPartWorldPose( CBaseEntity *entity, const char *partName, matrix4x4 &pose ) = 0;
+    // Gameplay/script damage to a named articulated part, separate from owner HP.
+    virtual bool DamagePhysicsPart( CBaseEntity *entity, const char *partName, float damage ) = 0;
+    virtual int CaptureInteractiveParts(CBaseEntity *entity, PhysicsPartSaveRecord *out, int capacity) = 0;
+    virtual void RestoreInteractiveParts(CBaseEntity *entity, const PhysicsPartSaveRecord *records, int count) = 0;
+    // B6: returns the authoritative world-space AABB for full ragdolls.
+    // Partial ragdolls retain their normal movement hull instead.
+    virtual bool GetRagdollWorldBounds( CBaseEntity *pEntity, Vector &mins, Vector &maxs ) = 0;
+	virtual bool	IsRagdoll( CBaseEntity *pEntity ) = 0;
+	virtual void	SetRagdoll( CBaseEntity *pEntity, bool enabled ) = 0;
+	virtual bool SetRagdollBodyPhysicsWeight( CBaseEntity *pEntity, const char *bodyName, float physicsWeight, bool includeChildren ) = 0;
+	virtual bool IsRagdollFrozen( CBaseEntity *pEntity ) = 0;
+	virtual bool BuildRagdollDecalAttachment( CBaseEntity *pEntity, const Vector &worldPosition, const Vector &worldNormal, int preferredHitGroup, int &boneIndex, Vector &localPosition, Vector &localNormal ) = 0;
+	virtual CollisionRepresentation ResolveCollisionRepresentation( CBaseEntity *pEntity, CollisionQueryPurpose purpose ) = 0;
+	// Supplemental raycast for protruding/primitive-only articulated parts.
+	// Never overrides a nearer existing world/legacy/ragdoll result.
+	virtual bool TraceBulletPhysicsParts( const Vector &start, const Vector &end,
+		struct edict_s *ignore, struct gametrace_s *ioTrace ) = 0;
+	virtual bool TraceBulletRagdolls( const Vector &start, const Vector &end, struct edict_s *ignore, struct gametrace_s *ioTrace, int *bodyIndex ) = 0;
+	// J.9 target-only exit query; exact physics body for ragdolls, exact shape for parts.
+	virtual bool TraceBallisticPhysicsExit( CBaseEntity *target, int ragdollBodyIndex,
+		const Vector &entry, const Vector &forward, float maxDepth, Vector &exit, Vector &normal ) = 0;
+	// I.5: only accept a bullet part after the ordinary engine trace has hit its owner.
+	// Return true when an active part collider was struck, even when its authored
+	// policy is Animated (no physical reaction).
+	virtual bool ApplyPhysicsPartBulletImpact( CBaseEntity *entity, const Vector &start, const Vector &end,
+		const Vector &legacyContact, const Vector &impulse, float damage ) = 0;
+	virtual void AddPhysicsPartRadialImpulse( CBaseEntity *entity, const Vector &origin,
+		float radius, float impulse, float damage ) = 0;
+	virtual bool AddPhysicsAssetImpulse( CBaseEntity *pEntity, int bodyIndex, const Vector &impulse, const Vector &position ) = 0;
+	virtual void QueuePhysicsAssetImpulse( CBaseEntity *pEntity, int hitGroup, const Vector &impulse, const Vector &position ) = 0;
+	virtual void AddPhysicsAssetRadialImpulse( CBaseEntity *pEntity, const Vector &origin, float radius, float impulse ) = 0;
 };
 
 extern void GameInitNullPhysics( void ); // shutdown simulation for some reasons

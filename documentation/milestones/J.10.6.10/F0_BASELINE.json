@@ -1,0 +1,33 @@
+{
+  "baseline": "J.10.6.9.9",
+  "source_archives": {
+    "PrimeXT-master.zip": "3d695f9fdcebc3d881ff80f45a8ba92ee6498e767de7097bf3feb7048ee5ccda",
+    "xash3d-fwgs-master.zip": "3af2dcf5cdcd4037609ff5b03721ee01186899af6f4bdd9071b80240e6f85b8d",
+    "PrimeXT_Xash_milestoneJ.10.6.9.8_patch_bundle.zip": "639bd780881af9b3b58377572953d502e3526b8b0798a56ee7c80c35e97067d8"
+  },
+  "unchanged_runtime_files": {
+    "game_shared/physics_asset_format.h": "dfa25309eae3d434576c1b88bcc2dfe896e3db9a204ff7b004e13d78aeeba820",
+    "game_shared/physics_asset_format.cpp": "7cd7d5e1d148c42e51b8b0802b3b3c2bb98347baa36f8c2a80d0e3739eb95c8e",
+    "server/physx/collision_filter_data.h": "86add9eed3e3afe1e508a0a55db3c2ea1c669d55293d5af99ecf15edec5dccaa",
+    "server/physx/collision_filter_data.cpp": "011d07d25fc7dcfae73ea66139c273188ececcb7aa94e9166649e708079aec8f",
+    "game_shared/studio_physical_pose.h": "3f16ac22cb42083e1bf052070642b71ba13c1148fedb44bec37180f8e138a832",
+    "game_shared/physics_asset_render_coordinates.h": "320e2cc49fcfae47e225b75a5f1adb3b6aee00ab853d3877111dc3a8cb1d2703"
+  },
+  "unchanged_physics_functions": [
+    {
+      "file": "utils/pxmv/PhysicsAssetEditor.cpp",
+      "signature": "void PhysicsAssetEditor::AutoGenerate",
+      "sha256": "053b92ecc4f4c881a6fa1e8709305ff1a8696a6246c87a698c12683af9a7be51"
+    },
+    {
+      "file": "server/physx/physics_asset.cpp",
+      "signature": "bool PhysicsAssetInstance::CreateActors",
+      "sha256": "e586d2d179bda71ce28992e5afbd4c0ae85faee456eb0577927ccf86f587ecf6"
+    },
+    {
+      "file": "server/physx/physics_asset.cpp",
+      "signature": "void PhysicsAssetInstance::CaptureSimulationPose",
+      "sha256": "6b56ba07b84ab0bbc02902282f5253fd2ad7b77ef86a810738b0d4deb7542c4f"
+    }
+  ]
+}

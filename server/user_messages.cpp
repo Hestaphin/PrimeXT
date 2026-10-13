@@ -22,6 +22,7 @@ int gmsgTrain = 0;
 int gmsgLogo = 0;
 int gmsgWeaponList = 0;
 int gmsgAmmoX = 0;
+int gmsgModCfg = 0;
 int gmsgHudText = 0;
 int gmsgDeathMsg = 0;
 int gmsgScoreInfo = 0;
@@ -54,6 +55,9 @@ int gmsgMusicFade = 0;
 int gmsgRainData = 0;
 int gmsgStatusIcon = 0;
 int gmsgSetupBones = 0;
+int gmsgRagdollPose = 0;
+int gmsgPartPose = 0;
+int gmsgRagdollDecal = 0;
 int gmsgPostFxSettings = 0;
 
 void LinkUserMessages()
@@ -97,6 +101,7 @@ void LinkUserMessages()
 	gmsgShake = REG_USER_MSG("ScreenShake", sizeof(ScreenShake));
 	gmsgFade = REG_USER_MSG("ScreenFade", sizeof(ScreenFade));
 	gmsgAmmoX = REG_USER_MSG("AmmoX", 2);
+	gmsgModCfg = REG_USER_MSG("ModCfg", -1);
 	gmsgTeamNames = REG_USER_MSG("TeamNames", -1);
 	gmsgStatusText = REG_USER_MSG("StatusText", -1);
 	gmsgStatusValue = REG_USER_MSG("StatusValue", 3);
@@ -110,5 +115,8 @@ void LinkUserMessages()
 	gmsgMusicFade = REG_USER_MSG("MusicFade", 2);
 	gmsgStatusIcon = REG_USER_MSG("StatusIcon", -1);
 	gmsgSetupBones = REG_USER_MSG("SetupBones", -1);
+	gmsgRagdollPose = REG_USER_MSG("RagdollPose", -1);
+	gmsgPartPose = REG_USER_MSG("PartPose", -1);
+	gmsgRagdollDecal = REG_USER_MSG("RagdollDecal", -1);
 	gmsgPostFxSettings = REG_USER_MSG("PostFxSettings", -1);
 }

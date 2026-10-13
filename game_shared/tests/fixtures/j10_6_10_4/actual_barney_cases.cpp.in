@@ -1,0 +1,57 @@
+// Uses the actual 24-bone MDL and actual filtered vertex/bind extraction.
+static void F4Barney(StudioModel &model,PhysicsAssetEditor &editor,studiohdr_t *hdr,
+    const mstudiobone_t *bones,const std::string &exportDirectory)
+{
+    const matrix3x4 savedRoot=m_protationmatrix;
+    std::vector<ragtemplate::Bone> collected;std::string error;
+    Check(editor.CollectTemplateBones(collected,error)&&collected.size()==24,"F4 actual bind skeleton and filtered model sections");
+    physicsasset::AssetDef empty;ragtemplate::Candidate human,free;
+    Check(ragtemplate::Generate(ragtemplate::Builtins()[0],collected,1,empty,ragtemplate::ComposeMode::ReplaceRagdoll,human,&error),"F4 Human Standard generated from MDL");
+    Check(ragtemplate::Generate(ragtemplate::Builtins()[1],collected,1,empty,ragtemplate::ComposeMode::ReplaceRagdoll,free,&error),"F4 Free Rotation generated from MDL");
+    Check(human.asset.version==5&&human.asset.bodies.size()==15&&human.asset.joints.size()==14,"F4 actual Human v5 resolved graph");
+    Check(free.asset.version==5&&free.asset.bodies.size()==15&&free.asset.joints.size()==14,"F4 actual Free v5 resolved graph");
+    Check(human.axisReviews==4,"inferred flexion signs are still reviewable");
+    std::vector<std::vector<Vector>> vertices;
+    Check(model.GetRagdollFitVertices(vertices,ragtemplate::Builtins()[0].excludedSections),"real MDL filtered rigid vertices extracted");
+    matrix3x4 bind[24];for(int i=0;i<24;++i)bind[i]=model.m_pbonetransform[i];
+    bool driven[24]={};int root=-1;
+    for(const auto &body:human.asset.bodies)
+        for(int i=0;i<24;++i)if(body.bone==bones[i].name){driven[i]=true;if(root<0)root=i;}
+    Check(root==1&&!driven[0]&&!driven[9]&&!driven[12]&&!driven[22]&&!driven[23],"reduced ragdoll keeps omitted Studio bones");
+    float peakBone=0,peakVertex=0;size_t vertexCount=0;for(const auto &v:vertices)vertexCount+=v.size();
+    const matrix3x4 move(Vector(130,-47,88),Vector(45,77,23),1);
+    for(float scale:{0.5f,1.0f,2.0f})
+    {
+        m_protationmatrix=matrix3x4(Vector(5,10,20),Vector(7,13,17),Vector(scale));
+        matrix3x4 animated[24],world[24];
+        for(int i=0;i<24;++i){animated[i]=m_protationmatrix.ConcatTransforms(bind[i]);world[i]=driven[i]?move.ConcatTransforms(animated[i]):animated[i];}
+        Check(physicsasset::StudioReconstructPhysicalHierarchy(24,bones,animated,driven,root,scale,world),"actual MDL passive hierarchy reconstructed");
+        for(int i=0;i<24;++i)
+        {
+            const matrix3x4 expected=move.ConcatTransforms(animated[i]);
+            for(int c=0;c<4;++c)for(int r=0;r<3;++r)peakBone=std::max(peakBone,std::fabs(world[i][c][r]-expected[c][r]));
+            for(const Vector &vertex:vertices[i])peakVertex=std::max(peakVertex,(world[i].VectorTransform(vertex)-expected.VectorTransform(vertex)).Length());
+        }
+        Check(peakBone<0.0002f&&peakVertex<0.0002f,"actual rigid vertices follow whole-skeleton transform without passive spikes");
+    }
+    Check(vertexCount>300,"actual filtered mesh coverage");
+    if(!exportDirectory.empty())
+    {
+        std::filesystem::create_directories(exportDirectory);
+        for(const auto &entry:std::vector<std::pair<std::string,ragtemplate::Candidate*>>{{"human_standard",&human},{"free_rotation",&free}})
+        {
+            const std::string path=exportDirectory+"/barney_f4_"+entry.first+".phys";
+            Check(physicsasset::SaveFile(path.c_str(),entry.second->asset,&error),"real MDL generated v5 asset saved");
+            physicsasset::AssetDef reload;Check(physicsasset::LoadFile(path.c_str(),reload,&error)&&physicsasset::Serialize(reload)==physicsasset::Serialize(entry.second->asset),"generated MDL rig round trips");
+            std::ofstream report(exportDirectory+"/"+entry.first+"_review.txt");
+            report<<"Generated from SHA-checked Studio MDL using production bind/vertex extraction.\nNative PhysX and game acceptance pending.\n";
+            for(const auto &line:entry.second->observations)report<<line<<'\n';
+        }
+        size_t allows=0;for(const auto &pair:human.asset.collisionPairs)if(pair.enabled)++allows;
+        std::ofstream summary(exportDirectory+"/barney_generation.json");
+        summary<<"{\n  \"model_bones\": 24,\n  \"bodies\": 15,\n  \"joints\": 14,\n  \"axis_reviews\": "<<human.axisReviews<<",\n  \"pair_rows\": "<<human.asset.collisionPairs.size()<<",\n  \"allowed_pairs\": "<<allows<<",\n  \"filtered_vertices\": "<<vertexCount<<",\n  \"bone_error_peak\": "<<peakBone<<",\n  \"vertex_error_peak\": "<<peakVertex<<",\n  \"native_solver_game\": \"NOT_RUN\"\n}\n";
+    }
+    for(int i=0;i<24;++i)model.m_pbonetransform[i]=model.m_pworldtransform[i]=bind[i];
+    m_protationmatrix=savedRoot;
+    std::cout<<"F4 actual Barney: 24 bones, "<<vertexCount<<" filtered vertices; bone error "<<peakBone<<", vertex error "<<peakVertex<<"; NO solver/game/GPU\n";
+}

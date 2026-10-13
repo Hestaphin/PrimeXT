@@ -1,0 +1,13 @@
+# F5 evidence and limits
+
+The release runner executes eight groups with actual Barney inputs: strict portable core compile/run; strict joint-guide compile/run using shared runtime frame helpers and a mathematical SDK facade; actual dialog methods with GUI/synthetic-geometry services; actual DrawOverlay with project matrices and GL-state services; actual MDL Heavy/Loose generation/persistence; and the complete F4/F3/F2/F1/F0 inherited chain.
+
+Core coverage includes all seven presets and round trips; quadruped/creature Simple/Standard/Detailed; explicit flexion/chain review; mass budgets; connected graphs and symmetric neighbor suppression; unknown/cyclic mappings; branch consent; reserved detail-excluded bones; deterministic reordered bone tables; optional fields; capacity/depth bounds; and a synthetic ValveBiped naming convention. Animal neck fitting uses the real child span.
+
+Production dialog checks cover all new preset choices, read-only protection, the dynamic editable slot, depth/branch controls, invalid edits, review gating, stale candidates, regeneration, Apply, Undo and Cancel. Production overlay checks cover authored body offsets, two coincident anchors under a rigid transform, caller GL state/stack preservation, visibility toggle and malformed reference hierarchies. Guide math is compared against actual shared ChildD6Frame/ChildHingeFrame expressions, including independent anchor motion and locked/free/limited arcs.
+
+Actual model coverage uses the SHA-checked 24-bone rigid-weight Barney MDL. Heavy and Loose candidates have 15 bodies/14 joints/four inferred axes, mass budgets 110/70, concrete profiles, deterministic output and v5 save/reload. The original model/v4 reference remain unchanged. Quad/creature and the second naming convention are explicitly **synthetic**, not native model or physical acceptance.
+
+The inherited example factory continues to check the three historical F3 preset files and two candidates; it does not demand newly introduced presets in an old release directory. F5 independently validates/exports all seven. SDK-dependent guide tests run with explicit include/link configuration; the broad portable suite also discovers the standalone F5 core tests.
+
+No native Windows/Qt/real PhysX target link, solver drop, GPU driver rendering, live game/network/save IO, additional actual nonhuman model or FPS certification is claimed. Native configuration is BLOCKED because CMake is unavailable. Three inherited unchanged Xash syntax checks lack generated library_suffix.h. Exact JSON/logs, source manifest and byte/mode patch routes are included in the bundle.

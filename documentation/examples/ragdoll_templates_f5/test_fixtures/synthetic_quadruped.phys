@@ -1,0 +1,779 @@
+physics_asset
+{
+    version 5
+
+    simulation
+    {
+        linear_damping 0.0500000007
+        angular_damping 0.5
+        solver_position_iterations 16
+        solver_velocity_iterations 4
+        max_linear_velocity 2000
+        max_angular_velocity 20
+        max_depenetration_velocity 200
+        sleep_threshold 0.5
+        contact_offset 0.787401557
+        rest_offset 0
+        ccd 1
+        angular_resistance 1.5
+        drive_max_torque 1000
+        projection off
+        projection_linear_tolerance 0.25
+        projection_angular_tolerance 10
+    }
+
+    self_collision selective
+    collision_pair "pelvis" "chest" deny
+    collision_pair "pelvis" "neck" deny
+    collision_pair "pelvis" "head" allow
+    collision_pair "pelvis" "front_upper_l" deny
+    collision_pair "pelvis" "front_lower_l" allow
+    collision_pair "pelvis" "front_foot_l" allow
+    collision_pair "pelvis" "hind_upper_l" deny
+    collision_pair "pelvis" "hind_lower_l" deny
+    collision_pair "pelvis" "hind_foot_l" allow
+    collision_pair "pelvis" "front_upper_r" deny
+    collision_pair "pelvis" "front_lower_r" allow
+    collision_pair "pelvis" "front_foot_r" allow
+    collision_pair "pelvis" "hind_upper_r" deny
+    collision_pair "pelvis" "hind_lower_r" deny
+    collision_pair "pelvis" "hind_foot_r" allow
+    collision_pair "pelvis" "tail" deny
+    collision_pair "pelvis" "jaw" allow
+    collision_pair "pelvis" "tail_02" deny
+    collision_pair "pelvis" "tail_03" allow
+    collision_pair "pelvis" "tail_04" allow
+    collision_pair "pelvis" "tail_05" allow
+    collision_pair "chest" "neck" deny
+    collision_pair "chest" "head" deny
+    collision_pair "chest" "front_upper_l" deny
+    collision_pair "chest" "front_lower_l" deny
+    collision_pair "chest" "front_foot_l" allow
+    collision_pair "chest" "hind_upper_l" deny
+    collision_pair "chest" "hind_lower_l" allow
+    collision_pair "chest" "hind_foot_l" allow
+    collision_pair "chest" "front_upper_r" deny
+    collision_pair "chest" "front_lower_r" deny
+    collision_pair "chest" "front_foot_r" allow
+    collision_pair "chest" "hind_upper_r" deny
+    collision_pair "chest" "hind_lower_r" allow
+    collision_pair "chest" "hind_foot_r" allow
+    collision_pair "chest" "tail" deny
+    collision_pair "chest" "jaw" allow
+    collision_pair "chest" "tail_02" allow
+    collision_pair "chest" "tail_03" allow
+    collision_pair "chest" "tail_04" allow
+    collision_pair "chest" "tail_05" allow
+    collision_pair "neck" "head" deny
+    collision_pair "neck" "front_upper_l" deny
+    collision_pair "neck" "front_lower_l" allow
+    collision_pair "neck" "front_foot_l" allow
+    collision_pair "neck" "hind_upper_l" allow
+    collision_pair "neck" "hind_lower_l" allow
+    collision_pair "neck" "hind_foot_l" allow
+    collision_pair "neck" "front_upper_r" deny
+    collision_pair "neck" "front_lower_r" allow
+    collision_pair "neck" "front_foot_r" allow
+    collision_pair "neck" "hind_upper_r" allow
+    collision_pair "neck" "hind_lower_r" allow
+    collision_pair "neck" "hind_foot_r" allow
+    collision_pair "neck" "tail" allow
+    collision_pair "neck" "jaw" deny
+    collision_pair "neck" "tail_02" allow
+    collision_pair "neck" "tail_03" allow
+    collision_pair "neck" "tail_04" allow
+    collision_pair "neck" "tail_05" allow
+    collision_pair "head" "front_upper_l" allow
+    collision_pair "head" "front_lower_l" allow
+    collision_pair "head" "front_foot_l" allow
+    collision_pair "head" "hind_upper_l" allow
+    collision_pair "head" "hind_lower_l" allow
+    collision_pair "head" "hind_foot_l" allow
+    collision_pair "head" "front_upper_r" allow
+    collision_pair "head" "front_lower_r" allow
+    collision_pair "head" "front_foot_r" allow
+    collision_pair "head" "hind_upper_r" allow
+    collision_pair "head" "hind_lower_r" allow
+    collision_pair "head" "hind_foot_r" allow
+    collision_pair "head" "tail" allow
+    collision_pair "head" "jaw" deny
+    collision_pair "head" "tail_02" allow
+    collision_pair "head" "tail_03" allow
+    collision_pair "head" "tail_04" allow
+    collision_pair "head" "tail_05" allow
+    collision_pair "front_upper_l" "front_lower_l" deny
+    collision_pair "front_upper_l" "front_foot_l" deny
+    collision_pair "front_upper_l" "hind_upper_l" allow
+    collision_pair "front_upper_l" "hind_lower_l" allow
+    collision_pair "front_upper_l" "hind_foot_l" allow
+    collision_pair "front_upper_l" "front_upper_r" deny
+    collision_pair "front_upper_l" "front_lower_r" allow
+    collision_pair "front_upper_l" "front_foot_r" allow
+    collision_pair "front_upper_l" "hind_upper_r" allow
+    collision_pair "front_upper_l" "hind_lower_r" allow
+    collision_pair "front_upper_l" "hind_foot_r" allow
+    collision_pair "front_upper_l" "tail" allow
+    collision_pair "front_upper_l" "jaw" allow
+    collision_pair "front_upper_l" "tail_02" allow
+    collision_pair "front_upper_l" "tail_03" allow
+    collision_pair "front_upper_l" "tail_04" allow
+    collision_pair "front_upper_l" "tail_05" allow
+    collision_pair "front_lower_l" "front_foot_l" deny
+    collision_pair "front_lower_l" "hind_upper_l" allow
+    collision_pair "front_lower_l" "hind_lower_l" allow
+    collision_pair "front_lower_l" "hind_foot_l" allow
+    collision_pair "front_lower_l" "front_upper_r" allow
+    collision_pair "front_lower_l" "front_lower_r" allow
+    collision_pair "front_lower_l" "front_foot_r" allow
+    collision_pair "front_lower_l" "hind_upper_r" allow
+    collision_pair "front_lower_l" "hind_lower_r" allow
+    collision_pair "front_lower_l" "hind_foot_r" allow
+    collision_pair "front_lower_l" "tail" allow
+    collision_pair "front_lower_l" "jaw" allow
+    collision_pair "front_lower_l" "tail_02" allow
+    collision_pair "front_lower_l" "tail_03" allow
+    collision_pair "front_lower_l" "tail_04" allow
+    collision_pair "front_lower_l" "tail_05" allow
+    collision_pair "front_foot_l" "hind_upper_l" allow
+    collision_pair "front_foot_l" "hind_lower_l" allow
+    collision_pair "front_foot_l" "hind_foot_l" allow
+    collision_pair "front_foot_l" "front_upper_r" allow
+    collision_pair "front_foot_l" "front_lower_r" allow
+    collision_pair "front_foot_l" "front_foot_r" allow
+    collision_pair "front_foot_l" "hind_upper_r" allow
+    collision_pair "front_foot_l" "hind_lower_r" allow
+    collision_pair "front_foot_l" "hind_foot_r" allow
+    collision_pair "front_foot_l" "tail" allow
+    collision_pair "front_foot_l" "jaw" allow
+    collision_pair "front_foot_l" "tail_02" allow
+    collision_pair "front_foot_l" "tail_03" allow
+    collision_pair "front_foot_l" "tail_04" allow
+    collision_pair "front_foot_l" "tail_05" allow
+    collision_pair "hind_upper_l" "hind_lower_l" deny
+    collision_pair "hind_upper_l" "hind_foot_l" deny
+    collision_pair "hind_upper_l" "front_upper_r" allow
+    collision_pair "hind_upper_l" "front_lower_r" allow
+    collision_pair "hind_upper_l" "front_foot_r" allow
+    collision_pair "hind_upper_l" "hind_upper_r" deny
+    collision_pair "hind_upper_l" "hind_lower_r" allow
+    collision_pair "hind_upper_l" "hind_foot_r" allow
+    collision_pair "hind_upper_l" "tail" deny
+    collision_pair "hind_upper_l" "jaw" allow
+    collision_pair "hind_upper_l" "tail_02" allow
+    collision_pair "hind_upper_l" "tail_03" allow
+    collision_pair "hind_upper_l" "tail_04" allow
+    collision_pair "hind_upper_l" "tail_05" allow
+    collision_pair "hind_lower_l" "hind_foot_l" deny
+    collision_pair "hind_lower_l" "front_upper_r" allow
+    collision_pair "hind_lower_l" "front_lower_r" allow
+    collision_pair "hind_lower_l" "front_foot_r" allow
+    collision_pair "hind_lower_l" "hind_upper_r" allow
+    collision_pair "hind_lower_l" "hind_lower_r" allow
+    collision_pair "hind_lower_l" "hind_foot_r" allow
+    collision_pair "hind_lower_l" "tail" allow
+    collision_pair "hind_lower_l" "jaw" allow
+    collision_pair "hind_lower_l" "tail_02" allow
+    collision_pair "hind_lower_l" "tail_03" allow
+    collision_pair "hind_lower_l" "tail_04" allow
+    collision_pair "hind_lower_l" "tail_05" allow
+    collision_pair "hind_foot_l" "front_upper_r" allow
+    collision_pair "hind_foot_l" "front_lower_r" allow
+    collision_pair "hind_foot_l" "front_foot_r" allow
+    collision_pair "hind_foot_l" "hind_upper_r" allow
+    collision_pair "hind_foot_l" "hind_lower_r" allow
+    collision_pair "hind_foot_l" "hind_foot_r" allow
+    collision_pair "hind_foot_l" "tail" allow
+    collision_pair "hind_foot_l" "jaw" allow
+    collision_pair "hind_foot_l" "tail_02" allow
+    collision_pair "hind_foot_l" "tail_03" allow
+    collision_pair "hind_foot_l" "tail_04" allow
+    collision_pair "hind_foot_l" "tail_05" allow
+    collision_pair "front_upper_r" "front_lower_r" deny
+    collision_pair "front_upper_r" "front_foot_r" deny
+    collision_pair "front_upper_r" "hind_upper_r" allow
+    collision_pair "front_upper_r" "hind_lower_r" allow
+    collision_pair "front_upper_r" "hind_foot_r" allow
+    collision_pair "front_upper_r" "tail" allow
+    collision_pair "front_upper_r" "jaw" allow
+    collision_pair "front_upper_r" "tail_02" allow
+    collision_pair "front_upper_r" "tail_03" allow
+    collision_pair "front_upper_r" "tail_04" allow
+    collision_pair "front_upper_r" "tail_05" allow
+    collision_pair "front_lower_r" "front_foot_r" deny
+    collision_pair "front_lower_r" "hind_upper_r" allow
+    collision_pair "front_lower_r" "hind_lower_r" allow
+    collision_pair "front_lower_r" "hind_foot_r" allow
+    collision_pair "front_lower_r" "tail" allow
+    collision_pair "front_lower_r" "jaw" allow
+    collision_pair "front_lower_r" "tail_02" allow
+    collision_pair "front_lower_r" "tail_03" allow
+    collision_pair "front_lower_r" "tail_04" allow
+    collision_pair "front_lower_r" "tail_05" allow
+    collision_pair "front_foot_r" "hind_upper_r" allow
+    collision_pair "front_foot_r" "hind_lower_r" allow
+    collision_pair "front_foot_r" "hind_foot_r" allow
+    collision_pair "front_foot_r" "tail" allow
+    collision_pair "front_foot_r" "jaw" allow
+    collision_pair "front_foot_r" "tail_02" allow
+    collision_pair "front_foot_r" "tail_03" allow
+    collision_pair "front_foot_r" "tail_04" allow
+    collision_pair "front_foot_r" "tail_05" allow
+    collision_pair "hind_upper_r" "hind_lower_r" deny
+    collision_pair "hind_upper_r" "hind_foot_r" deny
+    collision_pair "hind_upper_r" "tail" deny
+    collision_pair "hind_upper_r" "jaw" allow
+    collision_pair "hind_upper_r" "tail_02" allow
+    collision_pair "hind_upper_r" "tail_03" allow
+    collision_pair "hind_upper_r" "tail_04" allow
+    collision_pair "hind_upper_r" "tail_05" allow
+    collision_pair "hind_lower_r" "hind_foot_r" deny
+    collision_pair "hind_lower_r" "tail" allow
+    collision_pair "hind_lower_r" "jaw" allow
+    collision_pair "hind_lower_r" "tail_02" allow
+    collision_pair "hind_lower_r" "tail_03" allow
+    collision_pair "hind_lower_r" "tail_04" allow
+    collision_pair "hind_lower_r" "tail_05" allow
+    collision_pair "hind_foot_r" "tail" allow
+    collision_pair "hind_foot_r" "jaw" allow
+    collision_pair "hind_foot_r" "tail_02" allow
+    collision_pair "hind_foot_r" "tail_03" allow
+    collision_pair "hind_foot_r" "tail_04" allow
+    collision_pair "hind_foot_r" "tail_05" allow
+    collision_pair "tail" "jaw" allow
+    collision_pair "tail" "tail_02" deny
+    collision_pair "tail" "tail_03" deny
+    collision_pair "tail" "tail_04" allow
+    collision_pair "tail" "tail_05" allow
+    collision_pair "jaw" "tail_02" allow
+    collision_pair "jaw" "tail_03" allow
+    collision_pair "jaw" "tail_04" allow
+    collision_pair "jaw" "tail_05" allow
+    collision_pair "tail_02" "tail_03" deny
+    collision_pair "tail_02" "tail_04" deny
+    collision_pair "tail_02" "tail_05" allow
+    collision_pair "tail_03" "tail_04" deny
+    collision_pair "tail_03" "tail_05" deny
+    collision_pair "tail_04" "tail_05" deny
+
+    body "pelvis"
+    {
+        bone "pelvis"
+        shape box
+        half_extents 1.79999995 0.899999976 0.899999976
+        offset 1 0 0
+        angles 0 0 0
+        mass 7.19999981
+        hitgroup 3
+    }
+
+    body "chest"
+    {
+        bone "chest"
+        shape box
+        half_extents 1.79999995 0.899999976 0.899999976
+        offset 1 0 0
+        angles 0 0 0
+        mass 10.8000002
+        hitgroup 2
+    }
+
+    body "neck"
+    {
+        bone "neck"
+        shape capsule
+        radius 1.18473625
+        half_height 1.18473625
+        offset 2.79999995 0 0.25
+        angles -21.8014088 0 90
+        mass 0.837209344
+        hitgroup 1
+    }
+
+    body "head"
+    {
+        bone "head"
+        shape sphere
+        radius 1.79999995
+        offset 1 0 0
+        angles 0 0 0
+        mass 2.51162815
+        hitgroup 1
+    }
+
+    body "front_upper_l"
+    {
+        bone "front_upper_l"
+        shape capsule
+        radius 2.23606801
+        half_height 3.04393196
+        offset 1 0 -6
+        angles 90 -0 0
+        mass 2.4000001
+        hitgroup 4
+    }
+
+    body "front_lower_l"
+    {
+        bone "front_lower_l"
+        shape capsule
+        radius 2.20139813
+        half_height 2.28573895
+        offset 1.76923084 0 -4.84615374
+        angles 78.6900711 0 90
+        mass 1.20000005
+        hitgroup 4
+    }
+
+    body "front_foot_l"
+    {
+        bone "front_foot_l"
+        shape box
+        half_extents 1.79999995 0.899999976 0.899999976
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.600000024
+        hitgroup 4
+    }
+
+    body "hind_upper_l"
+    {
+        bone "hind_upper_l"
+        shape capsule
+        radius 2.23606801
+        half_height 3.04393196
+        offset 1 0 -6
+        angles 90 -0 0
+        mass 2.4000001
+        hitgroup 6
+    }
+
+    body "hind_lower_l"
+    {
+        bone "hind_lower_l"
+        shape capsule
+        radius 2.20139813
+        half_height 2.28573895
+        offset 1.76923084 0 -4.84615374
+        angles 78.6900711 0 90
+        mass 1.20000005
+        hitgroup 6
+    }
+
+    body "hind_foot_l"
+    {
+        bone "hind_foot_l"
+        shape box
+        half_extents 1.79999995 0.899999976 0.899999976
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.600000024
+        hitgroup 6
+    }
+
+    body "front_upper_r"
+    {
+        bone "front_upper_r"
+        shape capsule
+        radius 2.23606801
+        half_height 3.04393196
+        offset 1 0 -6
+        angles 90 -0 0
+        mass 2.4000001
+        hitgroup 5
+    }
+
+    body "front_lower_r"
+    {
+        bone "front_lower_r"
+        shape capsule
+        radius 2.20139813
+        half_height 2.28573895
+        offset 1.76923084 0 -4.84615374
+        angles 78.6900711 0 90
+        mass 1.20000005
+        hitgroup 5
+    }
+
+    body "front_foot_r"
+    {
+        bone "front_foot_r"
+        shape box
+        half_extents 1.79999995 0.899999976 0.899999976
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.600000024
+        hitgroup 5
+    }
+
+    body "hind_upper_r"
+    {
+        bone "hind_upper_r"
+        shape capsule
+        radius 2.23606801
+        half_height 3.04393196
+        offset 1 0 -6
+        angles 90 -0 0
+        mass 2.4000001
+        hitgroup 7
+    }
+
+    body "hind_lower_r"
+    {
+        bone "hind_lower_r"
+        shape capsule
+        radius 2.20139813
+        half_height 2.28573895
+        offset 1.76923084 0 -4.84615374
+        angles 78.6900711 0 90
+        mass 1.20000005
+        hitgroup 7
+    }
+
+    body "hind_foot_r"
+    {
+        bone "hind_foot_r"
+        shape box
+        half_extents 1.79999995 0.899999976 0.899999976
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.600000024
+        hitgroup 7
+    }
+
+    body "tail"
+    {
+        bone "tail"
+        shape capsule
+        radius 1.12178433
+        half_height 1.12178421
+        offset -2.53846145 0 0.307692319
+        angles -11.3099327 180 90
+        mass 0.319999993
+        hitgroup 0
+    }
+
+    body "jaw"
+    {
+        bone "jaw"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.251162827
+        hitgroup 1
+    }
+
+    body "tail_02"
+    {
+        bone "tail_02"
+        shape capsule
+        radius 1.12178433
+        half_height 1.12178421
+        offset -2.53846145 0 0.307692319
+        angles -11.3099327 180 90
+        mass 0.319999993
+        hitgroup 0
+    }
+
+    body "tail_03"
+    {
+        bone "tail_03"
+        shape capsule
+        radius 1.12178433
+        half_height 1.12178421
+        offset -2.53846145 0 0.307692319
+        angles -11.3099327 180 90
+        mass 0.319999993
+        hitgroup 0
+    }
+
+    body "tail_04"
+    {
+        bone "tail_04"
+        shape capsule
+        radius 1.12178433
+        half_height 1.12178421
+        offset -2.53846145 0 0.307692319
+        angles -11.3099327 180 90
+        mass 0.319999993
+        hitgroup 0
+    }
+
+    body "tail_05"
+    {
+        bone "tail_05"
+        shape capsule
+        radius 0.439999998
+        half_height 1.55999994
+        offset 1 0 0
+        angles 0 0 0
+        mass 0.319999993
+        hitgroup 0
+    }
+
+    joint "pelvis_to_chest"
+    {
+        parent "pelvis"
+        child "chest"
+        frame_anchor 0 0 0
+        frame_angles -26.565052 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "chest_to_neck"
+    {
+        parent "chest"
+        child "neck"
+        frame_anchor 0 0 0
+        frame_angles -21.8014088 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "neck_to_head"
+    {
+        parent "neck"
+        child "head"
+        frame_anchor 0 0 0
+        frame_angles 33.6900673 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "chest_to_front_upper_l"
+    {
+        parent "chest"
+        child "front_upper_l"
+        frame_anchor 0 0 0
+        frame_angles 90 -0 0
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "front_upper_l_to_front_lower_l"
+    {
+        parent "front_upper_l"
+        child "front_lower_l"
+        frame_anchor 0 0 0
+        frame_angles -0 -90 -78.6900711
+        swing1 35
+        swing2 35
+        twist_low 0
+        twist_high 140
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+    }
+
+    joint "front_lower_l_to_front_foot_l"
+    {
+        parent "front_lower_l"
+        child "front_foot_l"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "pelvis_to_hind_upper_l"
+    {
+        parent "pelvis"
+        child "hind_upper_l"
+        frame_anchor 0 0 0
+        frame_angles 90 -0 0
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "hind_upper_l_to_hind_lower_l"
+    {
+        parent "hind_upper_l"
+        child "hind_lower_l"
+        frame_anchor 0 0 0
+        frame_angles -0 -90 -78.6900711
+        swing1 35
+        swing2 35
+        twist_low 0
+        twist_high 140
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+    }
+
+    joint "hind_lower_l_to_hind_foot_l"
+    {
+        parent "hind_lower_l"
+        child "hind_foot_l"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "chest_to_front_upper_r"
+    {
+        parent "chest"
+        child "front_upper_r"
+        frame_anchor 0 0 0
+        frame_angles 90 -0 0
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "front_upper_r_to_front_lower_r"
+    {
+        parent "front_upper_r"
+        child "front_lower_r"
+        frame_anchor 0 0 0
+        frame_angles -0 -90 -78.6900711
+        swing1 35
+        swing2 35
+        twist_low 0
+        twist_high 140
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+    }
+
+    joint "front_lower_r_to_front_foot_r"
+    {
+        parent "front_lower_r"
+        child "front_foot_r"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "pelvis_to_hind_upper_r"
+    {
+        parent "pelvis"
+        child "hind_upper_r"
+        frame_anchor 0 0 0
+        frame_angles 90 -0 0
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "hind_upper_r_to_hind_lower_r"
+    {
+        parent "hind_upper_r"
+        child "hind_lower_r"
+        frame_anchor 0 0 0
+        frame_angles -0 -90 -78.6900711
+        swing1 35
+        swing2 35
+        twist_low 0
+        twist_high 140
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+    }
+
+    joint "hind_lower_r_to_hind_foot_r"
+    {
+        parent "hind_lower_r"
+        child "hind_foot_r"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "pelvis_to_tail"
+    {
+        parent "pelvis"
+        child "tail"
+        frame_anchor 0 0 0
+        frame_angles -11.3099327 180 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "head_to_jaw"
+    {
+        parent "head"
+        child "jaw"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -10
+        twist_high 35
+    }
+
+    joint "tail_to_tail_02"
+    {
+        parent "tail"
+        child "tail_02"
+        frame_anchor 0 0 0
+        frame_angles -11.3099327 180 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "tail_02_to_tail_03"
+    {
+        parent "tail_02"
+        child "tail_03"
+        frame_anchor 0 0 0
+        frame_angles -11.3099327 180 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "tail_03_to_tail_04"
+    {
+        parent "tail_03"
+        child "tail_04"
+        frame_anchor 0 0 0
+        frame_angles -11.3099327 180 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    joint "tail_04_to_tail_05"
+    {
+        parent "tail_04"
+        child "tail_05"
+        frame_anchor 0 0 0
+        frame_angles -0 0 90
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+}
