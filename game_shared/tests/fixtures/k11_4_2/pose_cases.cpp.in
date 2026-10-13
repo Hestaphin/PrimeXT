@@ -1,0 +1,64 @@
+static void additionalCases()
+{
+    {
+        Fixture fixture;
+        fixture.entity.curstate.framerate=0;
+        sampleTime=30;
+        query(fixture);drawSame(fixture);
+        auto *instance=g_StudioRenderer.StudioEnsureCpuInstance(&fixture.entity);
+        const auto revision=instance->m_cpuPoseRevision;
+        const auto publications=performance::ClientStats().bonePublications;
+        for(int i=0;i<100;++i) {sampleTime+=0.01f;query(fixture);drawSame(fixture);}
+        assert(instance->m_cpuPoseRevision==revision);
+        assert(performance::ClientStats().bonePublications==publications);
+        fixture.entity.curstate.blending[0]=fixture.entity.latched.prevblending[0]=255;
+        query(fixture);assert(instance->m_cpuPoseRevision>revision);drawSame(fixture);
+        const auto after=instance->m_cpuPoseRevision;
+        sampleTime-=1;query(fixture);assert(instance->m_cpuPoseRevision>after);
+    }
+    {
+        Fixture fixture;
+        fixture.entity.curstate.framerate=1;
+        fixture.sequences[0].fps=10;
+        sampleTime=40;query(fixture);
+        auto *instance=g_StudioRenderer.StudioEnsureCpuInstance(&fixture.entity);
+        const auto revision=instance->m_cpuPoseRevision;
+        sampleTime+=0.01f;query(fixture);assert(instance->m_cpuPoseRevision>revision);
+    }
+    {
+        Fixture fixture;
+        fixture.entity.curstate.animtime=sampleTime-0.05f;
+        fixture.entity.latched.prevanimtime=sampleTime-0.15f;
+        query(fixture);
+        auto *instance=g_StudioRenderer.StudioEnsureCpuInstance(&fixture.entity);
+        const auto revision=instance->m_cpuPoseRevision;
+        sampleTime+=0.02f;query(fixture);assert(instance->m_cpuPoseRevision>revision);
+    }
+    {
+        Fixture fixture;
+        fixture.sequences[0].flags|=STUDIO_AUTOPLAY;
+        query(fixture);auto *instance=g_StudioRenderer.StudioEnsureCpuInstance(&fixture.entity);
+        assert(!instance->m_cpuPoseStatic);
+        const auto revision=instance->m_cpuPoseRevision;
+        sampleTime+=0.01f;query(fixture);assert(instance->m_cpuPoseRevision>revision);
+    }
+    {
+        Fixture fixture;
+        fixture.entity.curstate.iuser1|=CF_RAGDOLL;
+        const byte indices[]={2};const Vector relative[]={Vector(3,0,0)};
+        const Vector4D rotations[]={Vector4D(0,0,0,1)};
+        g_StudioRenderer.StudioSetRagdollPose(&fixture.entity,false,true,true,1,1,
+            Vector(40,0,0),Vector4D(0,0,0,1),1,indices,relative,rotations);
+        sampleTime+=0.25f;query(fixture);drawSame(fixture);
+        auto *instance=g_StudioRenderer.StudioEnsureCpuInstance(&fixture.entity);
+        assert(instance->m_cpuPoseStatic);
+        const auto revision=instance->m_cpuPoseRevision;
+        for(int i=0;i<20;++i){sampleTime+=0.01f;near(query(fixture,1).GetOrigin().x,40);drawSame(fixture);}
+        assert(instance->m_cpuPoseRevision==revision);
+        g_StudioRenderer.StudioSetRagdollPose(&fixture.entity,false,false,false,2,1,
+            Vector(80,0,0),Vector4D(0,0,0,1),1,indices,relative,rotations);
+        sampleTime+=0.25f;near(query(fixture,1).GetOrigin().x,80);
+        assert(instance->m_cpuPoseRevision>revision&&!instance->m_cpuPoseStatic);
+    }
+    std::cout<<"K.11.4.2 static-pose reuse, GPU publication, animation/interpolation/autoplay invalidation and rewind: PASS\n";
+}

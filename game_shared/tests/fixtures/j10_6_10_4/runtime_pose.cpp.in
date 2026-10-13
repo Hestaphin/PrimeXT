@@ -1,0 +1,50 @@
+// Actual runtime capture method; mathematical SDK getter facade, no solver.
+#include "PxPhysicsAPI.h"
+#include <vector>
+#include <algorithm>
+#include <iostream>
+#include <limits>
+using namespace physx;
+struct Body {PxRigidDynamic *actor=nullptr;PxTransform bodyToBonePose,simulatedBonePose;bool hasSimulationPose=false;};
+struct PhysicsAssetInstance
+{
+    bool m_ragdoll=true,m_actorsCreated=true,m_hasSimulationPose=false,m_hasSimulationBounds=false,m_frozen=false;
+    std::vector<Body> m_bodies;PxBounds3 m_simulationBounds;
+    void CaptureSimulationPose();
+};
+@PRODUCTION@
+static unsigned checks=0;
+static void Check(bool v,const char *label){++checks;if(!v){std::cerr<<"FAIL "<<label<<'\n';std::abort();}}
+static float Error(PxTransform a,PxTransform b){return std::max((a.p-b.p).magnitude(),std::fabs(a.q.x-b.q.x)+std::fabs(a.q.y-b.q.y)+std::fabs(a.q.z-b.q.z)+std::fabs(a.q.w-b.q.w));}
+int main()
+{
+    PhysicsAssetInstance asset;
+    for(float scale:{0.5f,1.0f,2.5f})
+    {
+        const PxTransform bone(PxVec3(120,-40,70),PxQuat(0,0,std::sin(.7f),std::cos(.7f)));
+        const PxTransform local(PxVec3(3*scale,-4*scale,5*scale),PxQuat(std::sin(.4f),0,0,std::cos(.4f)));
+        PxRigidDynamic actor(bone*local);asset.m_bodies={{&actor,local.getInverse(),PxTransform(),false}};asset.CaptureSimulationPose();
+        Check(asset.m_hasSimulationPose&&asset.m_bodies[0].hasSimulationPose,"valid capture available");
+        Check(Error(asset.m_bodies[0].simulatedBonePose,bone)<0.00005f,"bone = actor * inverse(scaled authored body offset)");
+        actor.pose.p.x=std::numeric_limits<float>::quiet_NaN();asset.CaptureSimulationPose();
+        Check(!asset.m_hasSimulationPose&&!asset.m_bodies[0].hasSimulationPose,"nonfinite body cannot publish a pose");
+        asset.m_bodies[0].actor=nullptr;asset.CaptureSimulationPose();Check(!asset.m_hasSimulationPose,"missing actor cannot reuse stale pose");
+    }
+    {
+        PxRigidDynamic actor(PxTransform(PxVec3(3,4,5)));
+        asset.m_bodies={{&actor,PxTransform(),PxTransform(),false}};
+        asset.m_frozen=false;asset.CaptureSimulationPose();
+        asset.m_frozen=true;
+        const PxTransform captured=asset.m_bodies[0].simulatedBonePose;
+        actor.pose.p.x+=10; // Explicit restore mutates actors before invalidating the capture.
+        asset.CaptureSimulationPose();
+        Check(Error(asset.m_bodies[0].simulatedBonePose,captured)<0.00001f,"frozen completed pose reused");
+        asset.m_hasSimulationPose=asset.m_hasSimulationBounds=false;
+        asset.CaptureSimulationPose();
+        Check(Error(asset.m_bodies[0].simulatedBonePose,actor.pose)<0.00001f,"restore invalidation forces capture even while frozen");
+        asset.m_frozen=false;actor.pose.p.x+=5;asset.CaptureSimulationPose();
+        Check(Error(asset.m_bodies[0].simulatedBonePose,actor.pose)<0.00001f,"thaw resumes live captures");
+    }
+    asset.m_ragdoll=false;asset.m_hasSimulationPose=true;asset.CaptureSimulationPose();Check(!asset.m_hasSimulationPose,"inactive ragdoll clears availability");
+    std::cout<<"F4 production runtime capture: "<<checks<<" checks PASS; SDK math facade, NO solver\n";
+}

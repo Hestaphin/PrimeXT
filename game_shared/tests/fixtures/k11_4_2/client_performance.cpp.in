@@ -1,0 +1,192 @@
+// Production collision builders/cache and uniform setters; engine/GL services
+// are recording adapters. Mesh, Studio types and coordinate math are real.
+#include "hud.h"
+#include "utils.h"
+#include "gl_local.h"
+#include "gl_studio.h"
+#include "gl_shader.h"
+#include "meshdesc_factory.h"
+#include "physics_asset_format.h"
+#include "physics_asset_trace_coordinates.h"
+#include "physics_asset_primitive_trace.h"
+#include "performance_cache.h"
+#include <unordered_map>
+#include <memory>
+#include <cassert>
+#include <cstring>
+#include <iostream>
+#include <chrono>
+extern "C" const char *__asan_default_options() {return "detect_leaks=0:halt_on_error=1";}
+
+cl_enginefunc_t gEngfuncs{};
+render_api_t gRenderfuncs{};
+void ALERT(ALERT_TYPE, char *, ...) {}
+int developer_level=0;
+static int uploads=0, binds=0, allocations=0, frees=0;
+static model_t *currentModel=nullptr;
+static matrix3x4 liveBone;
+static bool boneAvailable=true;
+#define R_StudioGetCollisionBonePose RecordedBonePose
+bool RecordedBonePose(const cl_entity_t *, int, matrix3x4 &out)
+{ if(!boneAvailable) return false; out=liveBone; return true; }
+#define FLOAT_SETTER(n) decltype(pglUniform##n##fvARB) pglUniform##n##fvARB=[](GLint,GLsizei,const GLfloat *){++uploads;};
+FLOAT_SETTER(1) FLOAT_SETTER(2) FLOAT_SETTER(3) FLOAT_SETTER(4)
+#undef FLOAT_SETTER
+#define MATRIX_SETTER(n) decltype(pglUniformMatrix##n##fvARB) pglUniformMatrix##n##fvARB=[](GLint,GLsizei,GLboolean,const GLfloat *){++uploads;};
+MATRIX_SETTER(2) MATRIX_SETTER(3) MATRIX_SETTER(4)
+#undef MATRIX_SETTER
+decltype(pglUniform1fARB) pglUniform1fARB=[](GLint,GLfloat){++uploads;};
+decltype(pglUniform2fARB) pglUniform2fARB=[](GLint,GLfloat,GLfloat){++uploads;};
+decltype(pglUniform3fARB) pglUniform3fARB=[](GLint,GLfloat,GLfloat,GLfloat){++uploads;};
+decltype(pglUniform4fARB) pglUniform4fARB=[](GLint,GLfloat,GLfloat,GLfloat,GLfloat){++uploads;};
+decltype(pglUniform1iARB) pglUniform1iARB=[](GLint,GLint){++uploads;};
+decltype(pglUniform2iARB) pglUniform2iARB=[](GLint,GLint,GLint){++uploads;};
+decltype(pglUniform3iARB) pglUniform3iARB=[](GLint,GLint,GLint,GLint){++uploads;};
+decltype(pglUniform4iARB) pglUniform4iARB=[](GLint,GLint,GLint,GLint,GLint){++uploads;};
+
+@UNIFORM_METHODS@
+@PREDICTION_METHODS@
+
+static unsigned checks=0;
+static void Check(bool value, const char *label)
+{ ++checks; if(!value) {std::cerr<<"FAIL "<<label<<'\n';std::abort();} }
+
+static std::vector<float> Geometry(const CMeshDesc &desc)
+{
+    const auto *mesh=const_cast<CMeshDesc &>(desc).GetMesh();
+    std::vector<float> result;
+    if(!mesh) return result;
+    result.push_back(float(mesh->numfacets)); result.push_back(float(mesh->numplanes));
+    for(int i=0;i<mesh->numfacets;++i)
+        for(const auto &vertex:mesh->facets[i].triangle)
+            for(int j=0;j<3;++j) result.push_back(vertex.point[j]);
+    return result;
+}
+
+static physicsasset::CollisionDef BoxSection(const char *bone)
+{
+    physicsasset::CollisionDef section;
+    section.bone=bone;
+    physicsasset::ShapeDef shape;shape.type=physicsasset::ShapeType::Box;shape.halfExtents={2,3,4};
+    std::vector<physicsasset::PrimitiveTriangle> triangles;
+    physicsasset::BuildPrimitiveTraceTriangles(shape,triangles);
+    for(const auto &triangle:triangles) for(const auto &point:triangle)
+    {section.indices.push_back(static_cast<std::uint32_t>(section.vertices.size()));section.vertices.push_back(point);}
+    return section;
+}
+
+int main()
+{
+    gRenderfuncs.pfnMemAlloc=[](size_t bytes,const char *,int)->void *{++allocations;return std::calloc(1,bytes);};
+    gRenderfuncs.pfnMemFree=[](void *pointer,const char *,int){if(pointer)++frees;std::free(pointer);};
+    gRenderfuncs.pfnGetModel=[](int)->void *{return currentModel;};
+    gRenderfuncs.GL_Bind=[](int,unsigned){++binds;};
+    model_t model{};model.type=mod_studio;std::strcpy(model.name,"models/k1142.mdl");currentModel=&model;
+    {
+        void *storage=std::calloc(1,sizeof(uniform_t));auto &uniform=*static_cast<uniform_t *>(storage);
+        uniform.format=GL_FLOAT_MAT4_ARB;uniform.size=4;
+        float data[64]{};data[0]=1;uploads=0;
+        uniform.SetValue(data,4);for(int i=0;i<100;++i) uniform.SetValue(data,4);
+        Check(uploads==1,"identical matrix arrays upload once");
+        data[63]=2;uniform.SetValue(data,4);Check(uploads==2,"last matrix component invalidates");
+        uniform.SetValue(data,2);Check(uploads==3,"changed array count uploads");
+        uniform.SetValue(data,2);Check(uploads==3,"short prefix cached independently");
+        uniform.SetValue(data,4);Check(uploads==4,"return to longer count uploads");
+        uniform.FreeValueCache();uniform.SetValue(data,4);Check(uploads==5,"shader reload invalidation uploads");
+        uniform.FreeValueCache();uniform.size=1;
+        uniform.SetValue(data);uniform.SetValue(data);Check(uploads==6,"single model matrix also cached");
+        uniform.flags=UFL_TEXTURE_UNIT;uniform.unit=0;uniform.SetValue(12);uniform.SetValue(12);
+        Check(binds==2,"samplers retain texture binding side effects");
+        uniform.FreeValueCache();std::free(storage);
+    }
+    {
+        auto &factory=CMeshDescFactory::Instance();factory.ClearCache();
+        auto &first=factory.CreateObject(1,0,0,clipfile::GeometryType::CookedTriangleMesh,1);
+        Check(first.InitMeshBuild(1),"factory mesh initializes");
+        const Vector triangle[3]={Vector(0,0,0),Vector(16,0,0),Vector(0,16,0)};
+        Check(first.AddMeshTrinagle(triangle)&&first.FinishMeshBuild(),"factory geometry builds");first.FreeMeshBuild();
+        const auto *mesh=first.GetMesh();const auto *facets=mesh->facets;
+        for(int i=1;i<=3000;++i) factory.CreateObject(1,i,i%7,clipfile::GeometryType::CookedTriangleMesh,1);
+        Check(&factory.CreateObject(1,0,0,clipfile::GeometryType::CookedTriangleMesh,1)==&first,"indexed identity retained");
+        Check(first.GetMesh()==mesh&&mesh->facets==facets,"insertion preserves mesh and embedded pointers");
+        Check(&factory.CreateObject(1,0,0,clipfile::GeometryType::CookedTriangleMesh,2)!=&first,"fingerprint isolates geometry");
+        Check(&factory.CreateObject(1,0,0,clipfile::GeometryType::Original,1)!=&first,"geometry type isolates cache");
+        for(int i=0;i<10000;++i) Check(&factory.CreateObject(1,0,0,clipfile::GeometryType::CookedTriangleMesh,1)==&first,"warm indexed lookup");
+        factory.ClearCache();
+        Check(!factory.CreateObject(1,0,0,clipfile::GeometryType::CookedTriangleMesh,1).GetMesh(),"map cache clear discards geometry");
+        factory.ClearCache();
+    }
+    {
+        struct Studio {studiohdr_t header{};mstudiobone_t bone{};} studio;
+        studio.header.numbones=1;studio.header.boneindex=offsetof(Studio,bone);
+        std::strcpy(studio.bone.name,"door");model.cache.data=&studio.header;
+        cl_entity_t entity{};entity.index=1;entity.model=&model;entity.curstate.modelindex=1;
+        entity.curstate.scale=1;liveBone.Identity();
+        physicsasset::AssetDef asset;asset.collisions.push_back(BoxSection("door"));asset.collisionFingerprint=1;
+        performance::ClientStats()=performance::ClientCounters{};
+        std::vector<float> warm;
+        for(int i=0;i<100;++i)
+        {
+            PredictionMeshLease lease;auto &mesh=PredictionMovingMesh(&entity,asset,Vector(1),lease);
+            Check(BuildPredictedPhysicsMesh(&entity,asset,Vector(1),mesh),"cached prediction build succeeds");
+            if(i==0) warm=Geometry(mesh);else Check(Geometry(mesh)==warm,"warm sweep geometry identical");
+        }
+        Check(performance::ClientStats().predictionBuilds==1&&performance::ClientStats().predictionHits==99,
+            "100 unchanged prediction sweeps require one build");
+        liveBone=matrix3x4(Vector(7,0,0),Vector(0,90,0),1.0f);
+        {
+            PredictionMeshLease lease;auto &mesh=PredictionMovingMesh(&entity,asset,Vector(1),lease);
+            Check(BuildPredictedPhysicsMesh(&entity,asset,Vector(1),mesh),"changed pose rebuilds");
+            CMeshDesc cold;cold.SetModel(&model,0,0);
+            Check(BuildPredictedPhysicsMesh(&entity,asset,Vector(1),cold),"uncached comparison builds");
+            Check(Geometry(mesh)==Geometry(cold)&&Geometry(mesh)!=warm,"cached transformed geometry equals cold result");
+        }
+        for(int change=0;change<5;++change)
+        {
+            if(change==0)entity.curstate.body=1;
+            if(change==1)entity.curstate.skin=1;
+            if(change==2)entity.curstate.origin.x=3;
+            if(change==3)entity.curstate.angles.y=25;
+            if(change==4)asset.collisionFingerprint=2;
+            const auto before=performance::ClientStats().predictionBuilds;
+            PredictionMeshLease lease;auto &mesh=PredictionMovingMesh(&entity,asset,Vector(1),lease);
+            Check(BuildPredictedPhysicsMesh(&entity,asset,Vector(1),mesh)&&
+                performance::ClientStats().predictionBuilds==before+1,"selection/frame/source change rebuilds");
+        }
+        {
+            PredictionMeshLease outer;auto &mesh=PredictionMovingMesh(&entity,asset,Vector(1),outer);
+            Check(BuildPredictedPhysicsMesh(&entity,asset,Vector(1),mesh),"outer mesh usable");
+            const auto original=Geometry(mesh);
+            PredictionMeshLease nested;auto &other=PredictionMovingMesh(&entity,asset,Vector(1),nested);
+            Check(&other!=&mesh&&nested.temporary!=nullptr,"recursive IK sweep uses independent mesh");
+            Check(BuildPredictedPhysicsMesh(&entity,asset,Vector(1),other)&&Geometry(mesh)==original,"nested build preserves outer mesh");
+        }
+        {
+            PredictionMeshLease lease;auto &mesh=PredictionMovingMesh(&entity,asset,Vector(2),lease);
+            Check(BuildPredictedPhysicsMesh(&entity,asset,Vector(2),mesh),"scale invalidation rebuilds");
+        }
+        {
+            boneAvailable=false;
+            PredictionMeshLease lease;auto &mesh=PredictionMovingMesh(&entity,asset,Vector(1),lease);
+            Check(!BuildPredictedPhysicsMesh(&entity,asset,Vector(1),mesh)&&!lease.entry->key.valid,"unavailable bone rejects stale geometry");
+            boneAvailable=true;
+        }
+        {
+            const auto before=performance::ClientStats().predictionBuilds;
+            ++model.modelCRC;
+            PredictionMeshLease lease;auto &mesh=PredictionMovingMesh(&entity,asset,Vector(1),lease);
+            Check(BuildPredictedPhysicsMesh(&entity,asset,Vector(1),mesh)&&
+                performance::ClientStats().predictionBuilds==before+1,"in-place model CRC change invalidates geometry");
+        }
+        for(int i=2;i<180;++i)
+        {
+            entity.index=i;
+            PredictionMeshLease lease;auto &mesh=PredictionMovingMesh(&entity,asset,Vector(1),lease);
+            Check(BuildPredictedPhysicsMesh(&entity,asset,Vector(1),mesh),"retained-cache pressure preserves queries");
+        }
+        Check(s_predictionMovingMeshes.size()<=128,"retained moving mesh count bounded");
+        HUD_ClearPhysCollisionCache();Check(s_predictionMovingMeshes.empty(),"map clear removes all moving meshes");
+    }
+    Check(allocations==frees,"all retained mesh/uniform allocations released");
+    std::cout<<"K.11.4.2 native client cache: "<<checks<<" checks PASS; 100 unchanged sweeps = 1 build + 99 hits; GL calls recorded, no GPU run\n";
+}

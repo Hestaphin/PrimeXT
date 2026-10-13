@@ -1,0 +1,82 @@
+// Execute the actual physics scheduling method. Scene/actor services record
+// call order and completed-step IDs; this is not a PhysX simulation.
+#include "performance_cache.h"
+#include <memory>
+#include <vector>
+#include <cassert>
+#include <iostream>
+#include <limits>
+extern "C" const char *__asan_default_options() {return "detect_leaks=0:halt_on_error=1";}
+struct Cvar {float value=0;};
+Cvar *p_speeds=nullptr,*g_psv_gravity=nullptr;
+Cvar ragdoll_diagnostics,ragdoll_drive_strength,ragdoll_drive_damping,ragdoll_drive_maxforce,ragdoll_freeze,ragdoll_freeze_delay;
+struct Globals {float time=1;} globals;Globals *gpGlobals=&globals;
+struct PxVec3 {float x=0,y=0,z=-800;};struct PxSimulationStatistics {};
+constexpr int SERVER_ACTIVE=1,at_aiconsole=0;
+static bool active=true;static unsigned completedSteps=0;
+#define GET_SERVER_STATE() (active ? SERVER_ACTIVE : 0)
+#define CVAR_SET_FLOAT(...) ((void)0)
+#define ALERT(...) ((void)0)
+constexpr double k_SimulationStepSize=1.0/100.0;
+struct Scene
+{
+    unsigned steps=0,fetches=0;
+    PxVec3 getGravity()const{return {};}
+    void setGravity(PxVec3){}
+    void simulate(double step){assert(step==k_SimulationStepSize);++steps;}
+    void fetchResults(bool wait){assert(wait);++fetches;completedSteps=fetches;}
+    void getSimulationStatistics(PxSimulationStatistics &){}
+};
+struct Controller {unsigned calls=0;void ApplyForces(){++calls;}};
+struct Asset
+{
+    bool ragdoll=true,controlled=true,pose=false;
+    unsigned follows=0,controls=0,captures=0,diagnostics=0,resets=0;
+    std::vector<unsigned> capturedSteps;
+    void FollowAnimation(){++follows;}
+    bool IsRagdoll()const{return ragdoll;}
+    bool NeedsAnimationControl()const{return controlled;}
+    void UpdateAnimationPose(float){}
+    void ApplyAnimationControl(float,float,float,float){++controls;}
+    void CaptureSimulationPose(){++captures;pose=true;capturedSteps.push_back(completedSteps);}
+    bool HasSimulationPose()const{return pose;}
+    void RecordDiagnostics(float,const PxSimulationStatistics *stats,float mode,float=-1,float=-1)
+    {if(stats&&mode>0)++diagnostics;else++resets;}
+    void UpdateSleepFreeze(float,bool,float){}
+};
+class CPhysicPhysX
+{
+public:
+    @PERFORMANCE_TYPE@;
+    PerformanceState m_performance;
+    Scene *m_pScene=nullptr;Controller *m_holdableController=nullptr;
+    std::vector<std::unique_ptr<Asset>> m_physicsAssets;
+    double m_flAccumulator=0;unsigned drives=0,presentations=0,partPackets=0;
+    void UpdatePhysicsAssetCollisionBodygroups(){}
+    void UpdateAnimatedCollisionActors(){}
+    void HandleEvents(){}
+    void ApplyInteractivePartDrives(float){++drives;}
+    void UpdateRagdollPresentation(Asset *){++presentations;}
+    void SendInteractivePartPoses(){++partPackets;}
+    void Update(float);
+};
+@UPDATE_METHOD@
+int main()
+{
+    Scene scene;Controller controller;CPhysicPhysX physics;
+    physics.m_pScene=&scene;physics.m_holdableController=&controller;
+    physics.m_physicsAssets.push_back(std::make_unique<Asset>());auto &asset=*physics.m_physicsAssets[0];
+    physics.Update(.035f);
+    assert(scene.steps==3&&scene.fetches==3&&asset.captures==1&&asset.capturedSteps.back()==3);
+    assert(controller.calls==3&&physics.drives==3&&asset.controls==3&&physics.presentations==1);
+    physics.Update(.001f);assert(scene.steps==3&&asset.captures==1);
+    ragdoll_diagnostics.value=1;physics.Update(.027f);
+    assert(scene.steps==6&&asset.captures==4&&asset.diagnostics==3);
+    assert(asset.capturedSteps[1]==4&&asset.capturedSteps[2]==5&&asset.capturedSteps[3]==6);
+    ragdoll_diagnostics.value=0;Cvar timing;timing.value=2;p_speeds=&timing;
+    physics.Update(.021f);assert(scene.steps==8&&asset.captures==5&&asset.capturedSteps.back()==8);
+    assert(physics.m_performance.steps==2&&physics.m_performance.frameMilliseconds>=0);
+    const auto steps=scene.steps;physics.Update(-1);physics.Update(std::numeric_limits<float>::quiet_NaN());
+    assert(scene.steps==steps);active=false;physics.Update(.1f);assert(scene.steps==steps);
+    std::cout<<"K.11.4.2 production scheduling: final-pose capture, per-step diagnostics, zero/invalid delta, 100 Hz controls and timing: PASS; no solver run\n";
+}

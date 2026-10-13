@@ -1,0 +1,126 @@
+// Actual server key/mesh/shape methods with recording entity and SDK services.
+// CMeshDesc, model/Studio types, scaled trace frames and matrices are real.
+#include "hud.h"
+#include "utils.h"
+#include "gl_local.h"
+#include "edict.h"
+#include "meshdesc.h"
+#include "physics_asset_format.h"
+#include "physics_part_layout.h"
+#include "physics_asset_trace_coordinates.h"
+#include "physics_asset_primitive_trace.h"
+#include "performance_cache.h"
+#include "PxPhysicsAPI.h"
+#include <cassert>
+#include <memory>
+#include <cstring>
+#include <iostream>
+extern "C" const char *__asan_default_options() {return "detect_leaks=0:halt_on_error=1";}
+using namespace physx;
+using PhysicsAssetDef=physicsasset::AssetDef;
+cl_enginefunc_t gEngfuncs{};render_api_t gRenderfuncs{};
+void ALERT(ALERT_TYPE,char *,...) {}
+int developer_level=0;
+cvar_t *p_speeds=nullptr;
+static model_t *currentModel=nullptr;
+static PxTransform animatedPose;
+class CBaseEntity
+{
+public:
+    edict_t edict{};entvars_t *pev=&edict.v;Vector scale{1};
+    CBaseEntity() {edict.pvPrivateData=this;}
+    static CBaseEntity *Instance(edict_t *edict) {return static_cast<CBaseEntity *>(edict->pvPrivateData);}
+    Vector GetAbsOrigin() const {return Vector(pev->origin);}
+    Vector GetAbsAngles() const {return Vector(pev->angles);}
+    Vector GetScale() const {return scale;}
+    const char *GetModel() const {return currentModel->name;}
+};
+static matrix4x4 MatrixFromPxTransform(const PxTransform &pose)
+{return matrix4x4(Vector(pose.p.x,pose.p.y,pose.p.z),Vector4D(pose.q.x,pose.q.y,pose.q.z,pose.q.w));}
+static PxTransform StudioBoneWorldTransform(CBaseEntity *,int) {return animatedPose;}
+@STUDIO_HELPERS@
+class CPhysicPhysX
+{
+public:
+    enum class PhysicsPartMode {Animated,Driven,Free};
+    @STATE_TYPES@
+    @PERFORMANCE_TYPE@;
+    PerformanceState m_performance;
+    std::shared_ptr<PhysicsAssetDef> definition;
+    std::shared_ptr<PhysicsAssetDef> GetPhysicsAssetDefinition(CBaseEntity *) {return definition;}
+    void BuildAnimatedTraceKey(CBaseEntity *,const PhysicsAssetCollisionState &,const PhysicsAssetDef &,performance::TraceMeshKey &);
+    void RebuildAnimatedCollisionTraceMesh(CBaseEntity *,PhysicsAssetCollisionState &,const PhysicsAssetDef &);
+    void SetAnimatedCollisionEnabled(PhysicsAssetCollisionState &,bool);
+};
+@SERVER_METHODS@
+static unsigned checks=0;
+static void Check(bool value,const char *label) {++checks;if(!value){std::cerr<<"FAIL "<<label<<'\n';std::abort();}}
+static std::vector<float> Geometry(CMeshDesc &desc)
+{
+    auto *mesh=desc.GetMesh();std::vector<float> out;
+    if(!mesh)return out;
+    for(int i=0;i<mesh->numfacets;++i)for(const auto &vertex:mesh->facets[i].triangle)
+        for(int j=0;j<3;++j)out.push_back(vertex.point[j]);
+    return out;
+}
+int main()
+{
+    gRenderfuncs.pfnMemAlloc=[](size_t bytes,const char *,int)->void *{return std::calloc(1,bytes);};
+    gRenderfuncs.pfnMemFree=[](void *pointer,const char *,int){std::free(pointer);};
+    gRenderfuncs.pfnGetModel=[](int)->void *{return currentModel;};
+    struct Studio {studiohdr_t header{};mstudiobone_t bone{};} studio;
+    studio.header.numbones=1;studio.header.boneindex=offsetof(Studio,bone);
+    std::strcpy(studio.bone.name,"door");model_t model{};model.type=mod_studio;
+    std::strcpy(model.name,"models/performance_server.mdl");model.cache.data=&studio.header;currentModel=&model;
+    CBaseEntity entity;
+    CPhysicPhysX physics;physics.definition=std::make_shared<PhysicsAssetDef>();
+    physicsasset::CollisionDef section;section.bone="door";
+    physicsasset::ShapeDef box;box.halfExtents={2,3,4};std::vector<physicsasset::PrimitiveTriangle> triangles;
+    physicsasset::BuildPrimitiveTraceTriangles(box,triangles);
+    for(const auto &triangle:triangles)for(const auto &point:triangle)
+    {section.indices.push_back(static_cast<std::uint32_t>(section.vertices.size()));section.vertices.push_back(point);}
+    physics.definition->collisions.push_back(section);physics.definition->collisionFingerprint=1;
+    CPhysicPhysX::PhysicsAssetCollisionState state;state.edict=&entity.edict;
+    PxRigidDynamic actor{PxTransform(PxIdentity)};PxShape shape;
+    CPhysicPhysX::PhysicsPartRuntime part;part.actor=&actor;part.boneIndex=0;part.shapes.push_back({0,&shape});state.parts.push_back(part);
+    physics.SetAnimatedCollisionEnabled(state,true);
+    Check(physics.m_performance.shapeChanges==0,"unchanged shape flags not rewritten");
+    physics.SetAnimatedCollisionEnabled(state,false);physics.SetAnimatedCollisionEnabled(state,false);
+    Check(physics.m_performance.shapeChanges==2&&shape.flags==0,"disable writes both flags once");
+    physics.SetAnimatedCollisionEnabled(state,true);
+    for(int i=0;i<100;++i)physics.RebuildAnimatedCollisionTraceMesh(&entity,state,*physics.definition);
+    Check(physics.m_performance.meshBuilds==1&&physics.m_performance.meshHits==99,"100 unchanged server updates build once");
+    const auto initial=Geometry(*state.animatedTraceMesh);
+    animatedPose=PxTransform(PxVec3(12,0,0));physics.RebuildAnimatedCollisionTraceMesh(&entity,state,*physics.definition);
+    Check(physics.m_performance.meshBuilds==2&&Geometry(*state.animatedTraceMesh)!=initial,"animation pose invalidates immediately");
+    state.parts[0].owner=physicsasset::PartOwner::ArticulatedBody;
+    actor.pose=PxTransform(PxVec3(-5,0,0));physics.RebuildAnimatedCollisionTraceMesh(&entity,state,*physics.definition);
+    const auto physical=Geometry(*state.animatedTraceMesh);
+    Check(physical!=initial&&physics.m_performance.meshBuilds==3,"dynamic ownership selects actual actor pose");
+    for(int change=0;change<5;++change)
+    {
+        if(change==0)entity.pev->body=1;
+        if(change==1)entity.pev->skin=2;
+        if(change==2)entity.pev->origin[0]=3;
+        if(change==3)entity.scale=Vector(2);
+        if(change==4)physics.definition->collisionFingerprint=2;
+        const auto before=physics.m_performance.meshBuilds;
+        physics.RebuildAnimatedCollisionTraceMesh(&entity,state,*physics.definition);
+        Check(physics.m_performance.meshBuilds==before+1,"selection/frame/scale/source changes rebuild");
+    }
+    state.articulatedOverride=true;physics.SetAnimatedCollisionEnabled(state,true);
+    physics.RebuildAnimatedCollisionTraceMesh(&entity,state,*physics.definition);
+    Check(!state.animatedTraceMesh&&shape.flags==0,"ragdoll ownership removes proxy trace/flags");
+    state.articulatedOverride=false;physics.SetAnimatedCollisionEnabled(state,true);
+    physics.RebuildAnimatedCollisionTraceMesh(&entity,state,*physics.definition);
+    Check(state.animatedTraceMesh&&state.animatedTraceMesh->GetMesh(),"ownership return rebuilds collision");
+    physics.definition=std::make_shared<PhysicsAssetDef>();physicsasset::BodyDef body;body.shape=box;
+    physics.definition->bodies.push_back(body);state.parts[0].bodyIndex=0;state.parts[0].mode=CPhysicPhysX::PhysicsPartMode::Free;
+    physics.RebuildAnimatedCollisionTraceMesh(&entity,state,*physics.definition);
+    Check(state.animatedTraceMesh&&state.animatedTraceMesh->GetMesh(),"primitive-only part builds trace mesh");
+    auto before=physics.m_performance.meshBuilds;physics.RebuildAnimatedCollisionTraceMesh(&entity,state,*physics.definition);
+    Check(physics.m_performance.meshBuilds==before,"unchanged primitive actor reuses geometry");
+    actor.pose.p.x+=7;physics.RebuildAnimatedCollisionTraceMesh(&entity,state,*physics.definition);
+    Check(physics.m_performance.meshBuilds==before+1,"free primitive movement invalidates");
+    std::cout<<"K.11.4.2 server collision: "<<checks<<" checks PASS; 100 unchanged updates = 1 build + 99 hits; SDK services recorded, no solver\n";
+}

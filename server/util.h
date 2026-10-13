@@ -383,6 +383,7 @@ extern void		UTIL_BloodStudioDecalTrace( TraceResult *pTrace, int bloodColor );
 extern void		UTIL_DecalTrace( TraceResult *pTrace, const char *decalName );
 extern bool		UTIL_TraceCustomDecal(TraceResult *pTrace, const char *name, float angle = 0.0f, int persistent = 0);
 extern BOOL		UTIL_StudioDecalTrace(TraceResult *pTrace, const char *name, int flags = 0);
+extern BOOL		UTIL_RagdollStudioDecalTrace(TraceResult *pTrace, const char *name, int flags = 0);
 extern void		UTIL_RestoreCustomDecal(const Vector &vecPos, const Vector &vecNormal, int entityIndex, int modelIndex, const char *name, int flags, float angle);
 extern void		UTIL_RestoreStudioDecal(const Vector &vecEnd, const Vector &vecNormal, int entityIndex, int modelIndex, const char *name, int flags, struct modelstate_s *state, int lightcache, const Vector &scale);
 extern void		UTIL_PlayerDecalTrace( TraceResult *pTrace, int playernum, int decalNumber );

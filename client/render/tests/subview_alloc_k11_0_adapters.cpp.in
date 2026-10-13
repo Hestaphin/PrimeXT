@@ -1,0 +1,37 @@
+// Driver entry points are recording adapters; allocator, binding and caller are production code.
+cvar_t *gl_hdr = &disabled;
+static int driverFault, createdTextures, textureAttachments, copyCalls;
+static int deletedRenderbuffers, deletedFramebuffers, statusChecks;
+static int textureWidth, textureHeight;
+static texFlags_t textureFlags;
+static GLuint driverFramebuffer;
+decltype(pglGenRenderbuffers) pglGenRenderbuffers = [](GLsizei, GLuint *p) { *p = driverFault == 3 ? 0 : 11; };
+decltype(pglBindRenderbuffer) pglBindRenderbuffer = [](GLenum, GLuint) {};
+decltype(pglRenderbufferStorage) pglRenderbufferStorage = [](GLenum, GLenum, GLsizei, GLsizei) {};
+decltype(pglGenFramebuffers) pglGenFramebuffers = [](GLsizei, GLuint *p) { *p = driverFault == 4 ? 0 : 12; };
+decltype(pglBindFramebuffer) pglBindFramebuffer = [](GLenum, GLuint p) { driverFramebuffer = p; };
+decltype(pglFramebufferRenderbuffer) pglFramebufferRenderbuffer = [](GLenum, GLenum, GLenum, GLuint) {};
+decltype(pglDrawBuffer) pglDrawBuffer = [](GLenum) {};
+decltype(pglReadBuffer) pglReadBuffer = [](GLenum) {};
+decltype(pglFramebufferTexture2D) pglFramebufferTexture2D = [](GLenum, GLenum, GLenum, GLuint, GLint) { ++textureAttachments; };
+decltype(pglCopyTexImage2D) pglCopyTexImage2D = [](GLenum, GLint, GLenum, GLint, GLint, GLsizei, GLsizei, GLint) { ++copyCalls; };
+decltype(pglCheckFramebufferStatus) pglCheckFramebufferStatus = [](GLenum) -> GLenum {
+    ++statusChecks; return driverFault == 5 ? GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT_EXT : GL_FRAMEBUFFER_COMPLETE_EXT;
+};
+decltype(pglDeleteRenderbuffers) pglDeleteRenderbuffers = [](GLsizei n, const GLuint *) { deletedRenderbuffers += n; };
+decltype(pglDeleteFramebuffers) pglDeleteFramebuffers = [](GLsizei n, const GLuint *) { deletedFramebuffers += n; };
+static void SetupDriverApi() {
+    gRenderfuncs.GL_CreateTexture = [](const char *, int w, int h, const void *, texFlags_t flags) {
+        ++createdTextures; textureWidth = w; textureHeight = h; textureFlags = flags; return driverFault == 1 ? 0 : 7;
+    };
+    gRenderfuncs.RenderGetParm = [](int parm, int texture) -> intptr_t {
+        if(!texture) return 0;
+        if(parm == PARM_TEX_SRC_WIDTH) return textureWidth;
+        if(parm == PARM_TEX_SRC_HEIGHT) return textureHeight;
+        if(parm == PARM_TEX_TEXNUM) return driverFault == 2 ? 0 : 17;
+        if(parm == PARM_TEX_FLAGS) return textureFlags;
+        return 0;
+    };
+    gRenderfuncs.GL_Bind = [](int, unsigned int) {};
+    gRenderfuncs.GL_FreeTexture = [](unsigned int texture) { freedTextures.push_back(texture); };
+}

@@ -47,6 +47,17 @@ extern cvar_t	*p_speeds;
 extern cvar_t	*g_physdebug;	// quake physics debug
 extern cvar_t	*g_allow_physx;
 extern cvar_t	g_sync_physic;
+extern cvar_t ragdoll_bullet_impulse_scale;
+extern cvar_t ragdoll_blast_impulse_scale;
+extern cvar_t prop_bullet_impulse_scale;
+extern cvar_t prop_blast_impulse_scale;
+extern cvar_t ragdoll_freeze;
+extern cvar_t ragdoll_freeze_delay;
+extern cvar_t ragdoll_drive_strength;
+extern cvar_t ragdoll_drive_damping;
+extern cvar_t ragdoll_drive_maxforce;
+extern cvar_t ragdoll_debug;
+extern cvar_t ragdoll_diagnostics;
 
 #endif		// GAME_H
 

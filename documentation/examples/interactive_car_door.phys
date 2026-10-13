@@ -1,0 +1,44 @@
+// Milestone I.9 AUTHORING EXAMPLE, not an asset to ship without a matching MDL.
+// car.mdl must have Studio bones named car_root and door_l.
+// The hinge pivot and axis shown are CHILD bone-local; adjust to your model.
+physics_asset
+{
+    version 5
+
+    body "chassis"
+    {
+        bone "car_root"
+        shape box
+        half_extents 40 18 12
+        mass 1000
+        hitgroup 10
+    }
+
+    body "left_door"
+    {
+        bone "door_l"
+        part "left_door"
+        shape box
+        half_extents 16 2 14
+        mass 18
+        hitgroup 20
+        prop_drive driven
+        drive_strength 120
+        drive_damping 15
+        drive_max_force 850
+    }
+
+    joint "left_hinge"
+    {
+        parent "chassis"
+        child "left_door"
+        kind hinge
+        hinge_anchor 0 0 0
+        hinge_axis 0 0 1
+        hinge_min -5
+        hinge_max 75
+        release_damage 30
+        break_damage 100
+        break_impulse 900
+    }
+}

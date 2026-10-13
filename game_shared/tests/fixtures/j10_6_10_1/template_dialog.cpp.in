@@ -1,0 +1,238 @@
+// Actual editor/Studio declarations and methods; GUI, engine and GL services
+// are explicit adapters. Private exposure supplies authoring fixtures only.
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+#include <sstream> // Include STL before the test's private/public exposure.
+#include "ViewerSettings.h"
+#define private public
+#include "StudioModel.h"
+#include "PhysicsAssetEditor.h"
+#include "RagdollTemplateDialog.h"
+#include "PhysicsSettingsDialog.h"
+#undef private
+#include "physics_asset_settings.h"
+#include "mx/mxButton.h"
+#include "mx/mxChoice.h"
+#include "mx/mxLabel.h"
+#include "mx/mxLineEdit.h"
+#include "mx/mxListBox.h"
+#include "mx/mxCheckBox.h"
+#include "mx/mxFileDialog.h"
+#include "mx/mxMessageBox.h"
+#include "app_info.h"
+#include "fixtures/j10_6_10_1/barney_skeleton.h"
+#include <filesystem>
+#include <fstream>
+#include "gl_export.h"
+
+struct WidgetRecord {int x,y,w,h; std::string label; bool visible=true; void *handle=nullptr; mxWindow *parent=nullptr;};
+class mxWidget_i {public: WidgetRecord record;};
+static std::map<const mxWidget*,WidgetRecord*> widgets;
+class mxWindow_i {public: std::vector<mxWidget*> children;};
+mxWidget::mxWidget(mxWindow *parent,int x,int y,int w,int h,const char *label):d_this(new mxWidget_i) {
+    d_this->record={x,y,w,h,label ? label : "",true,this,parent};widgets[this]=&d_this->record;
+}
+mxWidget::~mxWidget() {widgets.erase(this);delete d_this;}
+void mxWidget::setHandle(void *value) {d_this->record.handle=value;}
+void *mxWidget::getHandle() const {return d_this->record.handle;}
+void mxWidget::setParent(mxWindow *value) {d_this->record.parent=value;}
+mxWindow *mxWidget::getParent() const {return d_this->record.parent;}
+void mxWidget::setType(int) {}
+void mxWidget::setVisible(bool value) {d_this->record.visible=value;}
+bool mxWidget::isVisible() const {return d_this->record.visible;}
+void mxWidget::setLabel(const char *value) {d_this->record.label=value ? value : "";}
+const char *mxWidget::getLabel() const {return d_this->record.label.c_str();}
+mxWindow::mxWindow(mxWindow *parent,int x,int y,int w,int h,const char *label,int):
+    mxWidget(parent,x,y,w,h,label),d_this(new mxWindow_i) {if(parent) parent->addWidget(this);}
+mxWindow::~mxWindow() {for(auto *widget:d_this->children) delete widget;delete d_this;}
+void mxWindow::addWidget(mxWidget *widget) {d_this->children.push_back(widget);}
+int mxWindow::handleEvent(mxEvent*) {return 0;}
+void mxWindow::redraw() {}
+mxButton::mxButton(mxWindow *p,int x,int y,int w,int h,const char *s,int):mxWidget(p,x,y,w,h,s) {p->addWidget(this);}
+mxButton::~mxButton()=default;
+mxLabel::mxLabel(mxWindow *p,int x,int y,int w,int h,const char *s):mxWidget(p,x,y,w,h,s) {p->addWidget(this);}
+mxLabel::~mxLabel()=default;
+mxLineEdit::mxLineEdit(mxWindow *p,int x,int y,int w,int h,const char *s,int,int):mxWidget(p,x,y,w,h,s) {p->addWidget(this);}
+mxLineEdit::~mxLineEdit()=default;
+mxChoice::mxChoice(mxWindow *p,int x,int y,int w,int h,int):mxWidget(p,x,y,w,h) {p->addWidget(this);}
+mxChoice::~mxChoice()=default;
+static std::map<const mxWidget*,std::vector<std::string>> items;
+static std::map<const mxWidget*,int> selection;
+static std::map<const mxWidget*,bool> enabled,checked;
+void mxWidget::setEnabled(bool value) { enabled[this]=value; }
+void mxChoice::add(const char *text) { items[this].push_back(text); }
+void mxChoice::select(int index) { selection[this]=index; }
+int mxChoice::getSelectedIndex() const { return selection[this]; }
+void mxChoice::removeAll() { items[this].clear();selection[this]=-1; }
+mxListBox::mxListBox(mxWindow *p,int x,int y,int w,int h,int,int):mxWidget(p,x,y,w,h) {p->addWidget(this);}
+mxListBox::~mxListBox()=default;
+struct PhysicsAssetEditor::PreviewImpl {};
+PhysicsAssetEditor::~PhysicsAssetEditor()=default;
+int PhysicsAssetEditor::handleEvent(mxEvent*) {return 1;}
+ViewerSettings::ViewerSettings() {pause=false;speedScale=1;}
+void CBaseBoneSetup::debugMsg(char*,...) {}
+void CBaseBoneSetup::debugLine(const Vector&,const Vector&,int,int,int,bool,float) {}
+mstudioanim_t *CBaseBoneSetup::GetAnimSourceData(mstudioseqdesc_t*) {return nullptr;}
+matrix3x4 m_protationmatrix;
+
+
+void mxListBox::add(const char *text) { items[this].push_back(text); }
+void mxListBox::select(int index) { selection[this]=index; }
+int mxListBox::getSelectedIndex() const { return selection[this]; }
+void mxListBox::removeAll() { items[this].clear();selection[this]=-1; }
+mxCheckBox::mxCheckBox(mxWindow *p,int x,int y,int w,int h,const char *text,int):mxWidget(p,x,y,w,h,text) { p->addWidget(this); }
+mxCheckBox::~mxCheckBox()=default;
+void mxCheckBox::setChecked(bool value) { checked[this]=value; }
+bool mxCheckBox::isChecked() const { return checked[this]; }
+static std::string openPath,savePath;
+static int confirm=0,panelApplies=0;
+extern "C" const char *mxGetOpenFileName(mxWindow*,const char*,const char*) { return openPath.empty()?nullptr:openPath.c_str(); }
+extern "C" const char *mxGetSaveFileName(mxWindow*,const char*,const char*) { return savePath.empty()?nullptr:savePath.c_str(); }
+int mxMessageBox(mxWindow*,const char*,const char*,int) { return confirm; }
+class GlWindow { public: void redraw() {} }; GlWindow *g_GlWindow=nullptr;
+void PhysicsAssetEditor::RefreshBodyList(int selected) { m_selectedBody=selected; }
+void PhysicsAssetEditor::RefreshJointList(int selected) { m_selectedJoint=selected; }
+void PhysicsAssetEditor::UpdateStatus(const char *text) { m_status->setLabel(text); }
+bool PhysicsAssetEditor::SaveAsset(){UpdateStatus("F1 save service; F3 verifies production saving");return true;}
+bool PhysicsAssetEditor::ApplyBodyFields() { ++panelApplies;return true; }
+bool PhysicsAssetEditor::ApplyJointFields() { ++panelApplies;return true; }
+bool StudioModel::GetRagdollFitVertices(std::vector<std::vector<Vector>> &out,const std::vector<std::string> &)
+{
+    const auto bones=BarneySkeleton();out.assign(bones.size(),{});
+    for(size_t i=0;i<bones.size();++i) if(bones[i].hasBounds)
+    {
+        const auto &b=bones[i];for(int corner=0;corner<8;++corner) out[i].push_back(Vector(corner&1?b.boundsMax.x:b.boundsMin.x,corner&2?b.boundsMax.y:b.boundsMin.y,corner&4?b.boundsMax.z:b.boundsMin.z));
+    }
+    return true;
+}
+void PhysicsAssetEditor::RecordPreviewDiagnostics() {}
+void PhysicsAssetEditor::BeginDiagnosticCapture() {}
+@PRODUCTION@
+static unsigned checks=0;
+static void Check(bool value,const char *name) { ++checks;if(!value) { std::cerr<<"FAIL "<<name<<'\n';std::abort(); } }
+static void Action(RagdollTemplateDialog &dialog,int id) { mxEvent event{};event.event=mxEvent::Action;event.action=id;dialog.handleEvent(&event); }
+struct ModelFixture { studiohdr_t header{};mstudiobone_t bones[24]{}; };
+int main(int argc,char **argv)
+{
+    Check(argc==2,"temporary directory argument");
+    const auto fixture=BarneySkeleton();ModelFixture modelData;
+    modelData.header.numbones=24;modelData.header.boneindex=offsetof(ModelFixture,bones);
+    for(size_t i=0;i<fixture.size();++i)
+    {
+        std::strcpy(modelData.bones[i].name,fixture[i].name.c_str());modelData.bones[i].parent=fixture[i].parent;
+        modelData.bones[i].value[0]=fixture[i].localOrigin.x;modelData.bones[i].value[1]=fixture[i].localOrigin.y;modelData.bones[i].value[2]=fixture[i].localOrigin.z;
+    }
+    ViewerSettings settings;StudioModel model(settings);model.m_pstudiohdr=&modelData.header;
+    PhysicsAssetEditor editor(nullptr,model,settings);editor.setVisible(true);editor.m_modelPath="models/barney.mdl";
+    editor.m_asset.sourcePath=editor.m_assetPath="models/barney.phys";
+    std::string error;Check(physicsasset::LoadFile(argv[1],editor.m_asset,&error),"load actual supplied asset fixture");
+    const std::string original=physicsasset::Serialize(editor.m_asset);const bool dirty=editor.m_dirty;
+    editor.m_bodyName->setLabel("unapplied marker");editor.AutoGenerate();
+    auto &dialog=*editor.m_templateDialog;
+    Check(dialog.isVisible()&&physicsasset::Serialize(editor.m_asset)==original&&panelApplies==0,"open does not apply panel fields or replace asset");
+    Check(!enabled[dialog.m_id]&&!enabled[dialog.m_override],"built-in fields protected");
+    for(int page=0;page<5;++page)for(bool advanced:{false,true}) {
+        dialog.m_page->select(page);dialog.m_advanced->setChecked(advanced);dialog.ShowPage();
+        std::vector<WidgetRecord*> controls;
+        for(auto &entry:widgets)if(entry.first->getParent()==&dialog&&entry.second->visible)controls.push_back(entry.second);
+        for(const auto *a:controls) {
+            Check(a->x>=0&&a->y>=0&&a->x+a->w<=860&&a->y+a->h<=690,"visible controls fit template page");
+            for(const auto *b:controls)if(a!=b) {
+                const bool separated=a->x+a->w<=b->x||b->x+b->w<=a->x||a->y+a->h<=b->y||b->y+b->h<=a->y;
+                if(!separated)std::cerr<<"Overlap page "<<page<<" advanced "<<advanced<<" at "<<a->x<<","<<a->y<<" and "<<b->x<<","<<b->y<<"\n";
+                Check(separated,"visible page controls never overlap");
+            }
+        }
+    }
+    for(int page=0;page<5;++page)for(bool advanced:{false,true}) {
+        editor.m_page->select(page);editor.m_advanced->setChecked(advanced);editor.ShowPage();
+        Check(editor.m_simulationModeChoice->isVisible()==(page==3),"simulation selector is available on Asset / preview in both field modes");
+        std::vector<WidgetRecord*> controls;
+        for(auto &entry:widgets)if(entry.first->getParent()==&editor&&entry.first!=&dialog&&entry.second->visible)controls.push_back(entry.second);
+        for(const auto *a:controls) {
+            Check(a->x>=0&&a->y>=0&&a->x+a->w<=860&&a->y+a->h<=670,"visible controls fit main editor page");
+            for(const auto *b:controls)if(a!=b) {
+                const bool separated=a->x+a->w<=b->x||b->x+b->w<=a->x||a->y+a->h<=b->y||b->y+b->h<=a->y;
+                Check(separated,"main editor page controls never overlap");
+            }
+        }
+    }
+    editor.m_page->select(0);editor.m_advanced->setChecked(false);editor.ShowPage();
+    dialog.m_page->select(0);dialog.m_advanced->setChecked(false);dialog.ShowPage();
+    using Mode=PhysicsAssetEditor::SimulationMode;
+    Check(editor.GetSimulationMode()==Mode::FullRagdoll&&!editor.PausesAnimationPlayback(),"default full mode pauses only while simulating");
+    Check(editor.m_simulationModeChoice->getSelectedIndex()==0&&dialog.m_simulationModeChoice->getSelectedIndex()==0,"editor and template default to full mode");
+    dialog.m_simulationModeChoice->select(1);Action(dialog,RagdollTemplateDialog::PreviewMode);
+    Check(editor.GetSimulationMode()==Mode::PartialRagdoll&&editor.m_simulationModeChoice->getSelectedIndex()==1,"generator selects the shared partial mode");
+    m_protationmatrix.Identity();for(int i=0;i<modelData.header.numbones;++i)model.m_pbonetransform[i].Identity();
+    model.m_pbonetransform[0].SetOrigin(Vector(3,4,5));
+    editor.m_simulating=true;const auto *scene=editor.m_preview.get();
+    editor.SetSimulationMode(Mode::FullRagdoll);
+    Check(editor.IsSimulating()&&editor.PausesAnimationPlayback()&&model.m_toolAnimationFrozen,"switching a running partial preview to full captures its pose");
+    Check(dialog.m_simulationModeChoice->getSelectedIndex()==0&&model.m_toolFrozenBoneCount==modelData.header.numbones,"full mode synchronizes template and captures all bones");
+    model.m_pbonetransform[0].SetOrigin(Vector(30,40,50));editor.SetSimulationMode(Mode::FullRagdoll);
+    Check(model.m_toolFrozenModelBones[0].GetOrigin()==Vector(3,4,5),"reselecting full mode does not recapture a frozen pose");
+    dialog.m_simulationModeChoice->select(1);Action(dialog,RagdollTemplateDialog::PreviewMode);
+    Check(editor.IsSimulating()&&!editor.PausesAnimationPlayback()&&!model.m_toolAnimationFrozen,"switching to partial releases pose and permits frame playback");
+    Check(editor.m_preview.get()==scene&&physicsasset::Serialize(editor.m_asset)==original&&editor.m_dirty==dirty,"mode selection preserves physical scene and authored asset");
+    editor.StopSimulation();
+    Check(!editor.IsSimulating()&&!model.m_toolAnimationFrozen&&editor.GetSimulationMode()==Mode::PartialRagdoll,"Stop releases capture and retains selected mode");
+    editor.SetSimulationMode(Mode::FullRagdoll);
+    Check(!editor.PausesAnimationPlayback()&&!model.m_toolAnimationFrozen&&dialog.m_simulationModeChoice->getSelectedIndex()==0,"stopped mode selection never freezes normal playback");
+    const std::string builtin=ragtemplate::Serialize(ragtemplate::Builtins()[0]);
+    Action(dialog,RagdollTemplateDialog::Generate);
+    Check(editor.m_generation.HasCandidate()&&editor.m_generationPreview&&editor.m_generationPreview->bodies.size()==15,"review candidate available");
+    const std::string modeCandidate=physicsasset::Serialize(*editor.m_generationPreview),modeKey=dialog.m_previewKey;
+    const bool axesReview=dialog.m_axisReviewed->isChecked(),riskReview=dialog.m_risksReviewed->isChecked();
+    editor.SetSimulationMode(Mode::PartialRagdoll);editor.SetSimulationMode(Mode::FullRagdoll);
+    Check(editor.m_generation.HasCandidate()&&physicsasset::Serialize(*editor.m_generationPreview)==modeCandidate&&dialog.m_previewKey==modeKey&&dialog.m_axisReviewed->isChecked()==axesReview&&dialog.m_risksReviewed->isChecked()==riskReview,"changing preview mode preserves generated candidate and required reviews");
+    Check(physicsasset::Serialize(editor.m_asset)==original&&editor.m_dirty==dirty&&panelApplies==0,"preview isolated");
+    Action(dialog,RagdollTemplateDialog::Simulate);Check(!editor.IsSimulating()&&panelApplies==0,"PhysX-disabled preview makes no false simulation claim");
+    Action(dialog,RagdollTemplateDialog::Close);
+    Check(!dialog.isVisible()&&!editor.m_generationPreview&&physicsasset::Serialize(editor.m_asset)==original&&editor.m_dirty==dirty&&std::string(editor.m_bodyName->getLabel())=="unapplied marker","cancel preserves asset/dirty/pending fields");
+    editor.AutoGenerate();Action(dialog,RagdollTemplateDialog::Generate);dialog.m_detail->select(0);dialog.m_axisReviewed->setChecked(true);dialog.m_risksReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(dialog.isVisible()&&physicsasset::Serialize(editor.m_asset)==original,"changed settings require new reviewed preview");
+    Action(dialog,RagdollTemplateDialog::Generate);dialog.m_axisReviewed->setChecked(true);dialog.m_risksReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(!dialog.isVisible()&&editor.m_asset.bodies.size()==11&&editor.m_dirty,"apply simple candidate");
+    editor.UndoGeneration();Check(physicsasset::Serialize(editor.m_asset)==original&&editor.m_dirty,"actual undo restores previous asset");
+    editor.AutoGenerate();dialog.m_detail->select(1);Action(dialog,RagdollTemplateDialog::Duplicate);
+    Check(!dialog.m_builtin&&enabled[dialog.m_id]&&ragtemplate::Serialize(ragtemplate::Builtins()[0])==builtin,"duplicate edits a protected built-in copy");
+    dialog.m_id->setLabel("my_human");dialog.m_name->setLabel("My Human");dialog.m_weight->setLabel("nan");Action(dialog,RagdollTemplateDialog::Generate);
+    Check(!editor.m_generation.HasCandidate()&&physicsasset::Serialize(editor.m_asset)==original,"invalid field does not generate or modify asset");
+    dialog.m_weight->setLabel("16");dialog.m_override->setLabel("missing bone");Action(dialog,RagdollTemplateDialog::Generate);
+    Check(!editor.m_generation.HasCandidate(),"missing override rejected by actual dialog");
+    dialog.m_override->setLabel("Bip01 Pelvis");Action(dialog,RagdollTemplateDialog::ApplyRole);Action(dialog,RagdollTemplateDialog::Generate);
+    Check(editor.m_generation.HasCandidate(),"custom explicit mapping accepted");
+    savePath=std::string(argv[1])+".export.ragtemplate";Action(dialog,RagdollTemplateDialog::SaveAs);
+    ragtemplate::Template exported;Check(ragtemplate::LoadFile(savePath.c_str(),exported,&error)&&exported.id=="my_human","actual dialog export");
+    openPath=savePath;Action(dialog,RagdollTemplateDialog::Import);
+    Check(dialog.m_draft.id=="my_human"&&!dialog.m_builtin,"actual dialog import");
+    const std::string imported=ragtemplate::Serialize(dialog.m_draft);openPath=std::string(argv[1])+".invalid.ragtemplate";
+    {std::ofstream f(openPath);f<<"bad template";}Action(dialog,RagdollTemplateDialog::Import);
+    Check(ragtemplate::Serialize(dialog.m_draft)==imported&&physicsasset::Serialize(editor.m_asset)==original,"invalid import leaves template/asset unchanged");
+    Action(dialog,RagdollTemplateDialog::Generate);confirm=1;dialog.m_axisReviewed->setChecked(true);dialog.m_risksReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(dialog.isVisible()&&physicsasset::Serialize(editor.m_asset)==original,"declined apply preserves asset");confirm=0;
+    editor.m_asset.bodies[0].mass+=1;const std::string changed=physicsasset::Serialize(editor.m_asset);dialog.m_axisReviewed->setChecked(true);dialog.m_risksReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(dialog.isVisible()&&physicsasset::Serialize(editor.m_asset)==changed,"stale dialog cannot clobber later edits");
+    mxEvent close{};close.event=mxEvent::Close;dialog.handleEvent(&close);
+    Check(!dialog.isVisible()&&!editor.m_generationPreview&&physicsasset::Serialize(editor.m_asset)==changed,"window close cancels preview");
+    dialog.m_draft=ragtemplate::Builtins()[0];dialog.m_builtin=false;dialog.m_draft.roles[1].parent="PELVIS";dialog.ShowTemplate();
+    dialog.m_roleId->setLabel("renamed_pelvis");Action(dialog,RagdollTemplateDialog::ApplyRole);
+    Check(dialog.m_draft.roles[0].id=="renamed_pelvis"&&dialog.m_draft.roles[1].parent=="renamed_pelvis","role rename updates case-insensitive child references");
+    ragtemplate::Role extra;extra.id="ROLE_21";extra.parent="renamed_pelvis";extra.massRegion="torso";extra.aliases={"unmapped optional"};extra.required=false;
+    dialog.m_draft.roles.push_back(extra);dialog.ShowTemplate();Action(dialog,RagdollTemplateDialog::AddRole);
+    Check(dialog.m_draft.roles.size()==22&&dialog.m_draft.roles.back().id=="role_22","add chooses a unique case-insensitive role ID");
+    Action(dialog,RagdollTemplateDialog::RemoveRole);Check(dialog.m_draft.roles.size()==21,"remove leaf role validates the draft graph");
+    std::filesystem::remove(savePath);std::filesystem::remove(openPath);
+    std::cout<<"F1 actual dialog/editor methods: "<<checks<<" checks PASS (explicit GUI/engine services; no native GUI/solver)\n";
+}

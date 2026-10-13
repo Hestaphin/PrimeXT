@@ -37,6 +37,10 @@ GNU General Public License for more details.
 #endif
 
 #include <vector>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
+#include <memory>
 
 template<typename T, int boundary>
 constexpr T AlignTo(T x)
@@ -44,6 +48,58 @@ constexpr T AlignTo(T x)
 	constexpr bool powerOfTwo = !(boundary == 0) && !(boundary & (boundary - 1));
 	static_assert(powerOfTwo, "Boundary number is not power of 2");
 	return (x + (boundary - 1)) & ~(boundary - 1);
+}
+
+namespace
+{
+bool ClipCacheRange(size_t length, size_t offset, size_t bytes)
+{
+	return offset <= length && bytes <= length - offset;
+}
+
+// Use the same checked table reader for loading, presence queries and appends.
+// Disk counts must be bounded before resizing a vector or following an offset.
+template<class ReadAt>
+bool ReadClipCacheTable(size_t length, uint32_t modelCRC, ReadAt readAt,
+	clipfile::Header &header, std::vector<clipfile::CacheEntry> &entries)
+{
+	if(!ClipCacheRange(length, 0, sizeof(header)) || !readAt(0, &header, sizeof(header)) ||
+		header.id != clipfile::kFileMagic || header.version != clipfile::kFormatVersion ||
+		header.modelCRC != modelCRC || header.tableOffset < sizeof(header) ||
+		!ClipCacheRange(length, header.tableOffset, sizeof(uint32_t)))
+		return false;
+
+	uint32_t count = 0;
+	if(!readAt(header.tableOffset, &count, sizeof(count))) return false;
+	const size_t tableStart = size_t(header.tableOffset) + sizeof(count);
+	if(count == 0 || count > (length - tableStart) / sizeof(clipfile::CacheEntry))
+		return false;
+
+	entries.resize(count);
+	if(!readAt(tableStart, entries.data(), size_t(count) * sizeof(clipfile::CacheEntry)))
+		return false;
+	for(const auto &entry : entries)
+	{
+		if(entry.dataOffset < sizeof(header) || entry.dataLength < sizeof(clipfile::CacheData) ||
+			!ClipCacheRange(header.tableOffset, entry.dataOffset, entry.dataLength))
+			return false;
+	}
+	return true;
+}
+
+bool ReadClipCacheTable(fs::File &file, uint32_t modelCRC,
+	clipfile::Header &header, std::vector<clipfile::CacheEntry> &entries)
+{
+	const int32_t length = file.Size();
+	if(length <= 0) return false;
+	auto readAt = [&file, length](size_t offset, void *out, size_t bytes)
+	{
+		if(!ClipCacheRange(size_t(length), offset, bytes)) return false;
+		file.Seek(int32_t(offset), fs::SeekType::Set);
+		return file.Tell() == int32_t(offset) && file.Read(out, int32_t(bytes)) == int32_t(bytes);
+	};
+	return ReadClipCacheTable(size_t(length), modelCRC, readAt, header, entries);
+}
 }
 
 CMeshDesc::CMeshDesc()
@@ -85,7 +141,7 @@ void CMeshDesc::SetGeometryType(clipfile::GeometryType geomType)
 	m_iGeometryType = geomType;
 }
 
-bool CMeshDesc::Matches(const std::string &name, int32_t body, int32_t skin, clipfile::GeometryType geomType)
+bool CMeshDesc::Matches(const std::string &name, int32_t body, int32_t skin, clipfile::GeometryType geomType, uint64_t fingerprint)
 {
 	if (!m_debugName || name.compare(m_debugName) != 0)
 		return false;
@@ -93,7 +149,7 @@ bool CMeshDesc::Matches(const std::string &name, int32_t body, int32_t skin, cli
 		return false;
 	if (m_iSkinNumber != skin)
 		return false;
-	if (m_iGeometryType != geomType)
+	if (m_iGeometryType != geomType || m_sourceFingerprint != fingerprint)
 		return false;
 
 	return true;
@@ -803,177 +859,164 @@ void CMeshDesc :: RelinkFacet( mfacet_t *facet )
 
 CMeshDesc::LoadStatus CMeshDesc::StudioLoadCache()
 {
-	int	i, length, iCompare;
+	if(!m_pModel || m_pModel->type != mod_studio) return LoadStatus::Error;
 	std::string filePath;
-
 	GetCacheFilePath(filePath);
-	if( COMPARE_FILE_TIME( m_pModel->name, const_cast<char*>(filePath.c_str()), &iCompare))
-	{
-		// MDL file is newer.
-		if( iCompare > 0 )
-			return LoadStatus::Error;
-	}
-	else {
+	int comparison = 0;
+	if(filePath.empty() || !COMPARE_FILE_TIME(m_pModel->name,
+		const_cast<char *>(filePath.c_str()), &comparison) || comparison > 0)
 		return LoadStatus::Error;
-	}
 
-	byte *aMemFile = LOAD_FILE( filePath.c_str(), &length );
-	if( !aMemFile ) return LoadStatus::Error;
-
-	CVirtualFS file( aMemFile, length );
-	clipfile::CacheDataLump *lump;
-	clipfile::Header hdr;
-	clipfile::Facet facet;
-	clipfile::Plane plane;
-	clipfile::CacheTable table;
-	clipfile::CacheData data;
-	std::vector<clipfile::CacheEntry> entriesList;
-	const clipfile::CacheEntry *desiredEntry = nullptr;
-
-	FREE_FILE( aMemFile );
-	file.Read( &hdr, sizeof( hdr ));
-	if( hdr.id != clipfile::kFileMagic )
+	int length = 0;
+	byte *memory = LOAD_FILE(filePath.c_str(), &length);
+	if(!memory) return LoadStatus::Error;
+	if(length <= 0) { FREE_FILE(memory); return LoadStatus::Error; }
+	CVirtualFS file(memory, size_t(length));
+	FREE_FILE(memory);
+	auto readAt = [&file](size_t offset, void *out, size_t bytes)
 	{
-		ALERT( at_warning, "%s has wrong file signature %X\n", filePath.c_str(), hdr.id );
+		return ClipCacheRange(file.GetSize(), offset, bytes) &&
+			file.Seek(offset, SEEK_SET) == 0 && file.Read(out, bytes) == bytes;
+	};
+	clipfile::Header header = {};
+	std::vector<clipfile::CacheEntry> entries;
+	if(!ReadClipCacheTable(file.GetSize(), m_pModel->modelCRC, readAt, header, entries))
 		return LoadStatus::Error;
-	}
 
-	if( hdr.version != clipfile::kFormatVersion )
+	const clipfile::CacheEntry *selected = nullptr;
+	for(const auto &entry : entries)
 	{
-		ALERT( at_warning, "%s has wrong version (%i should be %i)\n", filePath.c_str(), hdr.version, clipfile::kFormatVersion );
-		return LoadStatus::Error;
-	}
-
-	if( hdr.modelCRC != m_pModel->modelCRC )
-	{
-		ALERT( at_console, "%s was changed, CLIP cache will be updated\n", filePath.c_str() );
-		return LoadStatus::Error;
-	}
-
-	ClearBounds( m_mesh.mins, m_mesh.maxs );
-	memset( areanodes, 0, sizeof( areanodes ));
-	numareanodes = 0;
-
-	// read cache entries table
-	uint32_t entriesCount;
-	file.Seek(hdr.tableOffset, SEEK_SET);
-	file.Read(&entriesCount, sizeof(entriesCount));
-
-	entriesList.reserve(entriesCount);
-	for (size_t i = 0; i < entriesCount; i++)
-	{
-		auto &entry = entriesList.emplace_back();
-		file.Read(&entry, sizeof(table.entries));
-	}
-
-	for (size_t i = 0; i < entriesCount; i++)
-	{
-		const clipfile::CacheEntry &entry = entriesList[i];
-		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType) {
-			desiredEntry = &entry;
+		if(entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber &&
+			entry.geometryType == m_iGeometryType && entry.sourceFingerprint == m_sourceFingerprint)
+		{
+			selected = &entry;
 			break;
 		}
 	}
+	if(!selected) return LoadStatus::EntryNotFound;
 
-	if (!desiredEntry)
+	clipfile::CacheData data = {};
+	if(!readAt(selected->dataOffset, &data, sizeof(data))) return LoadStatus::Error;
+	const size_t dataStart = size_t(selected->dataOffset) + sizeof(data);
+	const size_t dataEnd = size_t(selected->dataOffset) + selected->dataLength;
+	const size_t recordSizes[] = {sizeof(clipfile::Facet), sizeof(clipfile::Plane), sizeof(uint32_t)};
+	for(size_t i = 0; i < 3; ++i)
 	{
-		ALERT(at_console, "%s doesn't contain required cache entry (body %d / skin %d / geom. type %d)\n", filePath.c_str(), m_iBodyNumber, m_iSkinNumber, m_iGeometryType);
-		return LoadStatus::EntryNotFound;
-	}
-
-	// read needed cache data lumps
-	file.Seek(desiredEntry->dataOffset, SEEK_SET);
-	file.Read(&data, sizeof(data));
-
-	// read plane representation table
-	lump = &data.lumps[clipfile::kDataLumpPlaneIndexes];
-	m_iAllocPlanes = m_iTotalPlanes = lump->filelen / sizeof( uint32_t );
-
-	if( lump->filelen <= 0 || lump->filelen % sizeof( uint32_t ))
-	{
-		ALERT( at_warning, "%s has funny size of LUMP_CLIP_PLANE_INDEXES\n", filePath.c_str() );
-		return LoadStatus::Error;
-	}
-
-	m_srcPlaneElems = (uint *)calloc( sizeof( uint32_t ), m_iAllocPlanes );
-	m_curPlaneElems = m_srcPlaneElems;
-	file.Seek( lump->fileofs, SEEK_SET );
-
-	// fill in plane indexes
-	file.Read( m_srcPlaneElems, lump->filelen );
-
-	// read unique planes array (hash is unused)
-	lump = &data.lumps[clipfile::kDataLumpPlanes];
-	m_mesh.numplanes = lump->filelen / sizeof( clipfile::Plane );
-
-	if( lump->filelen <= 0 || lump->filelen % sizeof( clipfile::Plane ))
-	{
-		ALERT( at_warning, "%s has funny size of LUMP_CLIP_PLANES\n", filePath.c_str() );
-		return LoadStatus::Error;
-	}
-
-	m_srcPlanePool = (hashplane_t *)calloc( sizeof( hashplane_t ), m_mesh.numplanes );
-	file.Seek( lump->fileofs, SEEK_SET );
-
-	for( i = 0; i < m_mesh.numplanes; i++ )
-	{
-		file.Read( &plane, sizeof( plane ));
-		m_srcPlanePool[i].pl.normal = plane.normal;
-		m_srcPlanePool[i].pl.dist = plane.dist;
-		m_srcPlanePool[i].pl.type = plane.type;
-		// categorize it
-		CategorizePlane( &m_srcPlanePool[i].pl );
-	}
-
-	lump = &data.lumps[clipfile::kDataLumpFacets];
-	m_mesh.numfacets = m_iNumTris = lump->filelen / sizeof( clipfile::Facet );
-
-	if( lump->filelen <= 0 || lump->filelen % sizeof( clipfile::Facet ))
-	{
-		ALERT( at_warning, "%s has funny size of LUMP_CLIP_FACETS\n", filePath.c_str() );
-		return LoadStatus::Error;
-	}
-
-	m_srcFacets = (mfacet_t *)calloc( sizeof( mfacet_t ), m_iNumTris );
-	file.Seek( lump->fileofs, SEEK_SET );
-
-	for( i = 0; i < m_iNumTris; i++ )
-	{
-		file.Read( &facet, sizeof( facet ));
-		m_srcFacets[i].skinref = facet.skinref;
-		m_srcFacets[i].mins = facet.mins;
-		m_srcFacets[i].maxs = facet.maxs;
-		m_srcFacets[i].edge1 = facet.edge1;
-		m_srcFacets[i].edge2 = facet.edge2;
-		m_srcFacets[i].numplanes = facet.numplanes;
-
-		// bounds checking
-		if( m_curPlaneElems != &m_srcPlaneElems[facet.firstindex] )
-			Msg( "bad mem %p != %p\n", m_curPlaneElems, &m_srcPlaneElems[facet.firstindex] );
-
-		// just setup pointer to index array
-		m_srcFacets[i].indices = m_curPlaneElems;
-		m_curPlaneElems += m_srcFacets[i].numplanes;
-
-		for( int k = 0; k < 3; k++ )
+		const auto &lump = data.lumps[i];
+		if(lump.filelen == 0 || lump.filelen % recordSizes[i] || lump.fileofs < dataStart ||
+			!ClipCacheRange(dataEnd, lump.fileofs, lump.filelen)) return LoadStatus::Error;
+		for(size_t j = 0; j < i; ++j)
 		{
-			m_srcFacets[i].triangle[k] = facet.triangle[k];
-			AddPointToBounds( facet.triangle[k].point, m_mesh.mins, m_mesh.maxs );
+			const auto &other = data.lumps[j];
+			if(size_t(lump.fileofs) < size_t(other.fileofs) + other.filelen &&
+				size_t(other.fileofs) < size_t(lump.fileofs) + lump.filelen)
+				return LoadStatus::Error;
 		}
 	}
 
-	if( m_iNumTris >= 256 )
-		has_tree = true;	// too many triangles invoke to build AABB tree
-	else has_tree = false;
+	const auto &indexLump = data.lumps[clipfile::kDataLumpPlaneIndexes];
+	const auto &planeLump = data.lumps[clipfile::kDataLumpPlanes];
+	const auto &facetLump = data.lumps[clipfile::kDataLumpFacets];
+	const size_t indexCount = indexLump.filelen / sizeof(uint32_t);
+	const size_t planeCount = planeLump.filelen / sizeof(clipfile::Plane);
+	const size_t facetCount = facetLump.filelen / sizeof(clipfile::Facet);
+	const size_t maximum = (std::numeric_limits<size_t>::max)();
+	const size_t intMaximum = size_t((std::numeric_limits<int>::max)());
+	if(indexCount > intMaximum || planeCount > intMaximum || facetCount > intMaximum ||
+		planeCount > maximum / sizeof(hashplane_t) || facetCount > maximum / sizeof(mfacet_t) ||
+		planeCount > (maximum - (alignof(mfacet_t) - 1)) / sizeof(mplane_t))
+		return LoadStatus::Error;
+	const size_t planeBytes = AlignTo<size_t, alignof(mfacet_t)>(planeCount * sizeof(mplane_t));
+	size_t remaining = maximum - sizeof(m_mesh);
+	if(planeBytes > remaining) return LoadStatus::Error;
+	remaining -= planeBytes;
+	if(facetCount > remaining / sizeof(mfacet_t)) return LoadStatus::Error;
+	remaining -= facetCount * sizeof(mfacet_t);
+	if(indexCount > remaining / sizeof(uint32_t)) return LoadStatus::Error;
 
+	// Keep partially read data local so every rejection leaves the mesh untouched.
+	std::unique_ptr<uint32_t, decltype(&std::free)> indexes(
+		static_cast<uint32_t *>(calloc(indexCount, sizeof(uint32_t))), &std::free);
+	std::unique_ptr<hashplane_t, decltype(&std::free)> planes(
+		static_cast<hashplane_t *>(calloc(planeCount, sizeof(hashplane_t))), &std::free);
+	std::unique_ptr<mfacet_t, decltype(&std::free)> facets(
+		static_cast<mfacet_t *>(calloc(facetCount, sizeof(mfacet_t))), &std::free);
+	if(!indexes || !planes || !facets || !readAt(indexLump.fileofs, indexes.get(), indexLump.filelen))
+		return LoadStatus::Error;
+	for(size_t i = 0; i < indexCount; ++i)
+		if(indexes.get()[i] >= planeCount) return LoadStatus::Error;
+
+	for(size_t i = 0; i < planeCount; ++i)
+	{
+		clipfile::Plane plane = {};
+		if(!readAt(size_t(planeLump.fileofs) + i * sizeof(plane), &plane, sizeof(plane)) ||
+			!std::isfinite(plane.normal[0]) || !std::isfinite(plane.normal[1]) ||
+			!std::isfinite(plane.normal[2]) || !std::isfinite(plane.dist) ||
+			(plane.normal[0] == 0 && plane.normal[1] == 0 && plane.normal[2] == 0))
+			return LoadStatus::Error;
+		auto &target = planes.get()[i].pl;
+		target.normal = plane.normal;
+		target.dist = plane.dist;
+		CategorizePlane(&target);
+	}
+
+	size_t nextIndex = 0;
+	for(size_t i = 0; i < facetCount; ++i)
+	{
+		clipfile::Facet facet = {};
+		if(!readAt(size_t(facetLump.fileofs) + i * sizeof(facet), &facet, sizeof(facet)) ||
+			facet.numplanes == 0 || facet.numplanes > MAX_FACET_PLANES ||
+			facet.firstindex != nextIndex || facet.numplanes > indexCount - nextIndex)
+			return LoadStatus::Error;
+		auto &target = facets.get()[i];
+		target.skinref = facet.skinref;
+		target.numplanes = facet.numplanes;
+		target.indices = indexes.get() + nextIndex;
+		nextIndex += facet.numplanes;
+		memcpy(&target.mins, facet.mins, sizeof(facet.mins));
+		memcpy(&target.maxs, facet.maxs, sizeof(facet.maxs));
+		memcpy(&target.edge1, facet.edge1, sizeof(facet.edge1));
+		memcpy(&target.edge2, facet.edge2, sizeof(facet.edge2));
+		memcpy(target.triangle, facet.triangle, sizeof(facet.triangle));
+		for(int axis = 0; axis < 3; ++axis)
+		{
+			if(!std::isfinite(target.mins[axis]) || !std::isfinite(target.maxs[axis]) ||
+				target.mins[axis] > target.maxs[axis] || !std::isfinite(target.edge1[axis]) ||
+				!std::isfinite(target.edge2[axis])) return LoadStatus::Error;
+			for(int k = 0; k < 3; ++k)
+				if(!std::isfinite(target.triangle[k].point[axis])) return LoadStatus::Error;
+		}
+		for(int k = 0; k < 3; ++k)
+			if(!std::isfinite(target.triangle[k].st[0]) || !std::isfinite(target.triangle[k].st[1]))
+				return LoadStatus::Error;
+	}
+	if(nextIndex != indexCount) return LoadStatus::Error;
+
+	FreeMesh();
+	FreeMeshBuild();
+	m_srcPlaneElems = indexes.release();
+	m_curPlaneElems = m_srcPlaneElems + indexCount;
+	m_srcPlanePool = planes.release();
+	m_srcFacets = facets.release();
+	m_iAllocPlanes = m_iTotalPlanes = int(indexCount);
+	m_mesh.numplanes = int(planeCount);
+	m_mesh.numfacets = m_iNumTris = int(facetCount);
+	m_iHashPlanes = 0;
+	ClearBounds(m_mesh.mins, m_mesh.maxs);
+	for(size_t i = 0; i < facetCount; ++i)
+		for(int k = 0; k < 3; ++k)
+			AddPointToBounds(m_srcFacets[i].triangle[k].point, m_mesh.mins, m_mesh.maxs);
+	memset(areanodes, 0, sizeof(areanodes));
+	numareanodes = 0;
+	has_tree = facetCount >= 256;
 	return LoadStatus::Success;
 }
 
 bool CMeshDesc::StudioSaveCache()
 {
 	std::string filePath;
-	clipfile::Header fileHeader;
-	clipfile::CacheData data;
+	clipfile::Header fileHeader = {};
+	clipfile::CacheData data = {};
 	clipfile::CacheDataLump *lump;
 	uint32_t entriesCount;
 	std::vector<clipfile::CacheEntry> cacheEntries;
@@ -985,18 +1028,9 @@ bool CMeshDesc::StudioSaveCache()
 		return false;
 	}
 
-	cacheFile.Seek(0, fs::SeekType::Set);
-	cacheFile.Read(&fileHeader, sizeof(fileHeader));
-	cacheFile.Seek(fileHeader.tableOffset, fs::SeekType::Set);
-	cacheFile.Read(&entriesCount, sizeof(entriesCount));
-
-	// store all entries in local buffer
-	cacheEntries.reserve(entriesCount);
-	for (size_t i = 0; i < entriesCount; i++)
-	{
-		clipfile::CacheEntry &entry = cacheEntries.emplace_back();
-		cacheFile.Read(&entry, sizeof(entry));
-	}
+	if(!ReadClipCacheTable(cacheFile, m_pModel->modelCRC, fileHeader, cacheEntries))
+		return false;
+	entriesCount = static_cast<uint32_t>(cacheEntries.size());
 
 	std::vector<clipfile::Facet> facets;
 	std::vector<clipfile::Plane> planes;
@@ -1009,17 +1043,17 @@ bool CMeshDesc::StudioSaveCache()
 	int32_t curIndex = 0;
 	for (size_t i = 0; i < m_mesh.numfacets; i++)
 	{
-		out_facets[i].mins = m_srcFacets[i].mins;
-		out_facets[i].maxs = m_srcFacets[i].maxs;
-		out_facets[i].edge1 = m_srcFacets[i].edge1;
-		out_facets[i].edge2 = m_srcFacets[i].edge2;
+		memcpy(out_facets[i].mins, &m_srcFacets[i].mins, sizeof(out_facets[i].mins));
+		memcpy(out_facets[i].maxs, &m_srcFacets[i].maxs, sizeof(out_facets[i].maxs));
+		memcpy(out_facets[i].edge1, &m_srcFacets[i].edge1, sizeof(out_facets[i].edge1));
+		memcpy(out_facets[i].edge2, &m_srcFacets[i].edge2, sizeof(out_facets[i].edge2));
 		out_facets[i].numplanes = m_srcFacets[i].numplanes;
 		out_facets[i].skinref = m_srcFacets[i].skinref;
 		out_facets[i].firstindex = curIndex;
 		curIndex += m_srcFacets[i].numplanes;
 
 		for (int k = 0; k < 3; k++) {
-			out_facets[i].triangle[k] = m_srcFacets[i].triangle[k];
+			memcpy(&out_facets[i].triangle[k], &m_srcFacets[i].triangle[k], sizeof(out_facets[i].triangle[k]));
 		}
 	}
 
@@ -1042,6 +1076,7 @@ bool CMeshDesc::StudioSaveCache()
 	currentEntry.body = m_iBodyNumber;
 	currentEntry.skin = m_iSkinNumber;
 	currentEntry.geometryType = m_iGeometryType;
+    currentEntry.sourceFingerprint = m_sourceFingerprint;
 	currentEntry.dataOffset = cacheFile.Tell();
 	
 	// write lumps 
@@ -1050,7 +1085,11 @@ bool CMeshDesc::StudioSaveCache()
 	lump = &data.lumps[clipfile::kDataLumpFacets];
 	lump->fileofs = cacheFile.Tell();
 	lump->filelen = sizeof(clipfile::Facet) * m_mesh.numfacets;
-	cacheFile.Write(out_facets, AlignTo<size_t, 4>(lump->filelen));
+	cacheFile.Write(out_facets, lump->filelen);
+	uint32_t facetPadding = 0;
+	const size_t facetPaddingSize = AlignTo<size_t, 4>(lump->filelen) - lump->filelen;
+	if( facetPaddingSize )
+		cacheFile.Write(&facetPadding, facetPaddingSize);
 
 	lump = &data.lumps[clipfile::kDataLumpPlanes];
 	lump->fileofs = cacheFile.Tell();
@@ -1093,7 +1132,7 @@ bool CMeshDesc :: StudioCreateCache()
 	clipfile::CacheDataLump *lump;
 	clipfile::Header hdr;
 	clipfile::CacheTable table;
-	clipfile::CacheData data;
+	clipfile::CacheData data = {};
 	CVirtualFS file;
 	int i, curIndex;
 
@@ -1111,6 +1150,7 @@ bool CMeshDesc :: StudioCreateCache()
 	table.entries[0].body = m_iBodyNumber;
 	table.entries[0].skin = m_iSkinNumber;
 	table.entries[0].geometryType = m_iGeometryType;
+    table.entries[0].sourceFingerprint = m_sourceFingerprint;
 	table.entries[0].dataOffset = file.Tell();
 	file.Write(&data, sizeof(data));
 
@@ -1124,17 +1164,17 @@ bool CMeshDesc :: StudioCreateCache()
 	// copy planes into mesh array (probably aligned block)
 	for( i = 0, curIndex = 0; i < m_mesh.numfacets; i++ )
 	{
-		out_facets[i].mins = m_srcFacets[i].mins;
-		out_facets[i].maxs = m_srcFacets[i].maxs;
-		out_facets[i].edge1 = m_srcFacets[i].edge1;
-		out_facets[i].edge2 = m_srcFacets[i].edge2;
+		memcpy(out_facets[i].mins, &m_srcFacets[i].mins, sizeof(out_facets[i].mins));
+		memcpy(out_facets[i].maxs, &m_srcFacets[i].maxs, sizeof(out_facets[i].maxs));
+		memcpy(out_facets[i].edge1, &m_srcFacets[i].edge1, sizeof(out_facets[i].edge1));
+		memcpy(out_facets[i].edge2, &m_srcFacets[i].edge2, sizeof(out_facets[i].edge2));
 		out_facets[i].numplanes = m_srcFacets[i].numplanes;
 		out_facets[i].skinref = m_srcFacets[i].skinref;
 		out_facets[i].firstindex = curIndex;
 		curIndex += m_srcFacets[i].numplanes;
 
 		for( int k = 0; k < 3; k++ )
-			out_facets[i].triangle[k] = m_srcFacets[i].triangle[k];
+			memcpy(&out_facets[i].triangle[k], &m_srcFacets[i].triangle[k], sizeof(out_facets[i].triangle[k]));
 	}
 
 	if( curIndex != m_iTotalPlanes ) 
@@ -1150,7 +1190,11 @@ bool CMeshDesc :: StudioCreateCache()
 	lump = &data.lumps[clipfile::kDataLumpFacets];
 	lump->fileofs = file.Tell();
 	lump->filelen = sizeof(clipfile::Facet) * m_mesh.numfacets;
-	file.Write(out_facets, AlignTo<size_t, 4>(lump->filelen));
+	file.Write(out_facets, lump->filelen);
+	const uint32_t facetPadding = 0;
+	const size_t facetPaddingSize = AlignTo<size_t, 4>(lump->filelen) - lump->filelen;
+	if( facetPaddingSize )
+		file.Write(&facetPadding, facetPaddingSize);
 
 	lump = &data.lumps[clipfile::kDataLumpPlanes];
 	lump->fileofs = file.Tell();
@@ -1188,9 +1232,21 @@ bool CMeshDesc :: StudioCreateCache()
 
 void CMeshDesc::GetCacheFilePath(std::string &filePath) const
 {
+	filePath.clear();
+	if( !m_pModel || m_pModel->type != mod_studio )
+		return;
+
 	std::string fileName = m_pModel->name;
-	fileName.erase(0, fileName.find_first_of("/\\") + 1);
-	fileName.erase(fileName.find_last_of("."));
+	const auto rootSeparator = fileName.find_first_of("/\\");
+	if( rootSeparator != std::string::npos )
+		fileName.erase(0, rootSeparator + 1);
+	const auto extension = fileName.find_last_of('.');
+	const auto directory = fileName.find_last_of("/\\");
+	if( extension != std::string::npos &&
+		( directory == std::string::npos || extension > directory ))
+		fileName.erase(extension);
+	if( fileName.empty() )
+		return;
 	filePath = "cache/" + fileName + ".clip";
 }
 
@@ -1198,6 +1254,8 @@ bool CMeshDesc::CacheFileExists() const
 {
 	std::string filePath;
 	GetCacheFilePath(filePath);
+	if( filePath.empty() )
+		return false;
 	if (fs::FileExists(filePath)) {
 		return true;
 	}
@@ -1503,7 +1561,9 @@ bool CMeshDesc :: FinishMeshBuild( void )
 		m_mesh.maxs[i] += 1.0f;
 	}
 
-	size_t memsize = (sizeof( mfacet_t ) * m_mesh.numfacets) + (sizeof( mplane_t ) * m_mesh.numplanes) + (sizeof( uint32_t ) * m_iTotalPlanes);
+	// Facets contain pointers and require stronger alignment on 64-bit builds.
+	const size_t planesSize = AlignTo<size_t, alignof(mfacet_t)>(sizeof( mplane_t ) * m_mesh.numplanes);
+	size_t memsize = (sizeof( mfacet_t ) * m_mesh.numfacets) + planesSize + (sizeof( uint32_t ) * m_iTotalPlanes);
 	mesh_size = sizeof( m_mesh ) + memsize;
 
 	// create non-fragmented memory piece and move mesh
@@ -1512,7 +1572,7 @@ bool CMeshDesc :: FinishMeshBuild( void )
 
 	// setup pointers
 	m_mesh.planes = (mplane_t *)buffer; // so we free mem with planes
-	buffer += (sizeof( mplane_t ) * m_mesh.numplanes);
+	buffer += planesSize;
 	m_mesh.facets = (mfacet_t *)buffer;
 	buffer += (sizeof( mfacet_t ) * m_mesh.numfacets);
 
@@ -1606,6 +1666,9 @@ void CMeshDesc::SaveToCacheFile()
 
 bool CMeshDesc::LoadFromCacheFile()
 {
+	if( !m_pModel || m_pModel->type != mod_studio )
+		return false;
+
 	LoadStatus status = StudioLoadCache();
 	if (status == LoadStatus::Error && CacheFileExists()) 
 	{
@@ -1619,48 +1682,18 @@ bool CMeshDesc::LoadFromCacheFile()
 
 bool CMeshDesc::PresentInCache() const
 {
-	clipfile::Header hdr;
-	clipfile::CacheTable table;
-	std::vector<clipfile::CacheEntry> entriesList;
-	const clipfile::CacheEntry *desiredEntry = nullptr;
-
-	if (m_pModel->type != mod_studio) {
-		return false; // only studio model can be cached
-	}
-
-	std::string fileName = m_pModel->name;
-	fileName.erase(0, fileName.find_first_of("/\\") + 1);
-	fileName.erase(fileName.find_last_of("."));
-
-	fs::Path filePath = "cache/" + fileName + ".clip";
-	fs::File cacheFile(filePath, "rb");
-	if (!fs::FileExists(filePath) || !cacheFile.IsOpen()) {
-		return false;
-	}
-
-	// read header
-	cacheFile.Read(&hdr, sizeof(hdr));
-
-	// read cache entries table
-	uint32_t entriesCount;
-	cacheFile.Seek(hdr.tableOffset, fs::SeekType::Set);
-	cacheFile.Read(&entriesCount, sizeof(entriesCount));
-
-	// read cache entries list
-	entriesList.reserve(entriesCount);
-	for (size_t i = 0; i < entriesCount; i++)
-	{
-		auto &entry = entriesList.emplace_back();
-		cacheFile.Read(&entry, sizeof(table.entries));
-	}
-	cacheFile.Close();
-
-	for (size_t i = 0; i < entriesCount; i++)
-	{
-		const clipfile::CacheEntry &entry = entriesList[i];
-		if (entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber && entry.geometryType == m_iGeometryType) {
+	if(!m_pModel || m_pModel->type != mod_studio) return false;
+	std::string path;
+	GetCacheFilePath(path);
+	if(path.empty()) return false;
+	fs::File file(path, "rb");
+	if(!file.IsOpen()) return false;
+	clipfile::Header header = {};
+	std::vector<clipfile::CacheEntry> entries;
+	if(!ReadClipCacheTable(file, m_pModel->modelCRC, header, entries)) return false;
+	for(const auto &entry : entries)
+		if(entry.body == m_iBodyNumber && entry.skin == m_iSkinNumber &&
+			entry.geometryType == m_iGeometryType && entry.sourceFingerprint == m_sourceFingerprint)
 			return true;
-		}
-	}
 	return false;
 }

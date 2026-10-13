@@ -1,0 +1,10 @@
+version = 2
+id = j6_9mm_fmj
+chamber = 9x19
+projectile = fmj
+mass_grams = 8.04
+diameter_mm = 9.02
+drag_coefficient = 0.3
+reference_velocity_mps = 360
+projectile_count = 1
+damage = 20

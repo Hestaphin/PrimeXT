@@ -55,6 +55,7 @@
 #define IDC_OPTIONS_DUMP			1111
 
 #define IDC_VIEW_FILEASSOCIATIONS		1201
+#define IDC_VIEW_PHYSICSASSETEDITOR	1202
 
 #define IDC_HELP_GOTOHOMEPAGE			1301
 #define IDC_HELP_ABOUT			1302
@@ -66,6 +67,7 @@ class ControlPanel;
 class PAKViewer;
 class ViewerSettings;
 class StudioModel;
+class PhysicsAssetEditor;
 
 class MDLViewer : public mxWindow
 {
@@ -75,6 +77,7 @@ class MDLViewer : public mxWindow
 	PAKViewer *d_PAKViewer;
 	ViewerSettings m_settings;
 	StudioModel *m_studioModel;
+	PhysicsAssetEditor *d_physicsEditor;
 
 	void initRecentFiles ();
 
@@ -93,6 +96,7 @@ public:
 	mxMenuBar *getMenuBar () const { return mb; }
 	GlWindow *getGlWindow () const { return d_GlWindow; }
 	PAKViewer *getPAKViewer () const { return d_PAKViewer; }
+	PhysicsAssetEditor *getPhysicsAssetEditor() const { return d_physicsEditor; }
 };
 
 extern MDLViewer *g_MDLViewer;

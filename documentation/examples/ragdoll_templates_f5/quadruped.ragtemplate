@@ -1,0 +1,508 @@
+ragdoll_template
+{
+    template_version 1
+    id "quadruped"
+    name "Quadruped / Animal"
+    description "Four checked limb chains plus optional neck, feet, jaw and bounded tail. Review inferred flexion axes."
+    anatomy "quadruped"
+    mass_budget 40
+    linear_damping 0.0500000007
+    angular_damping 0.5
+    solver_position_iterations 16
+    solver_velocity_iterations 4
+    max_linear_velocity 2000
+    max_angular_velocity 20
+    max_depenetration_velocity 200
+    sleep_threshold 0.5
+    contact_offset 0.787401557
+    rest_offset 0
+    ccd 1
+    angular_resistance 1.5
+    drive_max_torque 1000
+    projection off
+    projection_linear_tolerance 0.25
+    projection_angular_tolerance 10
+    self_collision selective
+    collision_neighbor_depth 2
+    collision_overlap_margin 0.100000001
+    radius_ratio 0.219999999
+    end_trim 0.0599999987
+    mass_ratio_warning 10
+    mass_region "torso" 0.449999988
+    mass_region "head" 0.0900000036
+    mass_region "left_front" 0.104999997
+    mass_region "right_front" 0.104999997
+    mass_region "left_hind" 0.104999997
+    mass_region "right_hind" 0.104999997
+    mass_region "tail" 0.0399999991
+    exclude_section "weapon"
+    exclude_section "gun"
+    exclude_section "accessory"
+
+    role "pelvis"
+    {
+        parent ""
+        alias "pelvis"
+        alias "hips"
+        alias "Bip01 Pelvis"
+        override ""
+        required 1
+        minimum_detail 0
+        shape box
+        hitgroup 3
+        mass_weight 4
+        region "torso"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "chest"
+    {
+        parent "pelvis"
+        alias "chest"
+        alias "spine2"
+        alias "Bip01 Spine2"
+        override ""
+        required 1
+        minimum_detail 0
+        shape box
+        hitgroup 2
+        mass_weight 6
+        region "torso"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "neck"
+    {
+        parent "chest"
+        alias "neck"
+        alias "Bip01 Neck"
+        override ""
+        required 0
+        minimum_detail 1
+        shape capsule
+        hitgroup 1
+        mass_weight 1
+        region "head"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "head"
+    {
+        parent "neck"
+        alias "head"
+        alias "Bip01 Head"
+        override ""
+        required 1
+        minimum_detail 0
+        shape sphere
+        hitgroup 1
+        mass_weight 3
+        region "head"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "left_front_upper"
+    {
+        parent "chest"
+        alias "front_upper_l"
+        alias "left_front_upper"
+        alias "Bip01 L Arm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 4
+        mass_weight 4
+        region "left_front"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "left_front_lower"
+    {
+        parent "left_front_upper"
+        alias "front_lower_l"
+        alias "left_front_lower"
+        alias "Bip01 L Arm1"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 4
+        mass_weight 2
+        region "left_front"
+        frame_mode flexion
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+        swing1 35
+        swing2 35
+        twist_low 0
+        twist_high 140
+    }
+
+    role "left_front_foot"
+    {
+        parent "left_front_lower"
+        alias "front_foot_l"
+        alias "left_front_foot"
+        alias "Bip01 L Hand"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 4
+        mass_weight 1
+        region "left_front"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "left_hind_upper"
+    {
+        parent "pelvis"
+        alias "hind_upper_l"
+        alias "left_hind_upper"
+        alias "Bip01 L Leg"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 6
+        mass_weight 4
+        region "left_hind"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "left_hind_lower"
+    {
+        parent "left_hind_upper"
+        alias "hind_lower_l"
+        alias "left_hind_lower"
+        alias "Bip01 L Leg1"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 6
+        mass_weight 2
+        region "left_hind"
+        frame_mode flexion
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+        swing1 35
+        swing2 35
+        twist_low 0
+        twist_high 140
+    }
+
+    role "left_hind_foot"
+    {
+        parent "left_hind_lower"
+        alias "hind_foot_l"
+        alias "left_hind_foot"
+        alias "Bip01 L Foot"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 6
+        mass_weight 1
+        region "left_hind"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "right_front_upper"
+    {
+        parent "chest"
+        alias "front_upper_r"
+        alias "right_front_upper"
+        alias "Bip01 R Arm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 5
+        mass_weight 4
+        region "right_front"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "right_front_lower"
+    {
+        parent "right_front_upper"
+        alias "front_lower_r"
+        alias "right_front_lower"
+        alias "Bip01 R Arm1"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 5
+        mass_weight 2
+        region "right_front"
+        frame_mode flexion
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+        swing1 35
+        swing2 35
+        twist_low 0
+        twist_high 140
+    }
+
+    role "right_front_foot"
+    {
+        parent "right_front_lower"
+        alias "front_foot_r"
+        alias "right_front_foot"
+        alias "Bip01 R Hand"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 5
+        mass_weight 1
+        region "right_front"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "right_hind_upper"
+    {
+        parent "pelvis"
+        alias "hind_upper_r"
+        alias "right_hind_upper"
+        alias "Bip01 R Leg"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 7
+        mass_weight 4
+        region "right_hind"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "right_hind_lower"
+    {
+        parent "right_hind_upper"
+        alias "hind_lower_r"
+        alias "right_hind_lower"
+        alias "Bip01 R Leg1"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 7
+        mass_weight 2
+        region "right_hind"
+        frame_mode flexion
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+        swing1 35
+        swing2 35
+        twist_low 0
+        twist_high 140
+    }
+
+    role "right_hind_foot"
+    {
+        parent "right_hind_lower"
+        alias "hind_foot_r"
+        alias "right_hind_foot"
+        alias "Bip01 R Foot"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 7
+        mass_weight 1
+        region "right_hind"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "tail"
+    {
+        parent "pelvis"
+        alias "tail"
+        alias "tail_01"
+        alias "Bip01 Tail1"
+        override ""
+        required 0
+        minimum_detail 1
+        shape capsule
+        hitgroup 0
+        mass_weight 1
+        chain_depth 4
+        chain_branches 0
+        region "tail"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -25
+        twist_high 25
+    }
+
+    role "jaw"
+    {
+        parent "head"
+        alias "jaw"
+        alias "Bip01 Jaw"
+        override ""
+        required 0
+        minimum_detail 2
+        shape capsule
+        hitgroup 1
+        mass_weight 0.300000012
+        region "head"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 35
+        swing2 35
+        twist_low -10
+        twist_high 35
+    }
+}

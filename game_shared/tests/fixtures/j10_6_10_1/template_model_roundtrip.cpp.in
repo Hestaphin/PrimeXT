@@ -1,0 +1,104 @@
+// Main authoring/persistence methods and bounds below are actual production
+// code. The GUI is a service adapter; input is the SHA-checked real MDL.
+#include <limits>
+#include <iterator>
+#include "physics_asset_sidecar_removal.h"
+static unsigned labelReads=0;
+const char *mxWidget::getLabel() const
+{
+    ++labelReads;
+    static std::string borrowed;
+    borrowed=d_this->record.label;return borrowed.c_str();
+}
+@PRODUCTION@
+static unsigned checks=0;
+static void Check(bool value,const char *name) {++checks;if(!value) {std::cerr<<"FAIL "<<name<<'\n';std::abort();}}
+static std::string Read(const std::string &path)
+{std::ifstream f(path,std::ios::binary);return {std::istreambuf_iterator<char>(f),{}};}
+static void Action(RagdollTemplateDialog &dialog,int id)
+{mxEvent event{};event.event=mxEvent::Action;event.action=id;dialog.handleEvent(&event);}
+int main(int argc,char **argv)
+{
+    Check(argc==2,"real MDL argument");
+    const std::string bytes=Read(argv[1]);Check(bytes.size()==129104,"matching real MDL length");
+    std::vector<std::uint32_t> storage((bytes.size()+3)/4);std::memcpy(storage.data(),bytes.data(),bytes.size());
+    auto *hdr=reinterpret_cast<studiohdr_t*>(storage.data());
+    Check(hdr->version==10&&hdr->numbones==24&&hdr->flags==0&&hdr->numbodyparts==2,"actual Studio header");
+    ViewerSettings settings;StudioModel model(settings);model.m_pstudiohdr=hdr;
+    const auto *bones=reinterpret_cast<const mstudiobone_t*>(reinterpret_cast<const byte*>(hdr)+hdr->boneindex);
+    for(int i=0;i<hdr->numbones;++i)
+    {
+        const matrix3x4 local(Vector(bones[i].value[0],bones[i].value[1],bones[i].value[2]),
+                              Radian(bones[i].value[3],bones[i].value[4],bones[i].value[5]));
+        model.m_pbonetransform[i]=bones[i].parent<0?local:model.m_pbonetransform[bones[i].parent].ConcatTransforms(local);
+        model.m_pworldtransform[i]=model.m_pbonetransform[i];
+    }
+    PhysicsAssetEditor editor(nullptr,model,settings);editor.OnModelLoaded(argv[1]);
+    Check(editor.m_asset.bodies.size()==23&&editor.m_asset.joints.size()==22&&!editor.m_dirty,"actual editor reload of supplied asset copy");
+    const std::string original=physicsasset::Serialize(editor.m_asset),originalDisk=Read(editor.m_assetPath);
+    std::vector<ragtemplate::Bone> collected;std::string error;
+    Check(editor.CollectTemplateBones(collected,error)&&collected.size()==24,"actual MDL bounds collection");
+    const auto expected=BarneySkeleton();bool names=true,bounds=true;
+    for(size_t i=0;i<collected.size();++i)
+    {
+        const auto &a=collected[i];const auto &b=expected[i];
+        names=names&&a.name==b.name&&a.parent==b.parent;
+        bounds=bounds&&a.hasBounds==b.hasBounds;
+        if(a.hasBounds)
+        {
+            const float av[]={a.boundsMin.x,a.boundsMin.y,a.boundsMin.z,a.boundsMax.x,a.boundsMax.y,a.boundsMax.z};
+            const float bv[]={b.boundsMin.x,b.boundsMin.y,b.boundsMin.z,b.boundsMax.x,b.boundsMax.y,b.boundsMax.z};
+            for(int axis=0;axis<6;++axis) bounds=bounds&&std::fabs(av[axis]-bv[axis])<0.0002f;
+        }
+    }
+    Check(names,"actual bone names/parents agree with audited fixture");
+    Check(bounds,"production world/local vertex bounds agree within transform-roundoff tolerance");
+    editor.AutoGenerate();auto &dialog=*editor.m_templateDialog;Action(dialog,RagdollTemplateDialog::Generate);
+    Check(editor.m_generationPreview&&editor.m_generationPreview->bodies.size()==15&&
+          physicsasset::Serialize(editor.m_asset)==original&&Read(editor.m_assetPath)==originalDisk,"real-model candidate is isolated from asset/disk");
+    dialog.m_axisReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(editor.m_asset.bodies.size()==15&&editor.m_asset.joints.size()==14&&editor.m_dirty,"apply candidate into real authoring panels");
+    editor.m_mass->setLabel("77.125");float number=0;labelReads=0;
+    Check(ReadStrictFloat(editor.m_mass,number)&&number==77.125f&&labelReads==1,"float reader owns one borrowed toolkit label");
+    editor.m_hitGroup->setLabel("3");int integer=0;labelReads=0;
+    Check(ReadStrictInt(editor.m_hitGroup,integer)&&integer==3&&labelReads==1,"integer reader owns one borrowed toolkit label");
+    editor.m_bodyName->setLabel("edited_pelvis");
+    Check(editor.ApplyBodyFields()&&editor.m_asset.bodies[0].mass==77.125f&&
+          editor.m_asset.bodies[0].name=="edited_pelvis"&&editor.m_asset.joints[0].parent=="edited_pelvis","actual body edits update mass/name/joint endpoints");
+    editor.m_jointMotion[0]->select(0);editor.m_jointMotion[1]->select(2);editor.m_jointMotion[2]->select(1);
+    editor.m_swing1->setLabel("35.75");editor.m_swing2->setLabel("25.5");
+    editor.m_twistLow->setLabel("-12.5");editor.m_twistHigh->setLabel("22.25");
+    Check(editor.ApplyJointFields()&&editor.m_asset.joints[0].twistMotion==physicsasset::AngularMotion::Locked&&
+          editor.m_asset.joints[0].swing1Motion==physicsasset::AngularMotion::Free&&
+          editor.m_asset.joints[0].swing2Motion==physicsasset::AngularMotion::Limited&&
+          editor.m_asset.joints[0].swing1==35.75f,"actual joint modes/limits edit");
+    const std::string edited=physicsasset::Serialize(editor.m_asset);
+    editor.m_jointMotion[0]->select(-1);
+    Check(!editor.ApplyJointFields()&&physicsasset::Serialize(editor.m_asset)==edited,"invalid mode refuses to alter the asset");
+    editor.ShowJoint(0);editor.m_mass->setLabel("nan");
+    Check(!editor.ApplyBodyFields()&&physicsasset::Serialize(editor.m_asset)==edited,"invalid body field refuses to alter the asset");
+    editor.ShowBody(0);
+    Check(editor.SaveAsset()&&!editor.m_dirty,"actual Save applies valid fields and writes the temporary sidecar");
+    physicsasset::AssetDef saved;
+    Check(physicsasset::LoadFile(editor.m_assetPath.c_str(),saved,&error)&&physicsasset::Serialize(saved)==edited,"actual saved field values round trip");
+    const std::string savedDisk=Read(editor.m_assetPath);
+    editor.UndoGeneration();Check(physicsasset::Serialize(editor.m_asset)==edited&&Read(editor.m_assetPath)==savedDisk,"undo refuses to discard later edited/saved data");
+    editor.AutoGenerate();Action(dialog,RagdollTemplateDialog::Generate);editor.m_bodyName->setLabel("pending_cancel_text");
+    mxEvent close{};close.event=mxEvent::Close;dialog.handleEvent(&close);
+    Check(!dialog.isVisible()&&!editor.m_generationPreview&&!editor.m_dirty&&
+          std::string(editor.m_bodyName->getLabel())=="pending_cancel_text"&&
+          physicsasset::Serialize(editor.m_asset)==edited&&Read(editor.m_assetPath)==savedDisk,"title-close preserves edited asset/disk/dirty/pending fields");
+    editor.ShowBody(0);editor.AutoGenerate();dialog.m_templates->select(1);Action(dialog,RagdollTemplateDialog::SelectTemplate);
+    Action(dialog,RagdollTemplateDialog::Generate);dialog.m_axisReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    bool free=true;for(const auto &j:editor.m_asset.joints) free=free&&j.twistMotion==physicsasset::AngularMotion::Free&&j.swing1Motion==physicsasset::AngularMotion::Free&&j.swing2Motion==physicsasset::AngularMotion::Free;
+    Check(free,"real-model Free Rotation applies concrete modes");
+    editor.UndoGeneration();Check(physicsasset::Serialize(editor.m_asset)==edited,"actual Undo restores edited body and mixed joint modes");
+    editor.AutoGenerate();Action(dialog,RagdollTemplateDialog::Generate);editor.ReloadAsset();
+    Check(!dialog.isVisible()&&!editor.m_generationPreview&&!editor.m_generation.HasCandidate()&&!editor.m_dirty&&
+          physicsasset::Serialize(editor.m_asset)==edited&&!editor.m_generation.Undo(editor.m_asset,&error),"actual Reload clears preview/undo and restores saved fields");
+    editor.AutoGenerate();Action(dialog,RagdollTemplateDialog::Generate);
+    const std::string next=(std::filesystem::path(argv[1]).parent_path()/"other_model.mdl").string();editor.OnModelLoaded(next.c_str());
+    Check(!dialog.isVisible()&&!editor.m_generationPreview&&editor.m_asset.bodies.empty()&&
+          !editor.m_generation.HasCandidate()&&!editor.m_generation.Undo(editor.m_asset,&error),"model-path lifecycle invalidates generation and undo");
+    std::cout<<"F1 actual MDL bounds/edit/save/reload: "<<checks<<" checks PASS (real model bytes, actual methods; GUI services adapted; NO solver/game)\n";
+}

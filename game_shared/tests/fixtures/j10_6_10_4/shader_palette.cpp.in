@@ -1,0 +1,38 @@
+// GLSL helper bodies are compiled as CPU expressions. This checks palette math,
+// not driver shader compilation, GPU uniforms or frame rendering.
+#include <array>
+#include <iostream>
+#include <cmath>
+#include "mathlib.h"
+#include "physics_asset_render_coordinates.h"
+using vec4=Vector4D;using vec3=Vector;using mat4=std::array<std::array<float,4>,4>;
+vec3 u_BoneScale;
+@PRODUCTION@
+static unsigned checks=0;
+static void Check(bool v,const char *label) {++checks;if(!v){std::cerr<<"FAIL "<<label<<'\n';std::abort();}}
+static float Error(const mat4 &a,const matrix3x4 &b)
+{float peak=0;for(int c=0;c<4;++c)for(int r=0;r<3;++r)peak=std::max(peak,std::fabs(a[c][r]-b[c][r]));return peak;}
+int main()
+{
+    float oldPeak=0;
+    const Vector angles[]={Vector(0,0,0),Vector(25,45,63),Vector(120,95,170),Vector(-85,-135,55)};
+    for(float scale:{0.5f,1.0f,2.5f})for(const auto &angle:angles)for(bool reflected:{false,true})
+    {
+        matrix3x4 world(Vector(13,-24,55),angle,Vector(scale));if(reflected)world.SetUp(-world.GetUp());
+        u_BoneScale=physicsasset::StudioRenderBoneScale(world);
+        const Vector4D q=physicsasset::StudioRenderBoneQuaternion(world);
+        const float norm=q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w;
+        Check(std::fabs(norm-1)<0.0001f,"compact palette uses a unit quaternion");
+        const mat4 compact=Mat4FromScaledOriginQuat(q,world.GetOrigin());
+        Check(Error(compact,world)<0.00001f,"compact palette matches complete matrix for rotations/scale/reflection");
+        const Vector vertices[]={Vector(0,0,0),Vector(10,-7,3),Vector(-12,18,42)};
+        for(const auto &v:vertices)
+        {
+            Vector result;for(int r=0;r<3;++r)result[r]=compact[0][r]*v.x+compact[1][r]*v.y+compact[2][r]*v.z+compact[3][r];
+            Check((result-world.VectorTransform(v)).Length()<0.0001f,"translated scaled mesh vertex agrees with matrix palette");
+        }
+        if(!reflected)oldPeak=std::max(oldPeak,Error(Mat4FromOriginQuat(world.GetQuaternion(),world.GetOrigin()),world));
+    }
+    Check(oldPeak>0.5f,"old extraction from scaled basis reproduces compact shader mismatch");
+    std::cout<<"F4 compact GLSL expression palette: "<<checks<<" checks PASS; F3 raw quaternion matrix error "<<oldPeak<<"; NO GPU driver compile\n";
+}

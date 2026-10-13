@@ -25,6 +25,7 @@
 #include <mx.h>
 #include <mxBmp.h>
 #include "mdlviewer.h"
+#include "PhysicsAssetEditor.h"
 #include "stringlib.h"
 #include "cmdlib.h"
 #include "app_info.h"
@@ -1317,6 +1318,8 @@ int ControlPanel::loadModel (const char *filename, bool centering)
 			m_settings.modelFile = filename;
 			m_settings.modelPath = filename;
 			setModelInfo ();
+			if( g_MDLViewer && g_MDLViewer->getPhysicsAssetEditor() )
+				g_MDLViewer->getPhysicsAssetEditor()->OnModelLoaded(filename);
 			m_settings.sequence = 0;
 			m_settings.speedScale = 1.0f;
 			slSpeedScale->setValue (40);

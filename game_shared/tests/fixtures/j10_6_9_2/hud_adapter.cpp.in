@@ -1,0 +1,85 @@
+// Exact HUD selection methods; engine command/sound and inventory adapters.
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+using SpriteHandle = int;
+struct wrect_t { int left, right, top, bottom; };
+#include "ammo.h"
+constexpr int FALSE = 0, TRUE = 1, MAX_WEAPON_POSITIONS = 20;
+constexpr int MAX_WEAPONS = 64, MAX_WEAPON_BYTES = 8, WEAPON_SUIT = 63;
+constexpr int HIDEHUD_WEAPONS = 1, HIDEHUD_ALL = 4, IN_ATTACK = 1;
+static std::vector<std::string> commands;
+static std::string selectedName;
+static int unknownCommands;
+static bool unsafeCommand;
+static bool fastSwitch;
+static int g_weaponselect;
+static WEAPON *gpActiveSel, *gpLastSel;
+static unsigned char nullbits[MAX_WEAPON_BYTES];
+static float CVAR_GET_FLOAT(const char*) { return fastSwitch ? 1.f : 0.f; }
+static void PlaySound(const char*, float) {}
+static void ServerCmd(const char* command) {
+    commands.emplace_back(command);
+    if (!command[0]) return;
+    if (std::strpbrk(command, ";\n\r")) { unsafeCommand = true; return; }
+    if (!std::strncmp(command, "use ", 4)) selectedName = command + 4;
+    else if (!std::strncmp(command, "weapon_", 7)) selectedName = command;
+    else ++unknownCommands;
+}
+#define Q_snprintf std::snprintf
+struct Hud {
+    bool m_fPlayerDead = false, suit = true;
+    int m_iHideHUDDisplay = 0, m_iKeyBits = 0;
+    unsigned char m_iWeaponBits[MAX_WEAPON_BYTES]{};
+    struct { bool m_fMenuDisplayed = false; void SelectMenuItem(int) {} } m_Menu;
+    bool HasWeapon(int id) const { return id == WEAPON_SUIT ? suit : true; }
+} gHUD;
+struct WeaponsResource {
+    WEAPON* rgSlots[MAX_WEAPON_SLOTS + 1][MAX_WEAPON_POSITIONS + 1]{};
+    unsigned char iOldWeaponBits[MAX_WEAPON_BYTES]{};
+    int HasAmmo(WEAPON*); WEAPON* GetFirstPos(int); WEAPON* GetNextActivePos(int, int);
+    void SelectSlot(int, int, int);
+    int CountAmmo(int) { return 1; }
+    WEAPON* GetWeapon(int) { return nullptr; }
+    void PickupWeapon(WEAPON*) {} void DropWeapon(WEAPON*) {}
+} gWR;
+struct CHudAmmo { void Think(); };
+@PRODUCTION@
+int main(int argc, char** argv) {
+    assert(argc == 2); const std::string test = argv[1];
+    WEAPON weapon{}; std::strcpy(weapon.szName, "test_pistol");
+    weapon.iId = 32; weapon.iSlot = 1; weapon.iSlotPos = 4; weapon.iMax1 = -1;
+    WEAPON classic = weapon; std::strcpy(classic.szName, "weapon_9mmhandgun"); classic.iId = 2;
+    if (test.find("classic") != std::string::npos) weapon = classic;
+    gHUD.m_iWeaponBits[0] = 1;
+    std::memcpy(gWR.iOldWeaponBits, gHUD.m_iWeaponBits, MAX_WEAPON_BYTES);
+    gWR.rgSlots[1][4] = &weapon;
+    fastSwitch = test.find("fast-") == 0;
+    if (test == "empty-name") { weapon.szName[0] = 0; fastSwitch = true; }
+    if (test == "command-in-name") { std::strcpy(weapon.szName, "test_pistol;quit"); fastSwitch = true; }
+    if (test == "long-name") { std::memset(weapon.szName, 'a', sizeof(weapon.szName) - 1); weapon.szName[127] = 0; fastSwitch = true; }
+    if (test == "no-suit") gHUD.suit = false;
+    if (test == "menu-sentinel") {
+        gpActiveSel = reinterpret_cast<WEAPON*>(1); gHUD.m_iKeyBits = IN_ATTACK;
+        CHudAmmo().Think(); assert(commands.empty()); return 0;
+    }
+    if (test == "slot-cycle") {
+        classic.iSlotPos = 5; gWR.rgSlots[1][5] = &classic;
+        gWR.SelectSlot(1, FALSE, 1); assert(gpActiveSel == &weapon);
+        gWR.SelectSlot(1, FALSE, 1); assert(gpActiveSel == &classic);
+        gWR.SelectSlot(1, FALSE, 1); assert(gpActiveSel == &weapon);
+    } else gWR.SelectSlot(1, FALSE, 1);
+    if (!fastSwitch && test != "no-suit") {
+        assert(gpActiveSel == &weapon); assert(commands.empty());
+        gHUD.m_iKeyBits = IN_ATTACK; CHudAmmo().Think();
+        assert(!gpActiveSel && !(gHUD.m_iKeyBits & IN_ATTACK));
+    }
+    if (test == "no-suit" || test == "empty-name" || test == "command-in-name")
+        assert(selectedName.empty() && !unsafeCommand && !unknownCommands);
+    else {
+        assert(commands.size() == 1 && selectedName == weapon.szName && !unknownCommands && !unsafeCommand);
+        assert(g_weaponselect == weapon.iId);
+    }
+}

@@ -28,9 +28,12 @@ endif()
 
 if(BUILD_SERVER)
 	list(APPEND VCPKG_MANIFEST_FEATURES "server")
-	if(ENABLE_PHYSX)
-		list(APPEND VCPKG_MANIFEST_FEATURES "physx")
-	endif()
+endif()
+
+# PhysX is needed by the server runtime and by pxmv's live Physics Asset
+# preview. Keep it available even in a tools-only build.
+if(ENABLE_PHYSX AND (BUILD_SERVER OR BUILD_UTILS))
+	list(APPEND VCPKG_MANIFEST_FEATURES "physx")
 endif()
 
 if(BUILD_UTILS)

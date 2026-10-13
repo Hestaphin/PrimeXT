@@ -24,6 +24,12 @@ GNU General Public License for more details.
 #include "gl_studio.h"
 #include "render/gl_debug_overlay_2d.h"
 #include "meshdesc_factory.h"
+#include "physics_asset_format.h"
+#include "physics_asset_trace_coordinates.h"
+#include "physics_asset_primitive_trace.h"
+#include "performance_cache.h"
+#include <unordered_map>
+#include <memory>
 
 /*
 =============
@@ -201,6 +207,310 @@ SpriteHandle LoadSprite( const char *pszName )
 	return SPR_Load( sz );
 }
 
+
+// Remote prediction reads the same mod-side .phys asset as the server.
+// Per-map cache is indexed by file name; new maps clear it in HUD_ClearPhysCollisionCache.
+static std::unordered_map<std::string, std::shared_ptr<physicsasset::AssetDef>> s_predictionPhysicsAssets;
+struct PredictionMeshEntry
+{
+    std::unique_ptr<CMeshDesc> mesh;
+    performance::TraceMeshKey key, candidate;
+    bool inUse = false;
+    std::uint64_t lastUse = 0;
+};
+static std::unordered_map<int, PredictionMeshEntry> s_predictionMovingMeshes;
+static std::uint64_t s_predictionMeshUse = 0;
+
+static void TrimPredictionMovingMeshes()
+{
+    // Retention is bounded independently of the number of entities/triangles
+    // authored on a map. Oversized meshes still work as uncached queries.
+    constexpr size_t budget = 32u * 1024u * 1024u;
+    for(;;)
+    {
+        size_t bytes = 0;
+        auto oldest = s_predictionMovingMeshes.end();
+        for(auto it = s_predictionMovingMeshes.begin(); it != s_predictionMovingMeshes.end(); ++it)
+        {
+            const auto &entry = it->second;
+            if(entry.mesh) bytes += entry.mesh->GetMemorySize() + sizeof(CMeshDesc);
+            bytes += (entry.key.poses.capacity() + entry.candidate.poses.capacity()) * sizeof(performance::TracePose);
+            if(!entry.inUse && (oldest == s_predictionMovingMeshes.end() || entry.lastUse < oldest->second.lastUse))
+                oldest = it;
+        }
+        if((bytes <= budget && s_predictionMovingMeshes.size() <= 128) || oldest == s_predictionMovingMeshes.end()) break;
+        s_predictionMovingMeshes.erase(oldest);
+    }
+}
+
+struct PredictionMeshLease
+{
+    PredictionMeshEntry *entry = nullptr;
+    std::unique_ptr<CMeshDesc> temporary;
+    ~PredictionMeshLease() { if(entry) { entry->inUse = false; TrimPredictionMovingMeshes(); } }
+};
+
+void HUD_ClearPhysCollisionCache()
+{
+    s_predictionMovingMeshes.clear();
+    s_predictionMeshUse = 0;
+    s_predictionPhysicsAssets.clear();
+    performance::ClientStats() = performance::ClientCounters{};
+}
+
+static const physicsasset::AssetDef *PredictionPhysicsAsset(const model_t *model)
+{
+    if (!model || !model->name[0] || model->type != mod_studio) return nullptr;
+    const std::string path = physicsasset::BuildAssetPath(model->name);
+    auto found = s_predictionPhysicsAssets.find(path);
+    if (found != s_predictionPhysicsAssets.end()) return found->second.get();
+    int length = 0;
+    byte *bytes = LOAD_FILE(path.c_str(), &length);
+    std::shared_ptr<physicsasset::AssetDef> asset;
+    if (bytes && length > 0)
+    {
+        asset = std::make_shared<physicsasset::AssetDef>();
+        std::string error;
+        if (!physicsasset::Parse(std::string_view((const char*)bytes, (size_t)length), *asset, &error))
+        {
+            ALERT(at_warning, "Prediction: invalid .phys %s: %s\n", (char*)path.c_str(), (char*)error.c_str());
+            asset.reset();
+        }
+        else asset->sourcePath = path;
+    }
+    if (bytes) FREE_FILE(bytes);
+    s_predictionPhysicsAssets.emplace(path, asset);
+    return asset.get();
+}
+
+static bool PredictionCollisionActive(const physicsasset::CollisionDef &section, const model_t *model, int body)
+{
+    if (section.disabled) return false;
+    if (section.bodyGroup.empty()) return true;
+    if (!model || !model->cache.data) return false;
+    const studiohdr_t *hdr = (const studiohdr_t *)model->cache.data;
+    const mstudiobodyparts_t *parts = (const mstudiobodyparts_t *)((const byte *)hdr + hdr->bodypartindex);
+    for (int i = 0; i < hdr->numbodyparts; ++i)
+        if (!Q_stricmp(parts[i].name, section.bodyGroup.c_str()))
+            return parts[i].base > 0 && parts[i].nummodels > 0 &&
+                (body / parts[i].base) % parts[i].nummodels == section.variant;
+    return false;
+}
+
+static int PredictionBoneIndex(const model_t *model, const std::string &bone)
+{
+    if (!model || !model->cache.data) return -1;
+    const studiohdr_t *hdr = (const studiohdr_t *)model->cache.data;
+    const mstudiobone_t *bones = (const mstudiobone_t *)((const byte*)hdr + hdr->boneindex);
+    for (int i = 0; i < hdr->numbones; ++i)
+        if (!Q_stricmp(bones[i].name, bone.c_str())) return i;
+    return -1;
+}
+
+// Build the currently selected collision triangles in *entity/model local*
+// coordinates. For animated sections use the renderer's last physical/Studio
+// pose; never quietly substitute reference-pose geometry for a moving door.
+// Mirror BuildAnimatedCollisionActors' hinge-child fallback. Plain ragdoll
+// bodies and mesh-backed parts do not add a second movement collider.
+static bool PredictionHasPrimitiveHinges(const physicsasset::AssetDef &asset)
+{
+    for(const auto &part : physicsasset::BuildPartLayout(asset))
+        if(physicsasset::PrimitiveHingeBodyIndex(asset,part) >= 0) return true;
+    return false;
+}
+
+static bool BuildPredictionTraceKey(cl_entity_t *ent, const physicsasset::AssetDef &asset,
+    const Vector &scale, performance::TraceMeshKey &key)
+{
+    key.model = ent->model;
+    key.modelCRC = ent->model->modelCRC;
+    key.definition = &asset;
+    key.fingerprint = asset.collisionFingerprint;
+    key.body = ent->curstate.body;
+    key.skin = ent->curstate.skin;
+    key.poses.clear();
+    key.valid = true;
+    for(int i = 0; i < 3; ++i)
+    {
+        key.origin[i] = ent->curstate.origin[i];
+        key.angles[i] = ent->curstate.angles[i];
+        key.scale[i] = scale[i];
+    }
+    for(size_t i = 0; i < asset.collisions.size(); ++i)
+    {
+        const auto &section = asset.collisions[i];
+        if(!PredictionCollisionActive(section, ent->model, ent->curstate.body)) continue;
+        matrix3x4 pose;
+        pose.Identity();
+        if(!section.bone.empty())
+        {
+            const int bone = PredictionBoneIndex(ent->model, section.bone);
+            if(bone < 0 || !R_StudioGetCollisionBonePose(ent, bone, pose))
+            { key.valid = false; continue; }
+        }
+        key.poses.push_back(performance::MakeTracePose(static_cast<std::uint32_t>(i), pose));
+    }
+    if(std::isfinite(scale.x) && scale.x > 0 &&
+        std::fabs(scale.x-scale.y) < 0.0001f && std::fabs(scale.x-scale.z) < 0.0001f)
+    {
+        for(const auto &part : physicsasset::BuildPartLayout(asset))
+        {
+            const int body = physicsasset::PrimitiveHingeBodyIndex(asset, part);
+            if(body < 0) continue;
+            const int bone = PredictionBoneIndex(ent->model, part.bone);
+            matrix3x4 pose;
+            if(bone < 0 || !R_StudioGetCollisionBonePose(ent, bone, pose))
+            { key.valid = false; continue; }
+            key.poses.push_back(performance::MakeTracePose(
+                performance::kPrimitivePose | static_cast<std::uint32_t>(body), pose));
+        }
+    }
+    key.valid = key.valid && performance::FiniteTraceKey(key);
+    return key.valid;
+}
+
+static CMeshDesc &PredictionMovingMesh(cl_entity_t *ent, const physicsasset::AssetDef &asset,
+    const Vector &scale, PredictionMeshLease &lease)
+{
+    PredictionMeshEntry &entry = s_predictionMovingMeshes[ent->index];
+    // IK queries can issue another sweep while evaluating these bones. A
+    // nested query must not free or overwrite the outer query's mesh/key.
+    if(entry.inUse)
+    {
+        lease.temporary = std::make_unique<CMeshDesc>();
+        lease.temporary->SetDebugName(ent->model->name);
+        lease.temporary->SetModel(ent->model, ent->curstate.body, ent->curstate.skin);
+        lease.temporary->SetGeometryType(clipfile::GeometryType::CookedTriangleMesh);
+        return *lease.temporary;
+    }
+    lease.entry = &entry;
+    entry.inUse = true;
+    entry.lastUse = ++s_predictionMeshUse;
+    BuildPredictionTraceKey(ent, asset, scale, entry.candidate);
+    if(entry.mesh && entry.mesh->GetMesh() && entry.key == entry.candidate)
+    {
+        ++performance::ClientStats().predictionHits;
+        return *entry.mesh;
+    }
+    if(!entry.mesh) entry.mesh = std::make_unique<CMeshDesc>();
+    else entry.mesh->FreeMesh();
+    std::swap(entry.key, entry.candidate);
+    entry.mesh->SetDebugName(ent->model->name);
+    entry.mesh->SetModel(ent->model, ent->curstate.body, ent->curstate.skin);
+    entry.mesh->SetGeometryType(clipfile::GeometryType::CookedTriangleMesh);
+    return *entry.mesh;
+}
+
+static bool BuildPredictedPhysicsMesh(cl_entity_t *ent, const physicsasset::AssetDef &asset,
+                                     const Vector &modelScale, CMeshDesc &mesh)
+{
+    if(mesh.GetMesh()) return true;
+    const model_t *model = ent->model;
+    const int body = ent->curstate.body;
+    struct PredictedPrimitive
+    {
+        const physicsasset::BodyDef *body;
+        int boneIndex;
+        std::vector<physicsasset::PrimitiveTriangle> triangles;
+    };
+    std::vector<PredictedPrimitive> primitives;
+    // The server rejects invalid/non-uniform hinged primitive scales.
+    if( std::isfinite(modelScale.x) && modelScale.x > 0 &&
+        std::fabs(modelScale.x-modelScale.y) < 0.0001f &&
+        std::fabs(modelScale.x-modelScale.z) < 0.0001f )
+    {
+        for(const auto &part : physicsasset::BuildPartLayout(asset))
+        {
+            const int bodyIndex = physicsasset::PrimitiveHingeBodyIndex(asset,part);
+            if(bodyIndex < 0) continue;
+            const int boneIndex = PredictionBoneIndex(model,part.bone);
+            if(boneIndex < 0) continue;
+            PredictedPrimitive primitive{&asset.bodies[bodyIndex],boneIndex,{}};
+            physicsasset::BuildPrimitiveTraceTriangles(primitive.body->shape,primitive.triangles);
+            if(!primitive.triangles.empty()) primitives.push_back(std::move(primitive));
+        }
+    }
+    int triangles = 0;
+    for (const auto &section : asset.collisions)
+        if (PredictionCollisionActive(section,model,body)) triangles += (int)section.indices.size()/3;
+    for(const auto &primitive : primitives) triangles += static_cast<int>(primitive.triangles.size());
+    if (!triangles || triangles > MAX_TRIANGLES_SOFT) return false;
+    ++performance::ClientStats().predictionBuilds;
+    if (!mesh.InitMeshBuild(triangles)) return false;
+    const matrix4x4 entityToWorld(ent->curstate.origin, ent->curstate.angles, 1.0f);
+    bool available = true;
+    int added = 0;
+    for (const auto &section : asset.collisions)
+    {
+        if (!PredictionCollisionActive(section,model,body)) continue;
+        matrix4x4 boneToWorld;
+        physicsasset::ScaledTraceBoneFrame traceBone;
+        const bool boneBound = !section.bone.empty();
+        if (boneBound)
+        {
+            matrix3x4 boneMatrix;
+            const int index = PredictionBoneIndex(model, section.bone);
+            if (index < 0 || !R_StudioGetCollisionBonePose(ent,index,boneMatrix))
+            {
+                // Unknown pose: skip this section rather than block an open door
+                // with stale reference collision. Server remains authoritative.
+                available = false;
+                continue;
+            }
+            boneToWorld = matrix4x4(boneMatrix);
+            if (!traceBone.Initialize(entityToWorld,boneToWorld,modelScale))
+            {
+                available = false;
+                continue;
+            }
+        }
+        for (size_t i=0; i+2<section.indices.size(); i+=3)
+        {
+            Vector triangle[3];
+            bool valid = true;
+            for (int c=0;c<3;++c)
+            {
+                auto idx = section.indices[i+c];
+                if (idx >= section.vertices.size()) { valid=false; break; }
+                const auto &v = section.vertices[idx];
+                Vector point(v.x,v.y,v.z);
+                if (boneBound) point=traceBone.ToTraceLocal(point);
+                triangle[c]=point;
+            }
+            if (valid && mesh.AddMeshTrinagle(triangle)) ++added;
+        }
+    }
+    for(const auto &primitive : primitives)
+    {
+        matrix3x4 boneMatrix;
+        if(!R_StudioGetCollisionBonePose(ent,primitive.boneIndex,boneMatrix))
+        {
+            available=false;
+            continue;
+        }
+        physicsasset::ScaledTraceBoneFrame frame;
+        if(!frame.Initialize(entityToWorld,matrix4x4(boneMatrix),modelScale))
+        {
+            available=false;
+            continue;
+        }
+        const auto &body=*primitive.body;
+        const matrix4x4 shapeToBone(Vector(body.offset.x,body.offset.y,body.offset.z),
+            Vector(body.angles.x,body.angles.y,body.angles.z),1.0f);
+        for(const auto &src : primitive.triangles)
+        {
+            Vector triangle[3];
+            for(int i=0;i<3;++i)
+                triangle[i]=frame.ToTraceLocal(shapeToBone.VectorTransform(
+                    Vector(src[i].x,src[i].y,src[i].z)));
+            if(mesh.AddMeshTrinagle(triangle)) ++added;
+        }
+    }
+    if (!added || !mesh.FinishMeshBuild()) { mesh.FreeMeshBuild(); return false; }
+    mesh.FreeMeshBuild();
+    return available || added > 0;
+}
+
 void Physic_SweepTest(cl_entity_t *pTouch, const Vector &start, const Vector &mins, const Vector &maxs, const Vector &end, trace_t *tr)
 {
 	if (!pTouch->model || !pTouch->model->cache.data || pTouch->model->type != mod_studio)
@@ -210,22 +520,96 @@ void Physic_SweepTest(cl_entity_t *pTouch, const Vector &start, const Vector &mi
 		return;
 	}
 
+    // Full ragdolls own physics collision instead of the old prop proxy. Do
+    // not predict an obsolete static proxy underneath the physical bodies.
+    if (FBitSet(pTouch->curstate.iuser1, CF_RAGDOLL) &&
+        pTouch->curstate.solid == SOLID_NOT)
+    { tr->allsolid = false; return; }
+    trace_t primitiveOnlyResult{};
+    bool havePrimitiveOnlyResult = false;
+    const physicsasset::AssetDef *asset = PredictionPhysicsAsset(pTouch->model);
+    if (asset && (physicsasset::HasCollisionGeometry(*asset) || PredictionHasPrimitiveHinges(*asset)))
+    {
+        bool anyActive = false;
+        for (const auto &section : asset->collisions)
+            if (PredictionCollisionActive(section,pTouch->model,pTouch->curstate.body)) anyActive = true;
+        const bool assetHasSections = physicsasset::HasCollisionGeometry(*asset);
+        if (!anyActive && !PredictionHasPrimitiveHinges(*asset))
+        {
+            if(assetHasSections) { tr->allsolid = false; return; }
+        }
+        bool movingCollision = false;
+        for (const auto &section : asset->collisions)
+            if (PredictionCollisionActive(section,pTouch->model,pTouch->curstate.body) &&
+                !section.bone.empty()) { movingCollision = true; break; }
+        movingCollision = movingCollision || PredictionHasPrimitiveHinges(*asset);
+        const entity_state_t &state = pTouch->curstate;
+        // Match Studio's scale selection. The old Vector(state.scale) path
+        // produced a zero-scale trace for entities with default scale 0.
+        const Vector physScale = FBitSet(state.iuser1, CF_STATIC_ENTITY)
+            ? (state.startpos != g_vecZero ? state.startpos : Vector(1,1,1))
+            : ((state.scale > 0.0f && state.scale <= 16.0f)
+                ? Vector(state.scale) : Vector(1,1,1));
+        PredictionMeshLease lease;
+        CMeshDesc &physicsMesh = movingCollision ? PredictionMovingMesh(pTouch, *asset, physScale, lease) :
+            CMeshDescFactory::Instance().CreateObject(pTouch->curstate.modelindex,
+                pTouch->curstate.body, pTouch->curstate.skin,
+                clipfile::GeometryType::CookedTriangleMesh,asset->collisionFingerprint);
+        if (BuildPredictedPhysicsMesh(pTouch, *asset, physScale, physicsMesh))
+        {
+            TraceMesh predictionTrace;
+            predictionTrace.SetTraceMesh(physicsMesh.GetMesh(), physicsMesh.GetHeadNode(),
+                state.modelindex, state.body, state.skin);
+            predictionTrace.SetMeshOrientation(state.origin,state.angles,physScale);
+            trace_t predicted{};
+            predictionTrace.SetupTrace(start,mins,maxs,end,&predicted);
+            if (predictionTrace.DoTrace())
+            {
+                if (predicted.fraction < 1.0f || predicted.startsolid) predicted.ent=(edict_t*)pTouch;
+                predicted.materialHash = 0; // visual model remains material authority
+            }
+            if(assetHasSections)
+            {
+                *tr = predicted;
+                return; // .phys sections replace old render collision
+            }
+            primitiveOnlyResult = predicted;
+            havePrimitiveOnlyResult = true; // preserve original root when no .phys root section
+        }
+        // Active .phys geometry whose pose is unavailable must NOT fall back
+        // to the old render mesh: that recreates the ghost closed-door hit.
+        if(assetHasSections)
+        {
+            tr->allsolid = false;
+            return;
+        }
+    }
+
 	Vector scale = Vector(1.f, 1.f, 1.f);
 	Vector trace_mins, trace_maxs, bounds[2];
 	UTIL_MoveBounds(start, mins, maxs, end, trace_mins, trace_maxs);
 
+    const auto mergePrimitiveOnly = [&]() {
+        if(havePrimitiveOnlyResult &&
+            ((primitiveOnlyResult.startsolid && !tr->startsolid) ||
+             primitiveOnlyResult.fraction < tr->fraction)) *tr = primitiveOnlyResult;
+    };
 	if (!R_StudioGetBounds(pTouch, bounds))
-	{
-		tr->allsolid = false;
-		return;
-	}
+    {
+        tr->allsolid = false;
+        tr->fraction = 1.0f;
+        mergePrimitiveOnly();
+        return;
+    }
 
 	// NOTE: pmove code completely ignore a bounds checking. So we need to do it here
 	if (!BoundsIntersect(trace_mins, trace_maxs, bounds[0], bounds[1]))
-	{
-		tr->allsolid = false;
-		return;
-	}
+    {
+        tr->allsolid = false;
+        tr->fraction = 1.0f;
+        mergePrimitiveOnly();
+        return;
+    }
 
 	auto &meshDescFactory = CMeshDescFactory::Instance();
 	CMeshDesc &bodyMesh = meshDescFactory.CreateObject(pTouch->curstate.modelindex, pTouch->curstate.body, pTouch->curstate.skin, clipfile::GeometryType::Original);
@@ -240,11 +624,12 @@ void Physic_SweepTest(cl_entity_t *pTouch, const Vector &start, const Vector &mi
 	entity_state_t *pev = &pTouch->curstate;
 
 	if (!pMesh)
-	{
-		// failed to build mesh for some reasons, so skip them
-		tr->allsolid = false;
-		return;
-	}
+    {
+        tr->allsolid = false;
+        tr->fraction = 1.0f;
+        mergePrimitiveOnly();
+        return;
+    }
 
 	TraceMesh trm;	// a name like Doom3 :-)
 	if (FBitSet(RI->currententity->curstate.iuser1, CF_STATIC_ENTITY)) 
@@ -253,9 +638,9 @@ void Physic_SweepTest(cl_entity_t *pTouch, const Vector &start, const Vector &mi
 			scale = pev->startpos;
 		}
 	}
-	else {
-		scale = Vector(pev->scale);
-	}
+    else if(pev->scale > 0.0f && pev->scale <= 16.0f) {
+        scale = Vector(pev->scale);
+    }
 
 	trm.SetTraceMesh(pMesh, pHeadNode, pTouch->curstate.modelindex, bodyMesh.GetBody(), bodyMesh.GetSkin());
 	trm.SetMeshOrientation(pev->origin, pev->angles, scale);
@@ -266,7 +651,8 @@ void Physic_SweepTest(cl_entity_t *pTouch, const Vector &start, const Vector &mi
 		if (tr->fraction < 1.0f || tr->startsolid)
 			tr->ent = (edict_t *)pTouch;	// g-cont. no need, really. i'm leave this just for fun
 		tr->materialHash = COM_GetMaterialHash(trm.GetLastHitSurface());
-	}
+    }
+    mergePrimitiveOnly();
 }
 
 //=================
