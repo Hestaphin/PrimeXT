@@ -16,12 +16,14 @@ GNU General Public License for more details.
 #include "hud.h"
 #include "utils.h"
 #include "gl_local.h"
+#include "performance_gpu.h"
 #include "gl_world.h"
 #include "mathlib.h"
 #include <stringlib.h>
 #include "gl_occlusion.h"
 #include "gl_cvars.h"
 #include "gl_studio.h"
+#include "gl_render_budget.h"
 
 #define MIRROR_PLANE_EPSILON		0.1f
 
@@ -133,6 +135,9 @@ texFlags_t R_SetupMirrorView( msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &
 	}
 
 	viewport.WriteToArray(rvp->viewport);
+	const auto mirrorSize=renderbudget::ScaleSize(viewport.GetWidth(),viewport.GetHeight(),
+		R_BudgetValue("r_reflection_scale",1),(std::max)(viewport.GetWidth(),viewport.GetHeight()));
+	rvp->viewport[2]=mirrorSize.width;rvp->viewport[3]=mirrorSize.height;
 	if( FBitSet( mat->flags, BRUSH_LIQUID ))
 		SetBits( rvp->flags, RP_WATERPASS );
 	else if( FBitSet( surf->flags, SURF_REFLECT_PUDDLE ))
@@ -250,7 +255,9 @@ texFlags_t R_SetupScreenView(msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &v
 	CViewport	viewport;
 
 	viewmat.Identity();
-	if (camera->player && UTIL_IsLocal(camera->curstate.number))
+	rvp->viewentity = camera->curstate.number;
+	const bool localPlayerView = camera->player && UTIL_IsLocal(camera->curstate.number);
+	if (localPlayerView)
 	{
 		ref_params_t viewparams;
 		memcpy(&viewparams, &tr.viewparams, sizeof(viewparams));
@@ -259,18 +266,20 @@ texFlags_t R_SetupScreenView(msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &v
 		if (tr.viewparams.viewentity > tr.viewparams.maxclients)
 			V_CalcFirstPersonRefdef(&viewparams);
 
-		rvp->flags = RP_SCREENVIEW | RP_FORCE_NOPLAYER;
-		RI->view.pvspoint = viewparams.vieworg;
-		return TF_NOMIPMAP;
+		origin = viewparams.vieworg;
+		angles = viewparams.viewangles;
+	}
+	else
+	{
+		origin = camera->origin;
+		angles = camera->angles;
 	}
 
-	origin = camera->origin;
-	angles = camera->angles;
-
-	studiohdr_t *viewmonster = (studiohdr_t *)IEngineStudio.Mod_Extradata(camera->model);
+	studiohdr_t *viewmonster = camera->model && camera->model->type == mod_studio
+		? (studiohdr_t *)IEngineStudio.Mod_Extradata(camera->model) : NULL;
 
 	// it's monster
-	if (viewmonster && FBitSet(camera->curstate.eflags, EFLAG_SLERP))
+	if (!localPlayerView && viewmonster && FBitSet(camera->curstate.eflags, EFLAG_SLERP))
 	{
 		Vector forward;
 		AngleVectors(angles, forward, NULL, NULL);
@@ -286,7 +295,7 @@ texFlags_t R_SetupScreenView(msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &v
 	// lasttime goes into ent->latched.sequencetime
 	// oldz goes into ent->latched.prevanimtime
 	// HACKHACK we store interpolate values into func_monitor entity to avoid broke lerp
-	if (origin[2] - ent->latched.prevanimtime > 0.0f)
+	if (!localPlayerView && origin[2] - ent->latched.prevanimtime > 0.0f)
 	{
 		float steptime;
 
@@ -336,6 +345,9 @@ texFlags_t R_SetupScreenView(msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &v
 	}
 
 	// setup the screen FOV
+	const auto monitorSize=renderbudget::ScaleSize(viewport.GetWidth(),viewport.GetHeight(),1,
+		renderbudget::MonitorSize(R_BudgetValue("r_monitor_size",1024)));
+	viewport.SetWidth(monitorSize.width);viewport.SetHeight(monitorSize.height);
 	if (viewport.GetWidth() == viewport.GetHeight())
 	{
 		rvp->fov_x = fov;
@@ -354,7 +366,7 @@ texFlags_t R_SetupScreenView(msurface_t *surf, ref_viewpass_t *rvp, matrix4x4 &v
 	rvp->viewangles[1] = anglemod(angles[1]);
 	rvp->viewangles[2] = anglemod(angles[2]);
 	rvp->vieworigin = origin;
-	RI->view.pvspoint = camera->origin;
+	RI->view.pvspoint = localPlayerView ? origin : camera->origin;
 
 	rvp->flags = RP_SCREENVIEW;
 	if (camera->player) {
@@ -374,10 +386,13 @@ Allocate the screen texture and make copy
 int R_AllocateSubviewTexture(const CViewport &viewport, texFlags_t texFlags)
 {
 	int	i;
+	if(viewport.GetWidth() <= 0 || viewport.GetHeight() <= 0) return 0;
 
 	// first, search for available mirror texture
 	for ( i = 0; i < tr.num_subview_used; i++ )
 	{
+		if(!tr.subviewTextures[i].texturenum.Initialized()) continue;
+		if(tr.subviewTextures[i].cachePinned) continue;
 		if( tr.subviewTextures[i].texframe == tr.realframecount )
 			continue;	// already used for this frame
 
@@ -410,12 +425,30 @@ int R_AllocateSubviewTexture(const CViewport &viewport, texFlags_t texFlags)
 			texFlags = static_cast<texFlags_t>(texFlags | TF_ARB_FLOAT | TF_ARB_16BIT);
 		}
 
-		// create new mirror texture
-		tr.subviewTextures[i].texturenum = CREATE_TEXTURE( va( "*subview%i", i ), viewport.GetWidth(), viewport.GetHeight(), NULL, texFlags ); 
-		tr.subviewTextures[i].texframe = tr.realframecount; // now used
-		if( GL_Support( R_FRAMEBUFFER_OBJECT ))
-			tr.subviewTextures[i].framebuffer = R_AllocFrameBuffer( viewport );
-		tr.num_subview_used++; // allocate new one
+		// Commit the slot only after both driver allocations and attachments work.
+		TextureHandle texture = CREATE_TEXTURE(va("*subview%i", i), viewport.GetWidth(), viewport.GetHeight(), NULL, texFlags);
+		if(!texture.Initialized()) return 0;
+		if(!texture.GetGlHandle()) { FREE_TEXTURE(texture); return 0; }
+		int framebuffer = -1;
+		if(GL_Support(R_FRAMEBUFFER_OBJECT))
+		{
+			const GLuint previous = glState.frameBuffer;
+			framebuffer = R_AllocFrameBuffer(viewport);
+			if(framebuffer < 0) { FREE_TEXTURE(texture); return 0; }
+			GL_BindFrameBuffer(framebuffer, texture);
+			if(pglCheckFramebufferStatus(GL_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT)
+			{
+				GL_BindFBO(previous);
+				R_FreeFrameBuffer(framebuffer);
+				if(framebuffer == tr.num_framebuffers - 1) --tr.num_framebuffers;
+				FREE_TEXTURE(texture);
+				return 0;
+			}
+		}
+		tr.subviewTextures[i].texturenum = texture;
+		tr.subviewTextures[i].framebuffer = framebuffer;
+		tr.subviewTextures[i].texframe = tr.realframecount;
+		tr.num_subview_used++;
 	}
 
 	if( GL_Support( R_FRAMEBUFFER_OBJECT ))
@@ -477,6 +510,9 @@ bool R_CheckScreenSource(msurface_t *surf, msurface_t *check)
 	// different fov
 	if (surf->info->parent->curstate.fuser2 != check->info->parent->curstate.fuser2)
 		return false;
+	// A camera/FOV match is insufficient when screens have different aspect ratios.
+	if(surf->texinfo->texture->width!=check->texinfo->texture->width ||
+		surf->texinfo->texture->height!=check->texinfo->texture->height) return false;
 
 	// different cameras
 	if (surf->info->parent->curstate.sequence != check->info->parent->curstate.sequence)
@@ -497,6 +533,10 @@ bool R_CheckPortalSource(msurface_t *surf, msurface_t *check)
 		return false;
 
 	if (!check->info->subtexture[glState.stack_position - 1])
+		return false;
+
+	// The source transform is part of the portal view, even for one camera.
+	if (surf->info->parent != check->info->parent)
 		return false;
 
 	// different cameras
@@ -597,6 +637,23 @@ bool R_CheckOutside( void )
 	return false;
 }
 
+static cl_entity_t *R_GetSubviewCamera( msurface_t *surf )
+{
+	if( !surf || !surf->info )
+		return NULL;
+	cl_entity_t *parent = surf->info->parent;
+	if( !parent || !parent->model || parent->curstate.messagenum != r_currentMessageNum )
+		return NULL;
+	if( FBitSet( surf->flags, SURF_REFLECT|SURF_REFLECT_PUDDLE ))
+		return parent;
+	if( parent->curstate.sequence <= 0 )
+		return NULL;
+	cl_entity_t *camera = GET_ENTITY( parent->curstate.sequence );
+	if( !camera || camera->curstate.messagenum != r_currentMessageNum )
+		return NULL;
+	return camera;
+}
+
 /*
 ================
 R_RenderSubview
@@ -608,11 +665,12 @@ remote cameras etc
 */
 void R_RenderSubview()
 {
+	pxperf::Scope cpuSubviews(pxperf::Metric::Subviews);
 	ZoneScoped;
+	R_BeginRenderBudgetFrame();
 
 	ref_instance_t *prevRI;
 	unsigned int oldFBO;
-	ref_viewpass_t rvp;
 	matrix4x4 viewmatrix;
 	bool has_mirrors = FBitSet(world->features, WORLD_HAS_MIRRORS);
 	bool has_screens = FBitSet(world->features, WORLD_HAS_SCREENS);
@@ -639,6 +697,7 @@ void R_RenderSubview()
 		return;
 
 	GL_DEBUG_SCOPE();
+	pxperf::GpuScope gpuSubviews(pxperf::Metric::GpuSubviews);
 	R_PushRefState(); // make refinst backup
 	prevRI = R_GetPrevInstance();
 
@@ -646,10 +705,21 @@ void R_RenderSubview()
 	for( int i = 0; i < prevRI->frame.num_subview_faces; i++ )
 	{
 		msurface_t *surf = prevRI->frame.subview_faces[i];
+		if( !surf || !surf->info )
+			continue;
+		// A missing/stale camera must not display the previous camera's frame.
+		surf->info->subtexture[glState.stack_position-1] = 0;
+		cl_entity_t *camera = R_GetSubviewCamera( surf );
+		if( !camera )
+		{
+			R_InvalidateBudgetSubview(surf);
+			continue;
+		}
+		ref_viewpass_t rvp = {};
+		rvp.viewentity = prevRI->view.entity;
 		cl_entity_t *e = RI->currententity = surf->info->parent;
 		mextrasurf_t *es = surf->info;
 		texFlags_t texFlags = TF_COLORMAP;
-		cl_entity_t *camera;
 		int subview = 0;
 		RI->currentmodel = e->model;
 
@@ -659,42 +729,65 @@ void R_RenderSubview()
 		ASSERT( RI->currententity != NULL );
 		ASSERT( RI->currentmodel != NULL );
 
-		if (!FBitSet(surf->flags, SURF_REFLECT | SURF_REFLECT_PUDDLE))
-		{
-			if (e->curstate.sequence <= 0)
-				continue;	// target is missed
-			camera = GET_ENTITY(e->curstate.sequence);
-		}
-		else camera = e; // mirror camera is himself
-
-		// NOTE: we can do additionaly culling here by PVS
-		if( !e || e->curstate.messagenum != r_currentMessageNum )
-			continue; // bad camera, ignore
-
 		// setup view apropriate by type
 		if (FBitSet(surf->flags, SURF_REFLECT | SURF_REFLECT_PUDDLE))
 		{
 			texFlags = R_SetupMirrorView(surf, &rvp, viewmatrix);
-			r_stats.c_mirror_passes++;
 		}
 		else if (FBitSet(surf->flags, SURF_PORTAL))
 		{
 			texFlags = R_SetupPortalView(surf, &rvp, camera);
-			r_stats.c_portal_passes++;
 		}
 		else if (FBitSet(surf->flags, SURF_SCREEN))
 		{
 			texFlags = R_SetupScreenView(surf, &rvp, viewmatrix, camera);
-			r_stats.c_screen_passes++;
 		}
 		else continue; // ???
 
 		oldFBO = glState.frameBuffer;
 		CViewport viewport = CViewport(rvp.viewport);
+		const bool screen=FBitSet(surf->flags,SURF_SCREEN);
+		const float monitorHz=renderbudget::MonitorHz(R_BudgetValue("r_monitor_hz",0));
+		const bool cacheable=(screen && monitorHz>0) ||
+			(FBitSet(surf->flags,SURF_REFLECT|SURF_REFLECT_PUDDLE) && tr.fGamePaused && R_BudgetValue("r_reflection_cache",0)>0);
+		if(!cacheable) R_InvalidateBudgetSubview(surf);
+		RenderSubviewCache *cached=cacheable ? R_FindBudgetSubview(surf) : nullptr;
+		posecache::Key cacheKey;
+		if(cached)
+		{
+			cacheKey=R_BudgetSubviewKey(surf,camera,rvp,viewmatrix,prevRI);
+			if(cacheKey.words.size()>8192) { R_InvalidateBudgetSubview(surf);cached=nullptr; }
+		}
+		if(cached && R_BudgetSubviewValid(*cached,viewport))
+		{
+			cached->seen=tr.realframecount;
+			const double phase=std::fmod(std::fabs(double(e->curstate.number)*.61803398875),1.0);
+			if(cached->stamp.Matches(cacheKey) &&
+				(!screen || !renderbudget::RefreshDue(tr.time,cached->rendered,monitorHz,phase)))
+			{
+				surf->info->subtexture[glState.stack_position-1]=cached->slot;
+				tr.subviewTextures[cached->slot-1].texframe=tr.realframecount;
+				pxperf::Get().Add(screen ? pxperf::Metric::MonitorCacheHits : pxperf::Metric::ReflectionCacheHits,1);
+				R_ResetRefState();continue;
+			}
+			subview=cached->slot;
+		}
+		else if(cached && cached->slot)
+		{
+			tr.subviewTextures[cached->slot-1].cachePinned=false;cached->slot=0;
+		}
+		if(screen) { ++r_stats.c_screen_passes;pxperf::Get().Add(pxperf::Metric::ScreenPasses,1); }
+		else if(FBitSet(surf->flags,SURF_PORTAL)) { ++r_stats.c_portal_passes;pxperf::Get().Add(pxperf::Metric::PortalPasses,1); }
+		else { ++r_stats.c_mirror_passes;pxperf::Get().Add(pxperf::Metric::MirrorPasses,1); }
 		if( GL_Support( R_FRAMEBUFFER_OBJECT ))
 		{
-			if(( subview = R_AllocateSubviewTexture(viewport, texFlags )) == 0 )
+			if(subview) GL_BindFrameBuffer(tr.subviewTextures[subview-1].framebuffer,tr.subviewTextures[subview-1].texturenum);
+			else subview=R_AllocateSubviewTexture(viewport,texFlags);
+			if(subview == 0)
+			{
+				R_ResetRefState();
 				continue;
+			}
 			R_CalcSubviewMatrix(rvp, surf, subview, viewmatrix, camera);
 		}
 
@@ -706,11 +799,23 @@ void R_RenderSubview()
 
 		if (!GL_Support(R_FRAMEBUFFER_OBJECT)) 
 		{
-			subview = R_AllocateSubviewTexture(viewport, texFlags);
-			R_CalcSubviewMatrix(rvp, surf, subview, viewmatrix, camera);
+			if(subview)
+			{
+				GL_Bind(GL_TEXTURE0,tr.subviewTextures[subview-1].texturenum);
+				pglCopyTexImage2D(GL_TEXTURE_2D,0,GL_RGB,viewport.GetX(),viewport.GetY(),viewport.GetWidth(),viewport.GetHeight(),0);
+			}
+			else subview = R_AllocateSubviewTexture(viewport, texFlags);
+			if( subview > 0 )
+				R_CalcSubviewMatrix(rvp, surf, subview, viewmatrix, camera);
 		}
 
 		surf->info->subtexture[glState.stack_position-1] = subview; // now it's valid
+		if(cached && subview>0)
+		{
+			cached->slot=subview;cached->seen=tr.realframecount;cached->rendered=tr.time;cached->stamp.Commit(cacheKey);
+			tr.subviewTextures[subview-1].cachePinned=true;
+		}
+		if(subview>0) tr.subviewTextures[subview-1].texframe=tr.realframecount;
 		GL_BindFBO( oldFBO );
 		R_ResetRefState();
 	}

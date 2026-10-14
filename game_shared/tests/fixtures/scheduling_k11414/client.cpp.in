@@ -1,0 +1,42 @@
+#include "physics_step_scheduler.h"
+static void additionalCases()
+{
+    for(int initialHz:{30,60,100}) for(int fps:{30,60,144})
+    {
+        Fixture f;sampleTime=10;f.entity.curstate.iuser1|=CF_RAGDOLL;
+        f.entity.curstate.solid=SOLID_NOT;f.entity.curstate.movetype=MOVETYPE_NONE;
+        f.entity.curstate.framerate=0;f.sequences[0].numblends=1;
+        query(f);
+        const float baseOrigin=query(f,1).GetOrigin().x;
+        std::uint32_t sequence=1;
+        g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,sequence,1,Vector(baseOrigin,0,0),Vector4D(0,0,0,1),0,nullptr,nullptr,nullptr);
+        physicsasset::PhysicsStepScheduler clock;
+        float nextSend=sampleTime;double simulated=0;float previous=query(f,1).GetOrigin().x;
+        for(int frame=1;frame<=fps*3;++frame)
+        {
+            sampleTime=10.0f+float(frame)/fps;
+            const int hz=frame<fps?initialHz:frame<fps*2?60:30;
+            const auto batch=clock.BeginFrame(1.0f/fps,float(hz),4,sampleTime,1);
+            assert(batch.droppedSeconds==0);simulated+=batch.steps*batch.stepSeconds;
+            if(sampleTime+1e-6f>=nextSend)
+            {
+                g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,++sequence,1,Vector(baseOrigin+float(simulated*40),0,0),Vector4D(0,0,0,1),0,nullptr,nullptr,nullptr);
+                nextSend=sampleTime+.05f;
+            }
+            const float displayed=query(f,1).GetOrigin().x;
+            assert(std::isfinite(displayed) && displayed+1e-4f>=previous && displayed<=baseOrigin+simulated*40+.001);
+            if(frame>fps/2) assert(displayed-previous<80.0f/fps+.01f);
+            previous=displayed;drawSame(f);
+        }
+        assert(previous>simulated*40-8);
+        auto *inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        sampleTime+=.6f;const float before=query(f,1).GetOrigin().x;
+        g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,++sequence,1,Vector(200,0,0),Vector4D(0,0,0,1),0,nullptr,nullptr,nullptr);
+        near(query(f,1).GetOrigin().x,before);assert(inst->m_flRagdollInterpDuration<=.100001f);
+        sampleTime+=.11f;near(query(f,1).GetOrigin().x,200);
+        // Duplicate packets and a late sequence cannot rewind the displayed pose.
+        g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,sequence-1,1,Vector(-100,0,0),Vector4D(0,0,0,1),0,nullptr,nullptr,nullptr);
+        near(query(f,1).GetOrigin().x,200);
+    }
+    std::cout<<"PASS actual Studio interpolation: nine 30/60/100 Hz starts at 30/60/144 display FPS, live 60/30 switches, receipt-paced active snapshots, continuous displayed pose, delayed/old packets and per-frame draw agreement\n";
+}

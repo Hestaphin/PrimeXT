@@ -1,0 +1,44 @@
+// Extra cases run inside the production CPU/prediction/draw fixture.
+static void additionalCases()
+{
+    pxperf::Get().BeginFrame(1,60,100,0);
+    sampleTime=100;Fixture f;
+    f.entity.curstate.iuser1|=CF_RAGDOLL;
+    f.entity.curstate.solid=SOLID_NOT;f.entity.curstate.movetype=MOVETYPE_NONE;
+    f.entity.curstate.framerate=0;f.sequences[0].numblends=1;
+    query(f);
+    g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,true,false,1,1,Vector(40,0,0),Vector4D(0,0,0,1),0,nullptr,nullptr,nullptr);
+    sampleTime+=.13f;const auto settled=query(f,2);
+    auto *inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);assert(inst->m_cpuSleepingModelStable);
+    pxperf::Get().EndFrame();const auto before=pxperf::Get().Stats(pxperf::Metric::BoneEvaluations).mean;
+    pxperf::Get().Reset();pxperf::Get().BeginFrame(1,60,100,0);
+    for(int i=0;i<100;++i){sampleTime+=.01f;const auto pose=query(f,2);assert(pose==settled);drawSame(f);}
+    pxperf::Get().EndFrame();assert(before>0);
+    assert(pxperf::Get().Stats(pxperf::Metric::BoneEvaluations).mean==0);
+    assert(pxperf::Get().Stats(pxperf::Metric::SleepingBoneReuses).mean>=100);
+    // Current source changes and ownership reset must leave the idle path.
+    f.entity.curstate.frame=127;sampleTime+=.01f;query(f);assert(inst->m_predictionCollisionStamp.sampleTime==sampleTime);
+    f.entity.curstate.controller[0]=180;sampleTime+=.01f;query(f);
+    f.entity.curstate.solid=SOLID_SLIDEBOX;assert(!StudioCanReuseSleepingPose(*inst,f.entity,sampleTime));
+    f.entity.curstate.solid=SOLID_NOT;f.entity.curstate.framerate=1;assert(!StudioCanReuseSleepingPose(*inst,f.entity,sampleTime));
+    f.entity.curstate.framerate=0;f.entity.curstate.gaitsequence=1;assert(!StudioCanReuseSleepingPose(*inst,f.entity,sampleTime));f.entity.curstate.gaitsequence=0;
+    inst->m_bExternalBones=true;assert(!StudioCanReuseSleepingPose(*inst,f.entity,sampleTime));inst->m_bExternalBones=false;
+    inst->m_partPoseActive[2]=true;assert(!StudioCanReuseSleepingPose(*inst,f.entity,sampleTime));inst->m_partPoseActive[2]=false;
+    inst->m_seqblend[0].blendtime=sampleTime;inst->m_seqblend[0].fadeout=.2f;assert(!StudioCanReuseSleepingPose(*inst,f.entity,sampleTime));inst->m_seqblend[0].blendtime=0;
+    const auto crc=f.model.modelCRC;++f.model.modelCRC;sampleTime+=.01f;query(f);assert(inst->m_cpuSleepingModelCRC!=crc);
+    g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,2,1,Vector(50,0,0),Vector4D(0,0,0,1),0,nullptr,nullptr,nullptr);
+    assert(!StudioCanReuseSleepingPose(*inst,f.entity,sampleTime));
+    sampleTime+=.06f;assert(query(f,1).GetOrigin().x>40); // wake interpolation remains live
+    f.entity.curstate.iuser1&=~CF_RAGDOLL;sampleTime+=.01f;query(f);assert(inst->m_bRagdollExitBlend);
+    sampleTime+=.19f;query(f);assert(!inst->m_bRagdollExitBlend);
+    // Models with live procedural/IK/autoplay work keep the normal evaluator.
+    Fixture model;assert(StudioSleepingModelStable(&model.hdr));
+    model.bones[0].flags|=BONE_JIGGLE_PROCEDURAL;assert(!StudioSleepingModelStable(&model.hdr));model.bones[0].flags=0;
+    model.sequences[0].flags|=STUDIO_AUTOPLAY;assert(!StudioSleepingModelStable(&model.hdr));model.sequences[0].flags=0;
+    model.sequences[0].flags|=STUDIO_REALTIME;assert(!StudioSleepingModelStable(&model.hdr));model.sequences[0].flags=0;
+    model.hdr.studiohdr2index=offsetof(Fixture,hdr2);model.hdr2.numikchains=1;assert(!StudioSleepingModelStable(&model.hdr));
+    model.hdr2.numikchains=0;model.hdr2.numikautoplaylocks=1;assert(!StudioSleepingModelStable(&model.hdr));
+    model.hdr2.numikautoplaylocks=0;assert(StudioSleepingModelStable(&model.hdr));
+    inst->m_predictionCollisionStamp.sampleTime=sampleTime+1;assert(!StudioCanReuseSleepingPose(*inst,f.entity,sampleTime));
+    std::cout<<"sleeping client: 100 settled frame/prediction/draw samples / 0 bone evaluations; input, blend, model, wake/exit and live-stage exclusions PASS\n";
+}

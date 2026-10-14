@@ -35,10 +35,11 @@ public:
 	matrix3x3 GetCameraOrientation() override;
 	Vector GetViewAngles() override;
 	Vector GetAutoaimVector(float delta) override;
-	Vector FireBullets(int bullets, Vector origin, matrix3x3 orientation, float distance, float spread, int bulletType, uint32_t seed, int damage = 0) override;
+	Vector FireBullets(int bullets, Vector origin, matrix3x3 orientation, float distance, float spread, int bulletType, uint32_t seed, float damage = 0) override;
 	CBasePlayerWeapon* GetWeaponEntity() override { return m_pWeapon; };
 
-	int GetPlayerAmmo(int ammoType) override;
+    int GetPlayerAmmo(int ammoType) override;
+    int FindAmmoType(const char* name) override;
 	void SetPlayerAmmo(int ammoType, int count) override;
 	void SetPlayerWeaponAnim(int anim) override;
 	void SetPlayerViewmodel(std::string_view model) override;

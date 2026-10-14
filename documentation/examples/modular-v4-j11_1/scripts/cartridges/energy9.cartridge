@@ -1,0 +1,12 @@
+version = 4
+id = energy9
+chamber = nine_mm
+projectile = fmj
+mass_grams = 8
+diameter_mm = 9
+drag_coefficient = 0.3
+reference_velocity_mps = 360
+projectile_count = 1
+attack_logic = ballistic
+damage_logic = energy_based
+damage_coefficient = 2

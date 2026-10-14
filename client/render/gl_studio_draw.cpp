@@ -16,6 +16,7 @@ GNU General Public License for more details.
 #include "hud.h"
 #include "utils.h"
 #include "gl_local.h"
+#include "performance_profile.h"
 #include "com_model.h"
 #include "r_studioint.h"
 #include "pm_movevars.h"
@@ -31,6 +32,14 @@ GNU General Public License for more details.
 #include "gl_world.h"
 #include "gl_cvars.h"
 #include "visualizer/debug_visualizer.h"
+#include <cmath>
+#include "physics_part_net.h"
+#include "physics_asset_render_coordinates.h"
+#include "studio_pose_parameters.h"
+#include "studio_physical_pose.h"
+#include "studio_sleep_cache.h"
+#include "studio_pose_diagnostics.h"
+#include <vector>
 
 #define LIGHT_INTERP_UPDATE	0.1f
 #define LIGHT_INTERP_FACTOR	(1.0f / LIGHT_INTERP_UPDATE)
@@ -78,6 +87,295 @@ StudioGetBounds
 Get bounds for a current sequence
 ================
 */
+// Capture the *source* state of completed skinning bones, not just the Studio
+// sequence. Renderer interpolation and player prediction run on different paths.
+static physicsasset::CollisionPoseState StudioCollisionPoseState(
+    const cl_entity_t *e, bool activePart, bool externalBones)
+{
+    physicsasset::CollisionPoseState state;
+    const entity_state_t &net = e->curstate;
+    state.sequence = net.sequence;
+    state.gaitSequence = net.gaitsequence;
+    state.effects = net.effects;
+    state.renderFx = net.renderfx;
+    state.scaleFlags = net.iuser1;
+    state.frame = net.frame;
+    state.animTime = net.animtime;
+    state.prevAnimTime = e->latched.prevanimtime;
+    state.frameRate = net.framerate;
+    state.gaitFrame = net.fuser1;
+    state.scale = net.scale;
+    for (int i = 0; i < 3; ++i)
+    {
+        state.renderOrigin[i] = e->origin[i];
+        state.renderAngles[i] = e->angles[i];
+        state.stateOrigin[i] = net.origin[i];
+        state.stateAngles[i] = net.angles[i];
+        state.staticScale[i] = net.startpos[i];
+        state.poseControls[i] = net.vuser1[i];
+        state.poseControls[i + 3] = net.vuser2[i];
+        state.poseControls[i + 6] = net.vuser3[i];
+        state.poseControls[i + 9] = net.vuser4[i];
+    }
+    for (int i = 0; i < 4; ++i)
+    {
+        state.blending[i] = net.blending[i];
+        state.controllers[i] = net.controller[i];
+        state.oldControllers[i] = e->latched.prevcontroller[i];
+    }
+    state.oldBlending[0] = e->latched.prevblending[0];
+    state.oldBlending[1] = e->latched.prevblending[1];
+    StudioPoseControls(e->prevstate, state.previousPoseControls.data());
+    state.mouth = e->mouth.mouthopen;
+    state.timeDependent = net.framerate != 0.0f || net.gaitsequence != 0 ||
+        net.animtime >= e->latched.prevanimtime + 0.01f ||
+        activePart || externalBones;
+    return state;
+}
+
+// Both CPU consumers select animation data from an explicit model, never RI.
+class CCollisionPredictionBoneSetup final : public CStudioBoneSetup
+{
+public:
+    explicit CCollisionPredictionBoneSetup(model_t *model) : m_model(model) {}
+    mstudioanim_t *GetAnimSourceData(mstudioseqdesc_t *seq) override
+    {
+        return m_model ? g_StudioRenderer.StudioGetAnim(m_model, seq) : nullptr;
+    }
+private:
+    model_t *m_model;
+};
+
+static mstudioseqdesc_t* StudioCpuSequence(const studiohdr_t* hdr, int sequence)
+{
+    return reinterpret_cast<mstudioseqdesc_t*>(reinterpret_cast<byte*>(const_cast<studiohdr_t*>(hdr))+hdr->seqindex)+sequence;
+}
+
+static float StudioCpuFrame(CStudioBoneSetup& setup, const cl_entity_t& e,
+    int sequence, float now, bool advance = true)
+{
+    const int frames = setup.LocalMaxFrame(sequence);
+    const auto* seq = StudioCpuSequence(setup.m_pStudioHeader,sequence);
+    float frame = frames > 1 ? e.curstate.frame*frames/256.0f : 0.0f;
+    if (advance && now >= e.curstate.animtime)
+        frame += (now-e.curstate.animtime)*e.curstate.framerate*setup.LocalFPS(sequence);
+    if (seq->flags & STUDIO_LOOPING) {
+        if (frames > 1) { frame = std::fmod(frame,float(frames)); if (frame<0) frame+=frames; }
+    } else frame = bound(0.0f,frame,float(Q_max(0,frames)));
+    return frame;
+}
+
+template<class Instance>
+static void StudioCpuAddBlend(CStudioBoneSetup& setup, Instance& inst, int oldSequence,
+    int newSequence, float previousFrame, bool gait, float now)
+{
+    if (oldSequence < 0 || oldSequence >= setup.m_pStudioHeader->numseq ||
+        newSequence < 0 || newSequence >= setup.m_pStudioHeader->numseq || oldSequence==newSequence)
+        return;
+    auto* oldSeq = StudioCpuSequence(setup.m_pStudioHeader,oldSequence);
+    auto* newSeq = StudioCpuSequence(setup.m_pStudioHeader,newSequence);
+    if (newSeq->flags & STUDIO_SNAP) return;
+    inst.m_current_seqblend = (inst.m_current_seqblend+1)&MASK_SEQBLENDS;
+    auto& blend = inst.m_seqblend[inst.m_current_seqblend];
+    blend.blendtime = now;
+    blend.sequence = oldSequence;
+    const int frames = setup.LocalMaxFrame(oldSequence);
+    blend.cycle = frames>0 ? previousFrame/frames : 0.0f;
+    blend.gaitseq = gait;
+    blend.fadeout = Q_min(oldSeq->fadeouttime/100.0f,newSeq->fadeintime/100.0f);
+    if (blend.fadeout <= 0) blend.fadeout = 0.2f;
+}
+
+static void StudioCpuGaitWeights(const studiohdr_t* hdr, float weights[MAXSTUDIOBONES])
+{
+    const auto* bones = reinterpret_cast<const mstudiobone_t*>(
+        reinterpret_cast<const byte*>(hdr)+hdr->boneindex);
+    bool lower = true;
+    for (int i=0; i<hdr->numbones; ++i) {
+        if (!Q_strcmp(bones[i].name,"Bip01 Spine")) lower=false;
+        else if (bones[i].parent>=0 && bones[i].parent<i &&
+            !Q_strcmp(bones[bones[i].parent].name,"Bip01 Pelvis")) lower=true;
+        weights[i] = lower ? 1.0f : 0.0f;
+    }
+}
+
+bool CStudioModelRenderer::StudioEvaluateCpuBones(const cl_entity_t* e, ModelInstance_t& inst,
+    const physicsasset::CollisionPoseState& state, const matrix3x4& root, float now,
+    bool sequenceBlends, bool interpolate)
+{
+    pxperf::Scope profileBones(pxperf::Metric::StudioBones);
+    if (!e || !std::isfinite(now) || !inst.m_pModel || !inst.m_pModel->cache.data) return false;
+    auto* hdr = static_cast<studiohdr_t*>(inst.m_pModel->cache.data);
+    const int count = hdr->numbones;
+    if (count<=0 || count>MAXSTUDIOBONES || e->curstate.sequence<0 || e->curstate.sequence>=hdr->numseq)
+        return false;
+    const bool compatible = m_pCvarCompatible && CVAR_TO_BOOL(m_pCvarCompatible);
+    if(inst.m_cpuSleepingModelCRC != inst.m_pModel->modelCRC)
+    {
+        inst.m_cpuSleepingModelStable = StudioSleepingModelStable(hdr);
+        inst.m_cpuSleepingModelCRC = inst.m_pModel->modelCRC;
+        inst.m_predictionCollisionStamp.valid = false;
+    }
+    // Stateful IK, jiggle and transition stages run only once for an unchanged
+    // entity/sample. Drawing consumes this same CPU result when queried first.
+    if (inst.m_predictionCollisionStamp.valid &&
+        physicsasset::CollisionPoseStateEqual(inst.m_predictionCollisionStamp.state,state) &&
+        inst.m_cpuPoseRoot==root && inst.m_cpuCompatible==compatible &&
+        inst.m_cpuSequenceBlends==sequenceBlends && interpolate &&
+        (inst.m_predictionCollisionStamp.sampleTime==now || StudioCanReuseSleepingPose(inst,*e,now)))
+    {
+        pxperf::Get().Add(pxperf::Metric::PoseCacheHits, 1);
+        if(inst.m_predictionCollisionStamp.sampleTime != now)
+        {
+            pxperf::Get().Add(pxperf::Metric::SleepingBoneReuses, 1);
+            inst.m_predictionCollisionStamp.sampleTime = now;
+        }
+        return true;
+    }
+    pxperf::Get().Add(pxperf::Metric::BoneEvaluations, 1);
+    CCollisionPredictionBoneSetup setup(inst.m_pModel);
+    setup.SetStudioPointers(hdr,inst.m_poseparameter);
+    setup.SetBoneWeights(nullptr);
+    const float dadt = StudioPoseInterpolant(*e,now,interpolate);
+    StudioPreparePoseParameters(setup,*e,dadt,inst.m_poseparameter);
+    StudioPrepareControllers(hdr,*e,dadt,inst.m_controller);
+    setup.UpdateRealTime(now);
+    auto* bones = reinterpret_cast<mstudiobone_t*>(reinterpret_cast<byte*>(hdr)+hdr->boneindex);
+    for (int i=0; i<count; ++i) if (bones[i].parent < -1 || bones[i].parent>=i) return false;
+    const int gait = e->curstate.gaitsequence>0 && e->curstate.gaitsequence<hdr->numseq
+        ? e->curstate.gaitsequence : 0;
+    if (!sequenceBlends || (e->curstate.effects&EF_NOINTERP))
+        memset(inst.m_seqblend,0,sizeof(inst.m_seqblend));
+    else {
+        if (inst.lerp.sequence != e->curstate.sequence)
+            StudioCpuAddBlend(setup,inst,inst.lerp.sequence,e->curstate.sequence,inst.lerp.frame,false,now);
+        if (inst.lerp.gaitsequence != gait)
+            StudioCpuAddBlend(setup,inst,inst.lerp.gaitsequence,gait,inst.lerp.gaitframe,true,now);
+    }
+    inst.lerp.sequence = e->curstate.sequence;
+    inst.lerp.gaitsequence = gait;
+    CIKContext* ik = nullptr;
+    const Vector origin = root.GetOrigin();
+    Vector angles = e->angles;
+    if (e->player) angles[PITCH]=0;
+    if (setup.GetNumIKChains()) {
+        if (e->curstate.effects&EF_NOINTERP) inst.m_ik.ClearTargets();
+        inst.m_ik.Init(&setup,angles,origin,now,tr.realframecount);
+        ik=&inst.m_ik;
+    }
+    float adj[MAXSTUDIOCONTROLLERS]{};
+    if (compatible) {
+        setup.CalcBoneAdj(adj,inst.m_controller,e->mouth.mouthopen);
+        setup.SetBoneControllers(adj);
+    }
+    Vector pos[MAXSTUDIOBONES];
+    Vector4D q[MAXSTUDIOBONES];
+    setup.InitPose(pos,q);
+    const int frames = setup.LocalMaxFrame(e->curstate.sequence);
+    if (frames<0) return false;
+    inst.lerp.frame = StudioCpuFrame(setup,*e,e->curstate.sequence,now,interpolate);
+    setup.AccumulatePose(ik,pos,q,e->curstate.sequence,frames>0 ? inst.lerp.frame/frames : 0.0f,1.0f);
+    float gaitWeights[MAXSTUDIOBONES];
+    StudioCpuGaitWeights(hdr,gaitWeights);
+    if (gait) {
+        const int gaitFrames = setup.LocalMaxFrame(gait);
+        float gf = 0.0f;
+        if (gaitFrames>1) {
+            if (fabsf(e->curstate.fuser1-inst.lerp.lastgaitframe)>0.001f)
+                inst.lerp.prevgaitframe=inst.lerp.lastgaitframe;
+            gf=LoopingLerp(dadt,inst.lerp.prevgaitframe/gaitFrames,e->curstate.fuser1/gaitFrames)*gaitFrames;
+            inst.lerp.lastgaitframe=e->curstate.fuser1;
+            if (StudioCpuSequence(hdr,gait)->flags&STUDIO_LOOPING) {
+                gf=std::fmod(gf,float(gaitFrames)); if(gf<0)gf+=gaitFrames;
+            } else gf=bound(0.0f,gf,Q_max(0.0f,gaitFrames-1.001f));
+        }
+        inst.lerp.gaitframe=gf;
+        setup.SetBoneWeights(gaitWeights);
+        setup.AccumulatePose(ik,pos,q,gait,gaitFrames>0 ? gf/gaitFrames : 0.0f,1.0f);
+        setup.SetBoneWeights(nullptr);
+    }
+    for (auto& blend : inst.m_seqblend) {
+        if (!blend.blendtime || blend.sequence<0 || blend.sequence>=hdr->numseq ||
+            blend.fadeout<=0 || blend.blendtime+blend.fadeout<=now) continue;
+        float weight=bound(0.0f,1.0f-(now-blend.blendtime)/blend.fadeout,1.0f);
+        weight=3*weight*weight-2*weight*weight*weight;
+        if (blend.gaitseq) setup.SetBoneWeights(gaitWeights);
+        setup.AccumulatePose(ik,pos,q,blend.sequence,blend.cycle,weight);
+        setup.SetBoneWeights(nullptr);
+    }
+    CIKContext autoIk;
+    autoIk.Init(&setup,angles,origin,0.0f,0);
+    setup.CalcAutoplaySequences(&autoIk,pos,q);
+    if (!compatible) setup.CalcBoneAdj(pos,q,inst.m_controller,e->mouth.mouthopen);
+    byte computed[MAXSTUDIOBONES]{};
+    matrix3x4* world = inst.m_predictionCollisionBones;
+    if (ik) {
+        UpdateIKLocks(ik);
+        ik->UpdateTargets(pos,q,world,computed);
+        CalculateIKLocks(ik,origin,angles);
+        ik->SolveDependencies(pos,q,world,computed);
+    }
+    if (inst.m_bExternalBones) {
+        for (int i=0; i<count; ++i) { pos[i]=inst.m_externalBonesOrigin[i]; q[i]=inst.m_externalBonesAngles[i]; }
+        if (now>inst.m_flLastExternalBonesUpdate) inst.m_bExternalBones=false;
+    }
+    const auto* info = reinterpret_cast<const mstudioboneinfo_t*>(bones+count);
+    for (int i=0; i<count; ++i) {
+        if (CalcProceduralBone(hdr,i,world)) continue;
+        const matrix3x4 local(pos[i],q[i]);
+        const matrix3x4 goal = bones[i].parent<0 ? root.ConcatTransforms(local)
+            : world[bones[i].parent].ConcatTransforms(local);
+        if ((bones[i].flags&BONE_JIGGLE_PROCEDURAL) && (hdr->flags&STUDIO_HAS_BONEINFO) &&
+            info[i].proctype==STUDIO_PROC_JIGGLE) {
+            if (!inst.m_pJiggleBones) inst.m_pJiggleBones=new CJiggleBones;
+            auto* jiggle=reinterpret_cast<mstudiojigglebone_t*>(reinterpret_cast<byte*>(hdr)+info[i].procindex);
+            inst.m_pJiggleBones->BuildJiggleTransformations(i,now,jiggle,goal,world[i]);
+        } else world[i]=goal;
+    }
+    StudioApplyRagdollPoseCpu(inst,hdr,*e,root,now,world);
+    StudioApplyPartPosesCpu(inst,hdr,*e,root,now,world);
+    inst.m_cpuPoseRoot=root;
+    inst.m_cpuCompatible=compatible;
+    inst.m_cpuSequenceBlends=sequenceBlends;
+    // Reconstruction may expire a part or finish a physics transition. Cache
+    // the resulting flags so the next consumer does not run IK/jiggle again.
+    inst.m_predictionCollisionStamp.state=StudioCollisionPoseState(e,
+        partnet::AnyActivePartPose(inst.m_partPoseActive,MAXSTUDIOBONES),
+        inst.m_bExternalBones || inst.m_bRagdollPose || inst.m_bRagdollExitBlend);
+    inst.m_predictionCollisionStamp.sampleTime=now;
+    inst.m_predictionCollisionStamp.valid=interpolate;
+    return true;
+}
+
+bool CStudioModelRenderer::StudioEvaluatePredictionBones(const cl_entity_t* e,
+    ModelInstance_t& inst, const physicsasset::CollisionPoseState& state, float now)
+{
+    Vector angles=e->angles;
+    if(e->player) angles[PITCH]=0;
+    Vector scale(1.0f);
+    if (e->curstate.iuser1&CF_STATIC_ENTITY) {
+        if(e->curstate.startpos!=g_vecZero) scale=e->curstate.startpos;
+    } else if(e->curstate.scale>0 && e->curstate.scale<=16) scale=Vector(e->curstate.scale);
+    const matrix3x4 root(e->origin,angles,scale);
+    return StudioEvaluateCpuBones(e,inst,state,root,now,e->curstate.renderfx!=kRenderFxDeadPlayer);
+}
+
+bool CStudioModelRenderer::StudioGetCollisionBonePose(const cl_entity_t* e, int bone, matrix3x4& world)
+{
+    ModelInstance_t* instance=StudioEnsureCpuInstance(const_cast<cl_entity_t*>(e));
+    if(!instance) return false;
+    ModelInstance_t& inst=*instance;
+    const auto* hdr=static_cast<const studiohdr_t*>(inst.m_pModel->cache.data);
+    if(bone<0 || bone>=hdr->numbones || bone>=MAXSTUDIOBONES) return false;
+    const float now=GET_CLIENT_TIME();
+    const auto state=StudioCollisionPoseState(e,
+        partnet::AnyActivePartPose(inst.m_partPoseActive,MAXSTUDIOBONES),
+        inst.m_bExternalBones || inst.m_bRagdollPose || inst.m_bRagdollExitBlend);
+    if(!StudioEvaluatePredictionBones(e,inst,state,now)) return false;
+    world=inst.m_predictionCollisionBones[bone];
+    return true;
+}
+
 int CStudioModelRenderer :: StudioGetBounds( cl_entity_t *e, Vector bounds[2] )
 {
 	if( !e || e->modelhandle == INVALID_HANDLE )
@@ -172,28 +470,13 @@ UpdateLatchedVars
 lerp custom values
 ================
 */
-void CStudioModelRenderer :: UpdateLatchedVars( cl_entity_t *e, qboolean reset )
+void CStudioModelRenderer::UpdateLatchedVars(cl_entity_t* e, qboolean reset)
 {
-	if( !g_fRenderInitialized ) return;
-
-	if( !StudioSetEntity( e )) return;
-
-	// store old values to right lerping from
-	m_pModelInstance->m_oldposeparams[0] = e->prevstate.vuser1[0];
-	m_pModelInstance->m_oldposeparams[1] = e->prevstate.vuser1[1];
-	m_pModelInstance->m_oldposeparams[2] = e->prevstate.vuser1[2];
-
-	m_pModelInstance->m_oldposeparams[3] = e->prevstate.vuser2[0];
-	m_pModelInstance->m_oldposeparams[4] = e->prevstate.vuser2[1];
-	m_pModelInstance->m_oldposeparams[5] = e->prevstate.vuser2[2];
-
-	m_pModelInstance->m_oldposeparams[6] = e->prevstate.vuser3[0];
-	m_pModelInstance->m_oldposeparams[7] = e->prevstate.vuser3[1];
-	m_pModelInstance->m_oldposeparams[8] = e->prevstate.vuser3[2];
-
-	m_pModelInstance->m_oldposeparams[ 9] = e->prevstate.vuser4[0];
-	m_pModelInstance->m_oldposeparams[10] = e->prevstate.vuser4[1];
-	m_pModelInstance->m_oldposeparams[11] = e->prevstate.vuser4[2];
+    ModelInstance_t* inst = StudioEnsureCpuInstance(e, nullptr, reset != 0);
+    if (!inst) return;
+    StudioPoseControls(e->prevstate, inst->m_oldposeparams);
+    inst->m_collisionPoseStamp.valid = false;
+    inst->m_predictionCollisionStamp.valid = false;
 }
 
 /*
@@ -215,7 +498,7 @@ int CStudioModelRenderer :: StudioComputeBBox( void )
 	if( !StudioExtractBbox( m_pStudioHeader, sequence, mins, maxs ))
 		return false;
 
-	if (m_pModelInstance->m_bExternalBones)
+	if (m_pModelInstance->m_bExternalBones || m_pModelInstance->m_bRagdollPose || m_pModelInstance->m_bRagdollExitBlend)
 	{
 		mins = RI->currententity->curstate.mins;
 		maxs = RI->currententity->curstate.maxs;
@@ -422,37 +705,7 @@ void CStudioModelRenderer :: StudioSetUpTransform( void )
 		e->curstate.body = Q_min( lodnum, numLods - 1 );
 	}
 
-	if( e->curstate.renderfx != kRenderFxDeadPlayer )
-	{
-		int	gaitsequence = 0;
-
-		// don't rotate clients, only aim
-		if( e->player ) angles[PITCH] = 0.0f;
-
-		if( e->curstate.gaitsequence != m_pModelInstance->lerp.gaitsequence )
-		{
-			AddBlendSequence( m_pModelInstance->lerp.gaitsequence, e->curstate.gaitsequence, m_pModelInstance->lerp.gaitframe, true );
-			m_pModelInstance->lerp.gaitsequence = e->curstate.gaitsequence;
-		}
-	}
-
-	if( FBitSet( RI->currententity->curstate.effects, EF_NOINTERP ) || ( tr.realframecount - m_pModelInstance->cached_frame ) > 1 )
-	{
-		m_pModelInstance->lerp.sequence = RI->currententity->curstate.sequence;
-	}
-	else if( RI->currententity->curstate.sequence != m_pModelInstance->lerp.sequence )
-	{
-		AddBlendSequence( m_pModelInstance->lerp.sequence, RI->currententity->curstate.sequence, m_pModelInstance->lerp.frame );
-		m_pModelInstance->lerp.sequence = RI->currententity->curstate.sequence;
-	}
-
-	// store prevseqblending manually, engine doesn't it
-	e->latched.prevseqblending[0] = e->curstate.blending[0];
-	e->latched.prevseqblending[1] = e->curstate.blending[1];
-
-	// don't blend sequences for a dead player or a viewmodel, faceprotect
-	if( m_iDrawModelType > DRAWSTUDIO_NORMAL || RI->currententity->curstate.renderfx == kRenderFxDeadPlayer )
-		memset( &m_pModelInstance->m_seqblend, 0, sizeof( m_pModelInstance->m_seqblend ));
+    if (e->player) angles[PITCH] = 0.0f;
 
 	if( RI->currententity->curstate.iuser1 & CF_STATIC_ENTITY )
 	{
@@ -610,32 +863,9 @@ StudioInterpolatePoseParams
 
 ====================
 */
-void CStudioModelRenderer :: StudioInterpolatePoseParams( cl_entity_t *e, float dadt )
+void CStudioModelRenderer::StudioInterpolatePoseParams(cl_entity_t* e, float dadt)
 {
-	if( !m_boneSetup.CountPoseParameters( ))
-	{
-		// interpolate blends
-		m_pModelInstance->m_poseparameter[0] = (e->curstate.blending[0] * dadt + e->latched.prevblending[0] * (1.0f - dadt)) / 255.0f;
-		m_pModelInstance->m_poseparameter[1] = (e->curstate.blending[1] * dadt + e->latched.prevblending[1] * (1.0f - dadt)) / 255.0f;
-	}
-	else
-	{
-		m_pModelInstance->m_poseparameter[0] = (e->curstate.vuser1[0] * dadt + m_pModelInstance->m_oldposeparams[0] * (1.0f - dadt));
-		m_pModelInstance->m_poseparameter[1] = (e->curstate.vuser1[1] * dadt + m_pModelInstance->m_oldposeparams[1] * (1.0f - dadt));
-		m_pModelInstance->m_poseparameter[2] = (e->curstate.vuser1[2] * dadt + m_pModelInstance->m_oldposeparams[2] * (1.0f - dadt));
-
-		m_pModelInstance->m_poseparameter[3] = (e->curstate.vuser2[0] * dadt + m_pModelInstance->m_oldposeparams[3] * (1.0f - dadt));
-		m_pModelInstance->m_poseparameter[4] = (e->curstate.vuser2[1] * dadt + m_pModelInstance->m_oldposeparams[4] * (1.0f - dadt));
-		m_pModelInstance->m_poseparameter[5] = (e->curstate.vuser2[2] * dadt + m_pModelInstance->m_oldposeparams[5] * (1.0f - dadt));
-
-		m_pModelInstance->m_poseparameter[6] = (e->curstate.vuser3[0] * dadt + m_pModelInstance->m_oldposeparams[6] * (1.0f - dadt));
-		m_pModelInstance->m_poseparameter[7] = (e->curstate.vuser3[1] * dadt + m_pModelInstance->m_oldposeparams[7] * (1.0f - dadt));
-		m_pModelInstance->m_poseparameter[8] = (e->curstate.vuser3[2] * dadt + m_pModelInstance->m_oldposeparams[8] * (1.0f - dadt));
-
-		m_pModelInstance->m_poseparameter[ 9] = (e->curstate.vuser4[0] * dadt + m_pModelInstance->m_oldposeparams[ 9] * (1.0f - dadt));
-		m_pModelInstance->m_poseparameter[10] = (e->curstate.vuser4[1] * dadt + m_pModelInstance->m_oldposeparams[10] * (1.0f - dadt));
-		m_pModelInstance->m_poseparameter[11] = (e->curstate.vuser4[2] * dadt + m_pModelInstance->m_oldposeparams[11] * (1.0f - dadt));
-	}
+    StudioPreparePoseParameters(m_boneSetup, *e, dadt, m_pModelInstance->m_poseparameter);
 }
 
 /*
@@ -644,39 +874,9 @@ StudioInterpolateControllers
 
 ====================
 */
-void CStudioModelRenderer :: StudioInterpolateControllers( cl_entity_t *e, float dadt )
+void CStudioModelRenderer::StudioInterpolateControllers(cl_entity_t* e, float dadt)
 {
-	mstudiobonecontroller_t *pbonecontroller = (mstudiobonecontroller_t *)((byte *)m_pStudioHeader + m_pStudioHeader->bonecontrollerindex);
-
-	// interpolate controllers
-	for( int j = 0; j < m_pStudioHeader->numbonecontrollers; j++ )
-	{
-		int i = pbonecontroller[j].index;
-		float value;
-
-		if( i <= 3 )
-		{
-			// check for 360% wrapping
-			if( FBitSet( pbonecontroller[j].type, STUDIO_RLOOP ))
-			{
-				if( abs( e->curstate.controller[i] - e->latched.prevcontroller[i] ) > 128 )
-				{
-					int a = (e->curstate.controller[j] + 128) % 256;
-					int b = (e->latched.prevcontroller[j] + 128) % 256;
-					value = ((a * dadt) + (b * (1.0f - dadt)) - 128);
-				}
-				else 
-				{
-					value = ((e->curstate.controller[i] * dadt + (e->latched.prevcontroller[i]) * (1.0f - dadt)));
-				}
-			}
-			else 
-			{
-				value = (e->curstate.controller[i] * dadt + e->latched.prevcontroller[i] * (1.0 - dadt));
-			}
-			m_pModelInstance->m_controller[i] = bound( 0, Q_rint( value ), 255 );
-		}
-	}
+    StudioPrepareControllers(m_pStudioHeader, *e, dadt, m_pModelInstance->m_controller);
 }
 
 /*
@@ -690,10 +890,13 @@ mstudioanim_t *CStudioModelRenderer :: StudioGetAnim( model_t *pModel, mstudiose
 	mstudioseqgroup_t *pseqgroup;
 	cache_user_t *paSequences;
 
-	pseqgroup = (mstudioseqgroup_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqgroupindex) + pseqdesc->seqgroup;
+	studiohdr_t *sourceHeader = pModel && pModel->cache.data
+        ? static_cast<studiohdr_t *>(pModel->cache.data) : nullptr;
+    if (!sourceHeader) return nullptr;
+    pseqgroup = (mstudioseqgroup_t *)((byte *)sourceHeader + sourceHeader->seqgroupindex) + pseqdesc->seqgroup;
 
 	if( pseqdesc->seqgroup == 0 )
-		return (mstudioanim_t *)((byte *)m_pStudioHeader + pseqgroup->data + pseqdesc->animindex);
+		return (mstudioanim_t *)((byte *)sourceHeader + pseqgroup->data + pseqdesc->animindex);
 
 	paSequences = (cache_user_t *)pModel->submodels;
 
@@ -844,7 +1047,7 @@ void CStudioModelRenderer :: UpdateIKLocks( CIKContext *pIK )
 //-----------------------------------------------------------------------------
 // Purpose: Find the ground or external attachment points needed by IK rules
 //-----------------------------------------------------------------------------
-void CStudioModelRenderer :: CalculateIKLocks( CIKContext *pIK )
+void CStudioModelRenderer::CalculateIKLocks(CIKContext* pIK, const Vector& origin, const Vector& angles)
 {
 	if( !pIK ) return;
 
@@ -875,9 +1078,9 @@ void CStudioModelRenderer :: CalculateIKLocks( CIKContext *pIK )
 				Vector p1, p2;
 
 				// adjust ground to original ground position
-				estGround = (pTarget->est.pos - StudioGetOrigin());
+				estGround = (pTarget->est.pos - origin);
 				estGround = estGround - (estGround * up) * up;
-				estGround = StudioGetOrigin() + estGround + pTarget->est.floor * up;
+				estGround = origin + estGround + pTarget->est.floor * up;
 
 				p1 = estGround + up * pTarget->est.height;
 				p2 = estGround - up * pTarget->est.height;
@@ -1095,33 +1298,24 @@ bool CStudioModelRenderer :: CheckBoneCache( float f )
 		inst->light_update = true;
 	}
 
-	// can't use cache if jiggle bones enabled, because it need to be updated every frame
-	if (inst->m_pJiggleBones) {
-		return false;
-	}
-
-	// external bones also need to be updated every frame
-	if (m_pModelInstance->m_bExternalBones) {
-		return false; 
-	}
-
-	// no cache for local player
-	if( RP_LOCALCLIENT( RI->currententity ) && !FBitSet( RI->params, RP_THIRDPERSON ))
-		return false;
+	// Cache eligibility must not skip transform/reflection bookkeeping. The
+	// shared CPU evaluator still needs a fresh GL transform for these poses.
+	const bool canCache = !inst->m_pJiggleBones &&
+		!partnet::AnyActivePartPose(inst->m_partPoseActive, MAXSTUDIOBONES) &&
+		!inst->m_bExternalBones && !inst->m_bRagdollPose && !inst->m_bRagdollExitBlend &&
+		!( RP_LOCALCLIENT( e ) && !FBitSet( RI->params, RP_THIRDPERSON ));
 
 	bool pos_valid = (cache->transform == inst->m_protationmatrix) ? true : false;
 	bool param_valid = !memcmp( cache->poseparam, inst->m_poseparameter, sizeof( float ) * MAXSTUDIOPOSEPARAM );
 
 	// make sure what all cached values are unchanged
-	if( cache->frame == f && cache->sequence == e->curstate.sequence && pos_valid && !memcmp( cache->blending, e->curstate.blending, 2 )
-	&& !memcmp( cache->controller, e->curstate.controller, 4 ) && cache->mouthopen == e->mouth.mouthopen && param_valid )
-	{
-		if( cache->gaitsequence == e->curstate.gaitsequence && cache->gaitframe == e->curstate.fuser1 )
-			return true;
-	}
+	const bool cacheHit = canCache && cache->frame == f && cache->sequence == e->curstate.sequence &&
+		pos_valid && !memcmp( cache->blending, e->curstate.blending, 2 ) &&
+		!memcmp( cache->controller, e->curstate.controller, 4 ) && cache->mouthopen == e->mouth.mouthopen &&
+		param_valid && cache->gaitsequence == e->curstate.gaitsequence && cache->gaitframe == e->curstate.fuser1;
 
 	// time to check cubemaps
-	if( cache->transform.GetOrigin() != inst->m_protationmatrix.GetOrigin() )
+	if( !inst->m_cubemapInitialized || cache->transform.GetOrigin() != inst->m_protationmatrix.GetOrigin() )
 	{
 		// search for center of bbox
 		Vector pos = ( inst->absmin + inst->absmax ) * 0.5f;
@@ -1129,7 +1323,9 @@ bool CStudioModelRenderer :: CheckBoneCache( float f )
 
 		float dist0 = ( inst->cubemap[0]->origin - pos ).Length();
 		float dist1 = ( inst->cubemap[1]->origin - pos ).Length();
-		inst->lerpFactor = dist0 / (dist0 + dist1);
+		const float distance = dist0 + dist1;
+		inst->lerpFactor = distance > 0.0f ? dist0 / distance : 0.0f;
+		inst->m_cubemapInitialized = true;
 	}
 
 	// save rotationmatrix to GL-style array
@@ -1146,37 +1342,298 @@ bool CStudioModelRenderer :: CheckBoneCache( float f )
 	cache->gaitsequence = e->curstate.gaitsequence;
 	cache->gaitframe = e->curstate.fuser1;
 
-	return false;
+	return cacheHit;
 }
 
 void CStudioModelRenderer :: StudioSetBonesExternal( const cl_entity_t *ent, const Vector pos[], const Radian ang[] )
 {
-	RI->currententity = (cl_entity_t *)ent;
-	RI->currentmodel = ent->model;
+    ModelInstance_t* inst=StudioEnsureCpuInstance(const_cast<cl_entity_t*>(ent));
+    if(!inst) return;
+    auto* hdr=static_cast<studiohdr_t*>(inst->m_pModel->cache.data);
 
-	if (!RI->currentmodel)
-		return;
-
-	// setup global pointers
-	m_pStudioHeader = (studiohdr_t *)IEngineStudio.Mod_Extradata(RI->currentmodel);
-
-	// aliasmodel instead of studio?
-	if (!m_pStudioHeader)
-		return;
-
-	if (RI->currententity->modelhandle == INVALID_HANDLE)
-		return; // out of memory ?
-
-	m_pModelInstance = &m_ModelInstances[RI->currententity->modelhandle];
-
-	for (int i = 0; i < m_pStudioHeader->numbones; i++)
+	for (int i = 0; i < hdr->numbones; i++)
 	{
-		m_pModelInstance->m_externalBonesAngles[i] = ang[i];
-		m_pModelInstance->m_externalBonesOrigin[i] = pos[i];
+		inst->m_externalBonesAngles[i] = ang[i];
+		inst->m_externalBonesOrigin[i] = pos[i];
 	}
 
-	m_pModelInstance->m_flLastExternalBonesUpdate = tr.time + 0.1f;
-	m_pModelInstance->m_bExternalBones = true;
+	inst->m_flLastExternalBonesUpdate = GET_CLIENT_TIME() + 0.1f;
+	inst->m_bExternalBones = true;
+	inst->m_collisionPoseStamp.valid = false;
+    inst->m_predictionCollisionStamp.valid = false;
+}
+
+static bool RagdollSequenceNewer( uint32_t incoming, uint32_t current )
+{
+	return static_cast<int32_t>( incoming - current ) > 0;
+}
+
+static bool NormalizeRagdollQuat( Vector4D &q )
+{
+	if( !std::isfinite( q.x ) || !std::isfinite( q.y ) || !std::isfinite( q.z ) || !std::isfinite( q.w ))
+		return false;
+	const float lenSq = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+	if( !std::isfinite( lenSq ) || lenSq <= 1e-12f ) return false;
+	const float invLen = 1.0f / sqrtf( lenSq );
+	q.x *= invLen; q.y *= invLen; q.z *= invLen; q.w *= invLen;
+	return true;
+}
+
+void CStudioModelRenderer :: StudioSetRagdollPose( const cl_entity_t *ent, bool clear, bool sleeping, bool frozen, uint32_t sequence, int rootBone, const Vector &rootPos, const Vector4D &rootQuat, int boneCount, const byte boneIndex[], const Vector relPos[], const Vector4D relQuat[] )
+{
+    ModelInstance_t* inst=StudioEnsureCpuInstance(const_cast<cl_entity_t*>(ent));
+    if(!inst) return;
+    auto* hdr=static_cast<studiohdr_t*>(inst->m_pModel->cache.data);
+
+	// Full snapshots are sequenced globally by the server. Ignore duplicates and
+	// late packets, but always accept the first state attached to a fresh model
+	// instance (sequence 0 means "none seen yet").
+	if( sequence == 0 || (inst->m_iRagdollSnapshotSequence != 0 &&
+		!RagdollSequenceNewer( sequence, inst->m_iRagdollSnapshotSequence )))
+		return;
+
+	const int studioBoneCount = Q_min( hdr->numbones, MAXSTUDIOBONES );
+	bool newMask[MAXSTUDIOBONES] = { false };
+	Vector newRelPos[MAXSTUDIOBONES];
+	Vector4D newRelQuat[MAXSTUDIOBONES];
+	Vector4D normalizedRoot = rootQuat;
+	if( !clear )
+	{
+		if( rootBone < 0 || rootBone >= studioBoneCount || boneCount < 0 || boneCount >= MAXSTUDIOBONES ) return;
+		if( boneCount > 0 && (!boneIndex || !relPos || !relQuat) ) return;
+		if( !std::isfinite( rootPos.x ) || !std::isfinite( rootPos.y ) || !std::isfinite( rootPos.z )) return;
+		if( !NormalizeRagdollQuat( normalizedRoot )) return;
+
+		// Validate/decode before evaluation, which can advance physical ownership.
+		// A corrupt record must leave the complete previous snapshot untouched.
+		newMask[rootBone] = true;
+		for( int i = 0; i < boneCount; ++i )
+		{
+			const int bone = boneIndex[i];
+			if( bone < 0 || bone >= studioBoneCount || bone == rootBone || newMask[bone] ) return;
+			if( !std::isfinite( relPos[i].x ) || !std::isfinite( relPos[i].y ) || !std::isfinite( relPos[i].z )) return;
+			Vector4D q = relQuat[i];
+			if( !NormalizeRagdollQuat( q )) return;
+			newMask[bone] = true;
+			newRelPos[bone] = relPos[i];
+			newRelQuat[bone] = q;
+		}
+	}
+
+	const float now = GET_CLIENT_TIME();
+	if( !std::isfinite(now) ) return;
+    const auto previousState=StudioCollisionPoseState(ent,
+        partnet::AnyActivePartPose(inst->m_partPoseActive,MAXSTUDIOBONES),
+        inst->m_bExternalBones || inst->m_bRagdollPose || inst->m_bRagdollExitBlend);
+    const bool captured=StudioEvaluatePredictionBones(ent,*inst,previousState,now);
+    inst->m_collisionPoseStamp.valid = false;
+    inst->m_predictionCollisionStamp.valid = false;
+	if( clear )
+	{
+		StudioBeginRagdollExit(*inst,now);
+		inst->m_iRagdollSnapshotSequence=sequence;
+		inst->m_flRagdollLastSnapshotTime=now;
+		return;
+	}
+	const bool hadPose = inst->m_bRagdollPose && inst->m_iRagdollRootBone >= 0;
+	const bool compatiblePose = hadPose && inst->m_iRagdollRootBone == rootBone;
+	if( !compatiblePose ) inst->m_bRagdollEntryBlendPending = true;
+	float alpha = 1.0f;
+	if( compatiblePose && inst->m_flRagdollInterpDuration > 1e-6f )
+		alpha = bound( 0.0f, ( now - inst->m_flRagdollInterpStartTime ) / inst->m_flRagdollInterpDuration, 1.0f );
+
+	Vector currentRoot = rootPos;
+	Vector4D currentRootQ = normalizedRoot;
+	if( compatiblePose )
+	{
+		currentRoot = inst->m_ragdollStartRootOrigin * ( 1.0f - alpha ) + inst->m_ragdollTargetRootOrigin * alpha;
+		QuaternionSlerp( inst->m_ragdollStartRootQuat, inst->m_ragdollTargetRootQuat, alpha, currentRootQ );
+	}
+
+	const float receiveInterval = compatiblePose ? now - inst->m_flRagdollLastSnapshotTime : 0.0f;
+	float interpDuration = 0.0f;
+	if( compatiblePose )
+	{
+		// Active server snapshots target 20 Hz. Clamp around that cadence so one
+		// delayed/lost packet cannot make a corpse spend a full second catching up.
+		float targetDuration = bound( 0.03f, receiveInterval, 0.10f );
+		if( inst->m_bRagdollSleeping && !sleeping )
+			targetDuration = 0.05f; // wake immediately into the normal active cadence
+		if( inst->m_flRagdollInterpDuration > 1e-6f && !inst->m_bRagdollSleeping )
+			targetDuration = 0.5f * inst->m_flRagdollInterpDuration + 0.5f * targetDuration;
+		interpDuration = targetDuration;
+		if( sleeping && inst->m_bRagdollSleeping ) interpDuration = 0.0f;
+		if( frozen ) interpDuration = 0.0f;
+	}
+
+	inst->m_ragdollStartRootOrigin = currentRoot;
+	inst->m_ragdollStartRootQuat = currentRootQ;
+	inst->m_ragdollTargetRootOrigin = rootPos;
+	inst->m_ragdollTargetRootQuat = normalizedRoot;
+
+	for( int bone = 0; bone < studioBoneCount; ++bone )
+	{
+		if( !newMask[bone] ) continue;
+		if( bone == rootBone ) continue;
+
+		if( compatiblePose && inst->m_ragdollBoneMask[bone] )
+		{
+			inst->m_ragdollStartRelOrigin[bone] =
+				inst->m_ragdollStartRelOrigin[bone] * ( 1.0f - alpha ) +
+				inst->m_ragdollTargetRelOrigin[bone] * alpha;
+			QuaternionSlerp( inst->m_ragdollStartRelQuat[bone], inst->m_ragdollTargetRelQuat[bone], alpha, inst->m_ragdollStartRelQuat[bone] );
+		}
+        else if(compatiblePose && captured)
+        {
+            // A newly driven bone starts at its displayed passive pose.
+            const matrix3x4 inverse=matrix3x4(currentRoot,currentRootQ).Invert();
+            matrix3x4 relative=inverse.ConcatTransforms(
+                physicsasset::StudioUnitWorldBone(inst->m_predictionCollisionBones[bone]));
+            relative.GetOrigin(inst->m_ragdollStartRelOrigin[bone]);
+            inst->m_ragdollStartRelQuat[bone]=relative.GetQuaternion();
+        }
+		else
+		{
+			inst->m_ragdollStartRelOrigin[bone] = newRelPos[bone];
+			inst->m_ragdollStartRelQuat[bone] = newRelQuat[bone];
+		}
+		inst->m_ragdollTargetRelOrigin[bone] = newRelPos[bone];
+		inst->m_ragdollTargetRelQuat[bone] = newRelQuat[bone];
+	}
+
+	memcpy( inst->m_ragdollBoneMask, newMask, sizeof( newMask ));
+	inst->m_iRagdollRootBone = rootBone;
+	inst->m_iRagdollSnapshotSequence = sequence;
+	inst->m_bRagdollSleeping = sleeping;
+	inst->m_bRagdollFrozen = frozen;
+	inst->m_bRagdollExitBlend = false;
+	inst->m_flRagdollLastSnapshotTime = now;
+	inst->m_flRagdollInterpStartTime = now;
+	inst->m_flRagdollInterpDuration = interpDuration;
+	inst->m_bRagdollPose = true;
+    if (inst->m_bRagdollEntryBlendPending && captured) {
+        matrix3x4 from=inst->m_predictionCollisionBones[rootBone];
+        from.GetOrigin(inst->m_ragdollStartRootOrigin);
+        inst->m_ragdollStartRootQuat=physicsasset::StudioUnitWorldBone(from).GetQuaternion();
+        const matrix3x4 inverse=physicsasset::StudioUnitWorldBone(from).Invert();
+        for(int i=0;i<studioBoneCount;++i) {
+            if(i==rootBone || !newMask[i]) continue;
+            matrix3x4 relative=inverse.ConcatTransforms(physicsasset::StudioUnitWorldBone(inst->m_predictionCollisionBones[i]));
+            relative.GetOrigin(inst->m_ragdollStartRelOrigin[i]);
+            inst->m_ragdollStartRelQuat[i]=relative.GetQuaternion();
+        }
+        inst->m_flRagdollInterpStartTime=now;
+        inst->m_flRagdollInterpDuration=0.12f;
+        inst->m_bRagdollEntryBlendPending=false;
+    }
+}
+
+void CStudioModelRenderer::StudioSetPartPose(const cl_entity_t *ent,int bone,bool clear,bool detached,
+    uint32_t sequence,const Vector &position,const Vector4D &rotation)
+{
+    ModelInstance_t* inst=StudioEnsureCpuInstance(const_cast<cl_entity_t*>(ent));
+    if(!inst) return;
+    auto* hdr=static_cast<studiohdr_t*>(inst->m_pModel->cache.data);
+    if(bone<0 || bone>=hdr->numbones || bone>=MAXSTUDIOBONES) return;
+
+    if (!partnet::Newer(sequence,inst->m_partPoseSequence[bone])) return;
+    Vector4D normalized=rotation;
+    if (!clear && (!NormalizeRagdollQuat(normalized) || !std::isfinite(position.x) ||
+        !std::isfinite(position.y) || !std::isfinite(position.z))) return;
+    const float now=GET_CLIENT_TIME();
+    if (!std::isfinite(now)) return;
+    const auto previousState=StudioCollisionPoseState(ent,
+        partnet::AnyActivePartPose(inst->m_partPoseActive,MAXSTUDIOBONES),
+        inst->m_bExternalBones || inst->m_bRagdollPose || inst->m_bRagdollExitBlend);
+    const bool captured=StudioEvaluatePredictionBones(ent,*inst,previousState,now);
+    inst->m_collisionPoseStamp.valid = false;
+    inst->m_predictionCollisionStamp.valid = false;
+    inst->m_partPoseSequence[bone]=sequence;
+    const float previousReceived=inst->m_partPoseReceived[bone];
+    inst->m_partPoseReceived[bone]=now;
+    if (clear) {
+        inst->m_partPoseActive[bone]=false;
+        inst->m_partPosePending[bone]=false;
+    } else {
+        Vector4D q=normalized;
+        const bool old=inst->m_partPoseActive[bone] &&
+            partnet::PartPoseFresh(now, previousReceived);
+        inst->m_partPoseActive[bone]=true;
+        inst->m_partPoseDetached[bone]=detached;
+        // Capture the current shared CPU pose at receipt; later packets continue
+        // from the interpolated part rather than jumping back to its target.
+        if (old && !inst->m_partPosePending[bone]) {
+            const float alpha=bound(0.0f,(now-inst->m_partPoseStartTime[bone])/
+                Q_max(0.001f,inst->m_partPoseDuration[bone]),1.0f);
+            inst->m_partPoseStartPos[bone]=inst->m_partPoseStartPos[bone]*(1-alpha)+
+                inst->m_partPoseTargetPos[bone]*alpha;
+            Vector4D from=inst->m_partPoseStartQuat[bone];
+            QuaternionSlerp(from,inst->m_partPoseTargetQuat[bone],alpha,
+                inst->m_partPoseStartQuat[bone]);
+        } else {
+            inst->m_partPosePending[bone]=!captured;
+            if(captured) {
+                inst->m_predictionCollisionBones[bone].GetOrigin(inst->m_partPoseStartPos[bone]);
+                inst->m_partPoseStartQuat[bone]=physicsasset::StudioUnitWorldBone(inst->m_predictionCollisionBones[bone]).GetQuaternion();
+            }
+        }
+        inst->m_partPoseStartTime[bone]=now;
+        inst->m_partPoseDuration[bone]=old ? 0.05f : 0.12f;
+        inst->m_partPoseTargetPos[bone]=position;
+        inst->m_partPoseTargetQuat[bone]=q;
+    }
+    inst->cached_frame=-1;
+    inst->bonecache.frame=-999999.0f;
+}
+
+void CStudioModelRenderer::StudioApplyPartPoses( void )
+{
+    if (!m_pModelInstance || !m_pStudioHeader) return;
+    StudioApplyPartPosesCpu(*m_pModelInstance, m_pStudioHeader, *RI->currententity,
+        m_pModelInstance->m_protationmatrix, GET_CLIENT_TIME(), m_pModelInstance->m_pbones);
+}
+
+void CStudioModelRenderer :: StudioApplyRagdollPose( void )
+{
+    if (!m_pModelInstance || !m_pStudioHeader) return;
+    const float now = GET_CLIENT_TIME();
+    const float mode = cl_ragdoll_diagnostics ? cl_ragdoll_diagnostics->value : 0;
+    const int count = Q_min(m_pStudioHeader->numbones,MAXSTUDIOBONES);
+    const int rootBone = m_pModelInstance->m_iRagdollRootBone;
+    const bool diagnose = std::isfinite(mode) && mode > 0 && m_pModelInstance->m_bRagdollPose &&
+        rootBone >= 0 && rootBone < count && (mode >= 2 || now >= m_pModelInstance->m_flRagdollDiagnosticsNextTime ||
+        now < m_pModelInstance->m_flRagdollDiagnosticsNextTime-1.0f);
+    std::vector<matrix3x4> animated;
+    if(diagnose) animated.assign(m_pModelInstance->m_pbones,m_pModelInstance->m_pbones+count);
+    StudioApplyRagdollPoseCpu(*m_pModelInstance, m_pStudioHeader, *RI->currententity,
+        m_pModelInstance->m_protationmatrix, now, m_pModelInstance->m_pbones);
+    if(diagnose)
+    {
+        // Compare against the most recent endpoint. A moving corpse's driven
+        // delta includes intended network interpolation/entry blending; the
+        // descendant/ancestor link deltas are separate reconstruction metrics.
+        std::vector<matrix3x4> targets(count);
+        const float scale = physicsasset::StudioPhysicalRenderScale(m_pModelInstance->m_protationmatrix);
+        const matrix3x4 root(m_pModelInstance->m_ragdollTargetRootOrigin,m_pModelInstance->m_ragdollTargetRootQuat);
+        targets[rootBone] = physicsasset::StudioScaledWorldBone(m_pModelInstance->m_ragdollTargetRootOrigin,
+            m_pModelInstance->m_ragdollTargetRootQuat,scale);
+        for(int i = 0; i < count; ++i)
+        {
+            if(i == rootBone || !m_pModelInstance->m_ragdollBoneMask[i]) continue;
+            matrix3x4 target = root.ConcatTransforms(matrix3x4(m_pModelInstance->m_ragdollTargetRelOrigin[i],
+                m_pModelInstance->m_ragdollTargetRelQuat[i]));
+            targets[i] = physicsasset::StudioScaledWorldBone(target.GetOrigin(),target.GetQuaternion(),scale);
+        }
+        const auto *bones = reinterpret_cast<const mstudiobone_t *>(reinterpret_cast<const byte *>(m_pStudioHeader)+m_pStudioHeader->boneindex);
+        const auto pose = ragdolldiag::MeasureStudioPose(count,bones,animated.data(),m_pModelInstance->m_pbones,
+            m_pModelInstance->m_ragdollBoneMask,targets.data(),rootBone);
+        ALERT(at_console,"[ragdoll_f0_pose] ent=%d time=%.6g seq=%u bones=%u invalid=%u driven_pos=%.6g driven_deg=%.6g child_pos=%.6g child_deg=%.6g ancestor_pos=%.6g ancestor_deg=%.6g edge_delta=%.6g worst_body=%d worst_child=%d worst_ancestor=%d worst_edge=%d\n",
+            RI->currententity->index,now,m_pModelInstance->m_iRagdollSnapshotSequence,pose.bones,
+            pose.invalidBones+pose.invalidComparisons+pose.invalidParents,pose.drivenPositionDelta,pose.drivenAngleDelta,
+            pose.descendantPositionDelta,pose.descendantAngleDelta,pose.ancestorPositionDelta,pose.ancestorAngleDelta,
+            pose.edgeLengthDelta,pose.worstDrivenBone,pose.worstDescendantBone,pose.worstAncestorBone,pose.worstEdgeBone);
+        m_pModelInstance->m_flRagdollDiagnosticsNextTime = now+(mode >= 2 ? 0.0f : 1.0f);
+    }
 }
 
 void CStudioModelRenderer :: StudioCalcBonesExternal( Vector pos[], Vector4D q[] )
@@ -1202,162 +1659,22 @@ StudioSetupBones
 
 ====================
 */
-void CStudioModelRenderer :: StudioSetupBones( void )
+void CStudioModelRenderer::StudioSetupBones(void)
 {
-	float		adj[MAXSTUDIOCONTROLLERS];
-	cl_entity_t	*e = RI->currententity;	// for more readability
-	CIKContext	*pIK = NULL;
-	mstudioboneinfo_t	*pboneinfo;
-	mstudioseqdesc_t	*pseqdesc;
-	matrix3x4		bonematrix;
-	mstudiobone_t	*pbones;
-
-	static Vector	pos[MAXSTUDIOBONES];
-	static Vector4D	q[MAXSTUDIOBONES];
-
-	if( e->curstate.sequence < 0 || e->curstate.sequence >= m_pStudioHeader->numseq ) 
-	{
-		int sequence = (short)e->curstate.sequence;
-		ALERT( at_aiconsole, "StudioSetupBones: sequence %i/%i out of range for model %s\n",
-		sequence, m_pStudioHeader->numseq, RI->currentmodel->name );
-		e->curstate.sequence = 0;
-    }
-
-	pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex) + e->curstate.sequence;
-	float f = StudioEstimateFrame( pseqdesc );
-	float dadt = StudioEstimateInterpolant();
-	
-	StudioInterpolatePoseParams( e, dadt );
-
-	if( CheckBoneCache( f )) 
-		return; // using a cached bones no need transformations
-
-	if( m_boneSetup.GetNumIKChains( ))
-	{
-		if( FBitSet( e->curstate.effects, EF_NOINTERP ))
-			m_pModelInstance->m_ik.ClearTargets();
-		m_pModelInstance->m_ik.Init( &m_boneSetup, StudioGetAngles(), StudioGetOrigin(), tr.time, tr.realframecount );
-		pIK = &m_pModelInstance->m_ik;
-	}
-
-	float cycle = f / m_boneSetup.LocalMaxFrame( e->curstate.sequence );
-	StudioInterpolateControllers( e, dadt );
-
-	m_boneSetup.InitPose( pos, q );
-	m_boneSetup.UpdateRealTime( tr.time );
-	if( CVAR_TO_BOOL( m_pCvarCompatible ))
-		m_boneSetup.CalcBoneAdj( adj, m_pModelInstance->m_controller, e->mouth.mouthopen );
-	m_boneSetup.AccumulatePose( pIK, pos, q, e->curstate.sequence, cycle, 1.0 );
-	m_pModelInstance->lerp.frame = f;
-
-	pbones = (mstudiobone_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex);
-	pboneinfo = (mstudioboneinfo_t *)((byte *)m_pStudioHeader + m_pStudioHeader->boneindex + m_pStudioHeader->numbones * sizeof( mstudiobone_t ));
-
-	if( e->curstate.gaitsequence < 0 || e->curstate.gaitsequence >= m_pStudioHeader->numseq ) 
-		e->curstate.gaitsequence = 0;
-
-	// calc gait animation
-	if( e->curstate.gaitsequence != 0 )
-	{
-		float m_flGaitBoneWeights[MAXSTUDIOBONES];
-		bool copy = true;
-
-		for( int i = 0; i < m_pStudioHeader->numbones; i++)
-		{
-			if( !Q_strcmp( pbones[i].name, "Bip01 Spine" ))
-				copy = false;
-			else if( !Q_strcmp( pbones[pbones[i].parent].name, "Bip01 Pelvis" ))
-				copy = true;
-			m_flGaitBoneWeights[i] = (copy) ? 1.0f : 0.0f;
-		}
-
-		pseqdesc = (mstudioseqdesc_t *)((byte *)m_pStudioHeader + m_pStudioHeader->seqindex) + e->curstate.gaitsequence;
-		f = StudioEstimateGaitFrame( pseqdesc );
-
-		// convert gaitframe to cycle
-		cycle = f / m_boneSetup.LocalMaxFrame( e->curstate.gaitsequence );
-
-		m_boneSetup.SetBoneWeights( m_flGaitBoneWeights ); // install weightlist for gait sequence
-		m_boneSetup.AccumulatePose( pIK, pos, q, e->curstate.gaitsequence, cycle, 1.0 );
-		m_boneSetup.SetBoneWeights( NULL ); // back to default rules
-		m_pModelInstance->lerp.gaitframe = f;
-	}
-
-	// run blends from previous sequences
-	for( int i = 0; i < MAX_SEQBLENDS; i++ )
-		BlendSequence( pos, q, &m_pModelInstance->m_seqblend[i] );
-
-	CIKContext auto_ik;
-	auto_ik.Init( &m_boneSetup, StudioGetAngles(), StudioGetOrigin(), 0.0f, 0 );
-	m_boneSetup.CalcAutoplaySequences( &auto_ik, pos, q );
-	if( !CVAR_TO_BOOL( m_pCvarCompatible ))
-		m_boneSetup.CalcBoneAdj( pos, q, m_pModelInstance->m_controller, e->mouth.mouthopen );
-
-	byte	boneComputed[MAXSTUDIOBONES];
-
-	memset( boneComputed, 0, sizeof( boneComputed ));
-
-	// don't calculate IK on ragdolls
-	if( pIK != NULL )
-	{
-		UpdateIKLocks( pIK );
-		pIK->UpdateTargets( pos, q, m_pModelInstance->m_pbones, boneComputed );
-		CalculateIKLocks( pIK );
-		pIK->SolveDependencies( pos, q, m_pModelInstance->m_pbones, boneComputed );
-	}
-
-	StudioCalcBonesExternal( pos, q );
-
-	for( int i = 0; i < m_pStudioHeader->numbones; i++ ) 
-	{
-		// animate all non-simulated bones
-		if( CalcProceduralBone( m_pStudioHeader, i, m_pModelInstance->m_pbones ))
-			continue;
-
-		// initialize bonematrix
-		bonematrix = matrix3x4( pos[i], q[i] );
-
-		if( FBitSet( pbones[i].flags, BONE_JIGGLE_PROCEDURAL ) && FBitSet( m_pStudioHeader->flags, STUDIO_HAS_BONEINFO ))
-		{
-			// Physics-based "jiggle" bone
-			// Bone is assumed to be along the Z axis
-			// Pitch around X, yaw around Y
-
-			// compute desired bone orientation
-			matrix3x4 goalMX;
-
-			if (pbones[i].parent == -1) {
-				goalMX = m_pModelInstance->m_protationmatrix.ConcatTransforms(bonematrix);
-			}
-			else {
-				goalMX = m_pModelInstance->m_pbones[pbones[i].parent].ConcatTransforms(bonematrix);
-			}
-
-			// get jiggle properties from QC data
-			mstudiojigglebone_t *jiggleInfo = (mstudiojigglebone_t *)((byte *)m_pStudioHeader + pboneinfo[i].procindex);
-			if (!m_pModelInstance->m_pJiggleBones) {
-				m_pModelInstance->m_pJiggleBones = new CJiggleBones;
-			}
-
-			// do jiggle physics
-			if (pboneinfo[i].proctype == STUDIO_PROC_JIGGLE) {
-				m_pModelInstance->m_pJiggleBones->BuildJiggleTransformations(i, tr.time, jiggleInfo, goalMX, m_pModelInstance->m_pbones[i]);
-			}
-			else {
-				m_pModelInstance->m_pbones[i] = goalMX; // fallback
-			}
-		}
-		else
-		{
-			if (pbones[i].parent == -1) {
-				m_pModelInstance->m_pbones[i] = m_pModelInstance->m_protationmatrix.ConcatTransforms(bonematrix);
-			}
-			else {
-				m_pModelInstance->m_pbones[i] = m_pModelInstance->m_pbones[pbones[i].parent].ConcatTransforms(bonematrix);
-			}
-		}
-	}
-
+    cl_entity_t* e=RI->currententity;
+    if(e->curstate.sequence<0 || e->curstate.sequence>=m_pStudioHeader->numseq)
+        e->curstate.sequence=0;
+    const auto state=StudioCollisionPoseState(e,
+        partnet::AnyActivePartPose(m_pModelInstance->m_partPoseActive,MAXSTUDIOBONES),
+        m_pModelInstance->m_bExternalBones || m_pModelInstance->m_bRagdollPose || m_pModelInstance->m_bRagdollExitBlend);
+    const bool blends=m_iDrawModelType==DRAWSTUDIO_NORMAL && e->curstate.renderfx!=kRenderFxDeadPlayer;
+    const float now=GET_CLIENT_TIME();
+    if(!StudioEvaluateCpuBones(e,*m_pModelInstance,state,m_pModelInstance->m_protationmatrix,now,blends,!m_fShootDecal))
+        return;
+    // Retain lighting/bone-cache bookkeeping, then publish the shared CPU pose.
+    CheckBoneCache(m_pModelInstance->lerp.frame);
+    for(int i=0;i<m_pStudioHeader->numbones;++i)
+        m_pModelInstance->m_pbones[i]=m_pModelInstance->m_predictionCollisionBones[i];
 	// convert bones into compacted GLSL array
 	mposetobone_t *m = m_pModelInstance->m_pModel->poseToBone;
 	bool has_boneweights = FBitSet(m_pStudioHeader->flags, STUDIO_HAS_BONEWEIGHTS) != 0;
@@ -1367,7 +1684,7 @@ void CStudioModelRenderer :: StudioSetupBones( void )
 		{
 			matrix3x4 out = m_pModelInstance->m_pbones[i].ConcatTransforms( m->posetobone[i] );
 			out.CopyToArray4x3( &m_pModelInstance->m_glstudiobones[i*3] );
-			m_pModelInstance->m_studioquat[i] = out.GetQuaternion();
+			m_pModelInstance->m_studioquat[i] = physicsasset::StudioRenderBoneQuaternion(out);
 			m_pModelInstance->m_studiopos[i] = out.GetOrigin();
 		}
 	}
@@ -1376,10 +1693,23 @@ void CStudioModelRenderer :: StudioSetupBones( void )
 		for( int i = 0; i < m_pStudioHeader->numbones; i++ )
 		{
 			m_pModelInstance->m_pbones[i].CopyToArray4x3( &m_pModelInstance->m_glstudiobones[i*3] );
-			m_pModelInstance->m_studioquat[i] = m_pModelInstance->m_pbones[i].GetQuaternion();
+			m_pModelInstance->m_studioquat[i] = physicsasset::StudioRenderBoneQuaternion(m_pModelInstance->m_pbones[i]);
 			m_pModelInstance->m_studiopos[i] = m_pModelInstance->m_pbones[i].GetOrigin();
 		}
 	}
+}
+
+void CStudioModelRenderer::StudioPublishCollisionPose(void)
+{
+    m_pModelInstance->m_collisionPoseStamp.valid=false;
+    // Follow bones merge a parent's skeleton, outside this entity's evaluator.
+    if (RI->currententity->curstate.movetype==MOVETYPE_FOLLOW) {
+        m_pModelInstance->m_predictionCollisionStamp.valid=false;
+        return;
+    }
+    if (m_pModelInstance->bonecache.frame>=-100.0f &&
+        m_pModelInstance->m_predictionCollisionStamp.valid)
+        m_pModelInstance->m_collisionPoseStamp=m_pModelInstance->m_predictionCollisionStamp;
 }
 
 /*
@@ -2355,7 +2685,7 @@ void CStudioModelRenderer :: AddStudioModelToDrawList( cl_entity_t *e, bool upda
 					{
 						matrix3x4 out = m_pModelInstance->m_pbones[i].ConcatTransforms( m->posetobone[i] );
 						out.CopyToArray4x3( &m_pModelInstance->m_glstudiobones[i*3] );
-						m_pModelInstance->m_studioquat[i] = out.GetQuaternion();
+						m_pModelInstance->m_studioquat[i] = physicsasset::StudioRenderBoneQuaternion(out);
 						m_pModelInstance->m_studiopos[i] = out.GetOrigin();
 					}
 				}
@@ -2364,7 +2694,7 @@ void CStudioModelRenderer :: AddStudioModelToDrawList( cl_entity_t *e, bool upda
 					for( int i = 0; i < m_pStudioHeader->numbones; i++ )
 					{
 						m_pModelInstance->m_pbones[i].CopyToArray4x3( &m_pModelInstance->m_glstudiobones[i*3] );
-						m_pModelInstance->m_studioquat[i] = m_pModelInstance->m_pbones[i].GetQuaternion();
+						m_pModelInstance->m_studioquat[i] = physicsasset::StudioRenderBoneQuaternion(m_pModelInstance->m_pbones[i]);
 						m_pModelInstance->m_studiopos[i] = m_pModelInstance->m_pbones[i].GetOrigin();
 					}
 				}
@@ -2377,6 +2707,12 @@ void CStudioModelRenderer :: AddStudioModelToDrawList( cl_entity_t *e, bool upda
 			}
 		}
 		else StudioSetupBones( );
+
+        // A stamp is issued only after a complete bone calculation (or a
+        // renderer-validated cache hit). Offscreen bones receive no new stamp.
+        // MOVETYPE_FOLLOW merges a separate parent's bones and cannot be
+        // validated from this entity's animation alone.
+        StudioPublishCollisionPose();
 
 		// calc attachments only once per frame
 		StudioCalcAttachments( m_pModelInstance->m_pbones );
@@ -2412,7 +2748,7 @@ void CStudioModelRenderer :: AddStudioModelToDrawList( cl_entity_t *e, bool upda
 				{
 					matrix3x4 out = m_pModelInstance->m_pwpnbones[i].ConcatTransforms( m->posetobone[i] );
 					out.CopyToArray4x3( &m_pModelInstance->m_glweaponbones[i*3] );
-					m_pModelInstance->m_weaponquat[i] = out.GetQuaternion();
+					m_pModelInstance->m_weaponquat[i] = physicsasset::StudioRenderBoneQuaternion(out);
 					m_pModelInstance->m_weaponpos[i] = out.GetOrigin();
 				}
 			}
@@ -2421,7 +2757,7 @@ void CStudioModelRenderer :: AddStudioModelToDrawList( cl_entity_t *e, bool upda
 				for( int i = 0; i < m_pStudioHeader->numbones; i++ )
 				{
 					m_pModelInstance->m_pwpnbones[i].CopyToArray4x3( &m_pModelInstance->m_glweaponbones[i*3] );
-					m_pModelInstance->m_weaponquat[i] = m_pModelInstance->m_pwpnbones[i].GetQuaternion();
+					m_pModelInstance->m_weaponquat[i] = physicsasset::StudioRenderBoneQuaternion(m_pModelInstance->m_pwpnbones[i]);
 					m_pModelInstance->m_weaponpos[i] = m_pModelInstance->m_pwpnbones[i].GetOrigin();
 				}
 			}
@@ -3421,6 +3757,12 @@ void CStudioModelRenderer :: DrawSingleMesh( CSolidEntry *entry, bool force, boo
 				u->SetValue( &inst->m_weaponquat[0][0], num_bones );
 			else u->SetValue( &inst->m_studioquat[0][0], num_bones );
 			break;
+        case UT_BONESCALE:
+        {
+            const Vector scale=physicsasset::StudioRenderBoneScale(weapon_model?inst->m_pwpnbones[0]:inst->m_pbones[0]);
+            u->SetValue(scale.x,scale.y,scale.z);
+            break;
+        }
 		case UT_BONEPOSITION:
 			if( weapon_model )
 				u->SetValue( &inst->m_weaponpos[0][0], num_bones );

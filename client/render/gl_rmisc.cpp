@@ -16,6 +16,8 @@ GNU General Public License for more details.
 #include "hud.h"
 #include "utils.h"
 #include "gl_local.h"
+#include "gl_render_budget.h"
+#include "performance_gpu.h"
 #include "gl_studio.h"
 #include "gl_aurora.h"
 #include "gl_rpart.h"
@@ -587,8 +589,17 @@ Init common textures for renderer that size
 based on screen size
 ==================
 */
+void R_SyncSkyboxTextures( void )
+{
+	// The engine can replace/unload the sky after VidInit, on map changes or
+	// sky-name updates. Engine indices are borrowed: never free them here.
+	for (int i = 0; i < 6; ++i)
+		tr.skyboxTextures[i] = TextureHandle::GetSkyboxTextures(i);
+}
+
 void R_InitCommonTextures( void )
 {
+	R_ResetRenderBudgetCache();
 	int	i;
 
 	GL_BindFBO( 0 );
@@ -616,8 +627,7 @@ void R_InitCommonTextures( void )
 	}
 
 	// setup the skybox sides
-	for( i = 0; i < 6; i++ )
-		tr.skyboxTextures[i] = TextureHandle::GetSkyboxTextures(i);
+	R_SyncSkyboxTextures();
 
 	tr.num_framebuffers = 0;
 	tr.num_subview_used = 0;
@@ -868,6 +878,9 @@ Called always when map is changed or restarted
 */
 void R_NewMap( void )
 {
+	R_ResetRenderBudgetCache();
+	pxperf::Get().Reset();
+	pxperf::Gpu().Reset();
 	// initialize world surfaces, setup special flags
 	for( int i = 0; i < worldmodel->numsurfaces; i++ )
 	{
@@ -914,6 +927,9 @@ Called always when "vid_mode" or "fullscreen" cvars is changed
 */
 void R_VidInit( void )
 {
+	R_ResetRenderBudgetCache();
+	pxperf::Get().Reset();
+	pxperf::Gpu().Reset();
 	// get the actual screen size
 	glState.width = RENDER_GET_PARM( PARM_SCREEN_WIDTH, 0 );
 	glState.height = RENDER_GET_PARM( PARM_SCREEN_HEIGHT, 0 );

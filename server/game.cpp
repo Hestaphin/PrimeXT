@@ -58,6 +58,29 @@ cvar_t	*g_physdebug = NULL;
 cvar_t	*p_speeds = NULL;
 cvar_t	*g_allow_physx = NULL;
 cvar_t	g_sync_physic = { "sv_sync_physic", "0", FCVAR_ARCHIVE };
+cvar_t sv_ballistics_enabled = { "sv_ballistics_enabled", "1", FCVAR_ARCHIVE };
+cvar_t sv_ballistics_gravity_scale = { "sv_ballistics_gravity_scale", "1", FCVAR_ARCHIVE };
+cvar_t sv_ballistics_debug = { "sv_ballistics_debug", "0", FCVAR_ARCHIVE };
+cvar_t sv_ballistics_air_density = { "sv_ballistics_air_density", "1.225", FCVAR_ARCHIVE };
+cvar_t sv_ballistics_penetration = { "sv_ballistics_penetration", "1", FCVAR_ARCHIVE };
+cvar_t sv_ballistics_tracers = { "sv_ballistics_tracers", "0", FCVAR_ARCHIVE };
+cvar_t sv_ballistics_hz = { "sv_ballistics_hz", "50", FCVAR_ARCHIVE | FCVAR_SERVER };
+cvar_t ragdoll_bullet_impulse_scale = { "sv_ragdoll_bullet_impulse_scale", "8", FCVAR_ARCHIVE };
+cvar_t ragdoll_blast_impulse_scale = { "sv_ragdoll_blast_impulse_scale", "12", FCVAR_ARCHIVE };
+cvar_t prop_bullet_impulse_scale = { "sv_prop_bullet_impulse_scale", "8", FCVAR_ARCHIVE };
+cvar_t prop_blast_impulse_scale = { "sv_prop_blast_impulse_scale", "12", FCVAR_ARCHIVE };
+cvar_t ragdoll_freeze = { "sv_ragdoll_freeze", "1", FCVAR_ARCHIVE };
+cvar_t ragdoll_freeze_delay = { "sv_ragdoll_freeze_delay", "3", FCVAR_ARCHIVE };
+cvar_t sv_physics_hz = { "sv_physics_hz", "60", FCVAR_ARCHIVE | FCVAR_SERVER };
+cvar_t sv_physics_max_steps = { "sv_physics_max_steps", "4", FCVAR_ARCHIVE };
+cvar_t ragdoll_drive_strength = { "sv_ragdoll_drive_strength", "1800", FCVAR_ARCHIVE };
+cvar_t ragdoll_drive_damping = { "sv_ragdoll_drive_damping", "90", FCVAR_ARCHIVE };
+cvar_t ragdoll_drive_maxforce = { "sv_ragdoll_drive_maxforce", "12000", FCVAR_ARCHIVE };
+cvar_t auto_death_ragdoll = { "sv_auto_death_ragdoll", "1", FCVAR_ARCHIVE };
+cvar_t ragdoll_debug = { "sv_ragdoll_debug", "0", FCVAR_ARCHIVE };
+cvar_t ragdoll_diagnostics = { "sv_ragdoll_diagnostics", "0", 0 }; // F0: 1 = 1 Hz peaks, 2 = each physics step
+cvar_t sv_profile = { "sv_profile", "0", 0 }; // 1: summary, 2: CSV
+cvar_t sv_profile_interval = { "sv_profile_interval", "2", 0 };
 
 //CVARS FOR SKILL LEVEL SETTINGS
 // Agrunt
@@ -501,6 +524,29 @@ void GameDLLInit( void )
 	g_footsteps = CVAR_GET_POINTER( "mp_footsteps" );
 	g_psv_stepsize = CVAR_GET_POINTER( "sv_stepsize" );
 	CVAR_REGISTER( &g_sync_physic );
+	CVAR_REGISTER( &sv_ballistics_enabled );
+	CVAR_REGISTER( &sv_ballistics_gravity_scale );
+	CVAR_REGISTER( &sv_ballistics_air_density );
+	CVAR_REGISTER( &sv_ballistics_tracers );
+	CVAR_REGISTER( &sv_ballistics_hz );
+	CVAR_REGISTER( &sv_ballistics_penetration );
+	CVAR_REGISTER( &sv_ballistics_debug );
+	CVAR_REGISTER( &ragdoll_bullet_impulse_scale );
+	CVAR_REGISTER( &ragdoll_blast_impulse_scale );
+	CVAR_REGISTER( &prop_bullet_impulse_scale );
+	CVAR_REGISTER( &prop_blast_impulse_scale );
+	CVAR_REGISTER( &ragdoll_freeze );
+	CVAR_REGISTER( &ragdoll_freeze_delay );
+	CVAR_REGISTER( &sv_physics_hz );
+	CVAR_REGISTER( &sv_physics_max_steps );
+	CVAR_REGISTER( &ragdoll_drive_strength );
+	CVAR_REGISTER( &ragdoll_drive_damping );
+	CVAR_REGISTER( &ragdoll_drive_maxforce );
+	CVAR_REGISTER( &ragdoll_debug );
+	CVAR_REGISTER( &ragdoll_diagnostics );
+	CVAR_REGISTER( &sv_profile );
+	CVAR_REGISTER( &sv_profile_interval );
+	CVAR_REGISTER( &auto_death_ragdoll );
 
 	g_engfuncs.pfnAddServerCommand( "showtriggers_toggle", Cmd_ShowTriggers_f );
 

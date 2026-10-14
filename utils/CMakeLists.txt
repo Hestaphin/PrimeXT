@@ -6,6 +6,7 @@ include(CompilerRuntime)
 option(ENABLE_MAP_COMPILERS_AVX2 "Enable building map compilers with AVX2 support" OFF)
 option(BUILD_PXMV "Build PrimeXT Model Viewer" ON)
 option(BUILD_PXSV "Build PrimeXT Sprite Viewer" ON)
+option(BUILD_PXWE "Build standalone PrimeXT Weapon Editor" ON)
 option(BUILD_COMPILERS "Build PrimeXT asset compilers (studiomdl, makewad, bsp)" ON)
 
 # set build output directory
@@ -19,11 +20,14 @@ if(BUILD_PXMV OR BUILD_PXSV)
 	set_compiler_runtime(mxtk STATIC)
 endif()
 
-if(BUILD_COMPILERS)
-	# add compilers dependency libraries subprojects
-	add_subdirectory("common/imagelib" imagelib)
+# pxmv also links imagelib; imagelib in turn links squish. Build both even
+# with map/studio compilers disabled (e.g. a model-viewer-only configuration).
+if(BUILD_COMPILERS OR BUILD_PXMV)
 	add_subdirectory("${CMAKE_SOURCE_DIR}/external/squish" squish)
+	add_subdirectory("common/imagelib" imagelib)
+endif()
 
+if(BUILD_COMPILERS)
 	add_subdirectory(pxstudiomdl)
 	add_subdirectory(pxmakewad)
 	add_subdirectory(pxbsp)
@@ -52,14 +56,21 @@ if(BUILD_PXSV)
 	list(APPEND UTILS_TARGETS pxsv)
 endif()
 
+if(BUILD_PXWE)
+	add_subdirectory("../tools/weapon_editor" pxwe)
+	list(APPEND UTILS_TARGETS pxwe)
+endif()
+
 message(STATUS "Utility binaries output directory: ${DIR_UTILS_OUTPUT}")
 
 foreach(target ${UTILS_TARGETS})
 	add_dependencies(${target} build_info)
 endforeach()
 
-set_target_properties(${UTILS_TARGETS} PROPERTIES 
-    ARCHIVE_OUTPUT_DIRECTORY ${DIR_UTILS_OUTPUT}
-    LIBRARY_OUTPUT_DIRECTORY ${DIR_UTILS_OUTPUT}
-    RUNTIME_OUTPUT_DIRECTORY ${DIR_UTILS_OUTPUT}
-)
+if(UTILS_TARGETS)
+	set_target_properties(${UTILS_TARGETS} PROPERTIES
+		ARCHIVE_OUTPUT_DIRECTORY ${DIR_UTILS_OUTPUT}
+		LIBRARY_OUTPUT_DIRECTORY ${DIR_UTILS_OUTPUT}
+		RUNTIME_OUTPUT_DIRECTORY ${DIR_UTILS_OUTPUT}
+	)
+endif()

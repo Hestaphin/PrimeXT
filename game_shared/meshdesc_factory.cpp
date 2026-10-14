@@ -14,6 +14,7 @@ GNU General Public License for more details.
 */
 
 #include "meshdesc_factory.h"
+#include "performance_profile.h"
 #include "const.h"
 #include "com_model.h"
 
@@ -47,7 +48,7 @@ void CMeshDescFactory::ClearCache()
     m_meshDescList.clear();
 }
 
-CMeshDesc &CMeshDescFactory::CreateObject(int32_t modelIndex, int32_t body, int32_t skin, clipfile::GeometryType geomType)
+CMeshDesc &CMeshDescFactory::CreateObject(int32_t modelIndex, int32_t body, int32_t skin, clipfile::GeometryType geomType, uint64_t fingerprint)
 {
     model_t *mod = static_cast<model_t*>(MODEL_HANDLE(modelIndex));
 	if (!mod) {
@@ -58,17 +59,20 @@ CMeshDesc &CMeshDescFactory::CreateObject(int32_t modelIndex, int32_t body, int3
         desc.SetDebugName(mod->name);
 	    desc.SetModel(mod, body, skin);
 	    desc.SetGeometryType(geomType);
+        desc.SetSourceFingerprint(fingerprint);
     };
 
     for (auto it = m_meshDescList.begin(); it != m_meshDescList.end(); it++) 
     {
         CMeshDesc &meshDesc = *it;
-        if (meshDesc.Matches(mod->name, body, skin, geomType)) {
+        if (meshDesc.Matches(mod->name, body, skin, geomType, fingerprint)) {
+            pxperf::Get().Add(pxperf::Metric::MeshCacheHits, 1);
             initializeMeshDesc(meshDesc);
             return meshDesc;
         }
     }
 
+    pxperf::Get().Add(pxperf::Metric::MeshCacheMisses, 1);
     auto &meshDesc = m_meshDescList.emplace_back();
     initializeMeshDesc(meshDesc);
     return meshDesc;

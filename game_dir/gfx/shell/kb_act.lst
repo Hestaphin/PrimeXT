@@ -50,3 +50,4 @@
 "load quick"	"#Valve_Quick_Load"
 "pause"			"#Valve_Pause_Game"
 "quit"			"#Valve_Quit_Game"
+"r_physics_showmenu"	"Physics performance"

@@ -1,0 +1,31 @@
+ragdoll_template
+{
+    template_version 1
+    id "custom"
+    name "Custom"
+    description "Duplicate and edit roles/aliases to define a custom skeleton."
+    anatomy "custom"
+    mass_budget 70
+    linear_damping 0.0500000007
+    angular_damping 0.0500000007
+
+    role "root"
+    {
+        parent ""
+        alias "root"
+        alias "Bip01 Pelvis"
+        override ""
+        required 1
+        minimum_detail 0
+        shape box
+        hitgroup 0
+        mass_weight 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+}

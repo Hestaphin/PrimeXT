@@ -1738,7 +1738,7 @@ void R_RenderDecalsTransEntry( CTransEntry *entry, drawlist_t drawlist_type )
 
 void ClearDecals( void )
 {
-	for( int i = 0; i < worldmodel->numsurfaces; i++ )
+	for( int i = 0; worldmodel && i < worldmodel->numsurfaces; i++ )
 	{
 		msurface_t *surf = &worldmodel->surfaces[i];
 		ClearBits( surf->flags, SURF_HAS_DECALS|SURF_REFLECT_PUDDLE );

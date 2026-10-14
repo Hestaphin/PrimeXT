@@ -57,7 +57,7 @@ unsigned int EngineSetFeatures(void)
 
 void DrawDebugTriangles( void )
 {
-	if( g_debugdraw != NULL && g_debugdraw->value > 0.0f )
+	if(( g_debugdraw != NULL && g_debugdraw->value > 0.0f ) || ragdoll_debug.value > 0.0f )
 		WorldPhysic->DebugDraw();
 
 	if( g_physdebug != NULL && g_physdebug->value > 0.0f )
@@ -1860,7 +1860,7 @@ void SV_Physics_Rigid( CBaseEntity *pEntity )
 		if( pGround && FBitSet( pGround->pev->flags, FL_CONVEYOR ) && pGround->pev->speed && WorldPhysic->IsBodySleeping( pEntity ))
 		{
 			// wake up body if conveyor was enabled (add light kick)
-			WorldPhysic->AddForce( pEntity, pGround->pev->movedir );
+			WorldPhysic->AddForce( pEntity, pGround->pev->movedir * 0.01f, IPhysicLayer::ForceMode::Impulse );
 		}
 		return;	// at rest
 	}
@@ -2598,7 +2598,7 @@ void SV_Physics_Vehicle( CBaseEntity *pEntity )
 		if( pGround && FBitSet( pGround->pev->flags, FL_CONVEYOR ) && pGround->pev->speed && WorldPhysic->IsBodySleeping( pEntity ))
 		{
 			// wake up body if conveyor was enabled (add light kick)
-			WorldPhysic->AddForce( pEntity, pGround->pev->movedir );
+			WorldPhysic->AddForce( pEntity, pGround->pev->movedir * 0.01f, IPhysicLayer::ForceMode::Impulse );
 		}
 		return;	// at rest
 	}

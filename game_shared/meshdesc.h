@@ -65,6 +65,7 @@ public:
 
 	// get cached collision
 	mmesh_t *GetMesh() { return (m_bMeshBuilt) ? &m_mesh : NULL; }
+	size_t GetMeshMemorySize() const { return m_bMeshBuilt ? mesh_size : 0; }
 	areanode_t *GetHeadNode() { return (has_tree) ? areanodes : NULL; }
 	int32_t GetBody() const { return m_iBodyNumber; }
 	int32_t GetSkin() const { return m_iSkinNumber; }
@@ -72,7 +73,8 @@ public:
 	void SetDebugName(const char *name) { m_debugName = name; }
 	void SetModel(const model_t *mod, int32_t body, int32_t skin);
 	void SetGeometryType(clipfile::GeometryType geomType);
-	bool Matches(const std::string &name, int32_t body, int32_t skin, clipfile::GeometryType geomType);
+    void SetSourceFingerprint(uint64_t fingerprint) { m_sourceFingerprint = fingerprint; }
+	bool Matches(const std::string &name, int32_t body, int32_t skin, clipfile::GeometryType geomType, uint64_t fingerprint = 0);
 	void PrintMeshInfo();
 	bool StudioConstructMesh();
 	void FreeMesh();
@@ -143,6 +145,7 @@ private:
 	int32_t		m_iBodyNumber;		// bodygroup number for current model state
 	int32_t		m_iSkinNumber;		// skin number for current model state
 	clipfile::GeometryType m_iGeometryType;
+    uint64_t m_sourceFingerprint = 0;
 
 	// used only while mesh is constructing
 	mfacet_t	*m_srcFacets;

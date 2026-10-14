@@ -1,0 +1,30 @@
+// The MDL bytes and production reference extraction come from the inherited
+// actual-model harness; GUI operations remain explicitly adapted.
+static void F5Barney(StudioModel &model,PhysicsAssetEditor &editor,studiohdr_t *hdr,
+    const mstudiobone_t *bones,const std::string &exportDirectory)
+{
+    (void)model;(void)bones;Check(hdr->numbones==24,"F5 matching actual model header");
+    std::vector<ragtemplate::Bone> collected;std::string error;
+    Check(editor.CollectTemplateBones(collected,error)&&collected.size()==24,"F5 actual MDL bind and filtered vertices");
+    physicsasset::AssetDef empty;
+    for(const char *id:{"human_heavy","human_loose"})
+    {
+        const auto found=std::find_if(ragtemplate::Builtins().begin(),ragtemplate::Builtins().end(),[&](const auto &t){return t.id==id;});
+        Check(found!=ragtemplate::Builtins().end(),"F5 human variant exists");ragtemplate::Candidate candidate,repeat;
+        Check(ragtemplate::Generate(*found,collected,1,empty,ragtemplate::ComposeMode::ReplaceRagdoll,candidate,&error),"F5 actual MDL variant generation");
+        Check(candidate.asset.bodies.size()==15&&candidate.asset.joints.size()==14&&candidate.axisReviews==4,"F5 actual model retains anatomical graph and flexion review");
+        double mass=0;for(const auto &b:candidate.asset.bodies)mass+=b.mass;
+        Check(std::fabs(mass-found->massBudget)<0.0001&&candidate.asset.simulation.angularResistance==found->simulation.angularResistance,"F5 actual model budget and resistance profile resolved");
+        Check(ragtemplate::Generate(*found,collected,1,empty,ragtemplate::ComposeMode::ReplaceRagdoll,repeat,&error)&&physicsasset::Serialize(repeat.asset)==physicsasset::Serialize(candidate.asset),"F5 actual variant deterministic");
+        if(!exportDirectory.empty())
+        {
+            std::filesystem::create_directories(exportDirectory);
+            const std::string file=exportDirectory+"/barney_f5_"+id+".phys";
+            Check(physicsasset::SaveFile(file.c_str(),candidate.asset,&error),"F5 actual model variant saved");
+            physicsasset::AssetDef read;Check(physicsasset::LoadFile(file.c_str(),read,&error)&&physicsasset::Serialize(read)==physicsasset::Serialize(candidate.asset),"F5 actual model v5 variant round trip");
+            std::ofstream report(exportDirectory+"/"+id+"_review.txt");report<<"Actual SHA-checked Barney MDL; native solver/game acceptance pending.\n";
+            for(const auto &line:candidate.observations)report<<line<<'\n';
+        }
+        std::cout<<"F5 actual Barney "<<id<<": 15 bodies, 14 joints, mass="<<mass<<"; NO solver/game\n";
+    }
+}

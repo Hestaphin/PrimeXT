@@ -250,6 +250,7 @@ static uniformTable_t glsl_uniformTable[] =
 { "u_BonesArray",		UT_BONESARRAY,		0 },	
 { "u_BoneQuaternion",	UT_BONEQUATERNION,		0 },
 { "u_BonePosition",		UT_BONEPOSITION,		0 },
+{ "u_BoneScale",		UT_BONESCALE,		0 },
 { "u_ScreenSizeInv",	UT_SCREENSIZEINV,		UFL_GLOBAL_PARM },
 { "u_zFar",				UT_ZFAR,			UFL_GLOBAL_PARM },
 { "u_LightStyleValues",	UT_LIGHTSTYLEVALUES,	UFL_GLOBAL_PARM },

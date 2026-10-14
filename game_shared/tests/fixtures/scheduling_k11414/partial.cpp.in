@@ -1,0 +1,24 @@
+extern "C" const char *__asan_default_options() { return "detect_leaks=0:halt_on_error=1"; }
+static void stepDriveCases()
+{
+    for(float dt:{.01f,1.0f/60,1.0f/30})
+    {
+        Scene s;s.partial();auto &body=s.asset.m_bodies[1];auto &actor=s.actors[1];
+        body.physicsWeight=.5f;body.hasAnimationVelocity=true;
+        body.animationLinearVelocity=PxVec3(0);body.animationAngularVelocity=PxVec3(0);
+        body.currentAnimationPose.p=actor.pose.p+PxVec3(10,0,0);
+        body.currentAnimationPose.q=PxQuat(0,0,std::sin(.25f),std::cos(.25f));
+        actor.mass=2;actor.inverseInertia={.25f,4,1};actor.linear=PxVec3(0);actor.angular=PxVec3(0);
+        const auto joints=s.asset.joints;const auto pointer=body.actor;
+        s.asset.ApplyAnimationControl(dt,100,10,1000);
+        const double denominator=dt<=.010001f?1:1+.5*(5*double(dt)+50*double(dt)*dt);
+        assert(std::fabs(actor.lastForce.x-500/denominator)<.001);
+        const double angularDenominator=dt<=.010001f?1:1+4*(5*double(dt)+50*double(dt)*dt);
+        assert(std::fabs(actor.lastTorque.z-25/angularDenominator)<.001);
+        assert(s.asset.joints==joints && body.actor==pointer && s.actors[0].targets>0);
+        assert(actor.forces==1 && actor.torques==1 && actor.impulses==0);
+        s.bullet(1);assert(actor.impulses==1);s.monster.Killed(nullptr,GIB_NORMAL);s.full();
+        const int forces=actor.forces;s.asset.ApplyAnimationControl(dt,100,10,1000);assert(actor.forces==forces);
+    }
+    std::cout<<"PASS actual partial-ragdoll drive at 100/60/30 Hz: mass/inertia gains, force/torque units, anchor targets, retained actors/joints, bullet impulse and full death handoff\n";
+}

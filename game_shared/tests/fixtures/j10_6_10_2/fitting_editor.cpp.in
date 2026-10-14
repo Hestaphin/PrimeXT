@@ -1,0 +1,88 @@
+#include "ragdoll_geometry.h"
+#include "physics_asset_sidecar_removal.h"
+#include <limits>
+@PRODUCTION@
+static int checks=0;
+static void Check(bool value,const char *name) {++checks;if(!value) {std::cerr<<"FAIL "<<name<<'\n';std::abort();}}
+static void Action(RagdollTemplateDialog &dialog,int id) {mxEvent e{};e.event=mxEvent::Action;e.action=id;dialog.handleEvent(&e);}
+struct Input
+{
+    studiohdr_t hdr{};mstudiobone_t bones[3]{};mstudiobodyparts_t parts[3]{};mstudiomodel_t models[3]{};
+    Vector vertices[7]{};byte owners[7]{};mstudioboneweight_t weights[7]{};
+};
+int main(int argc,char **argv)
+{
+    Check(argc==2,"temporary path");Input input;
+    auto &h=input.hdr;h.numbones=3;h.boneindex=offsetof(Input,bones);h.numbodyparts=3;h.bodypartindex=offsetof(Input,parts);
+    std::strcpy(input.bones[0].name,"root");input.bones[0].parent=-1;input.bones[0].value[5]=0.6f;
+    std::strcpy(input.bones[1].name,"limb");input.bones[1].parent=0;input.bones[1].value[0]=4;input.bones[1].value[3]=0.3f;
+    std::strcpy(input.bones[2].name,"tip");input.bones[2].parent=1;input.bones[2].value[0]=6;input.bones[2].value[1]=8;
+    const char *names[]={"character","gun","gunner"};
+    for(int i=0;i<3;++i)
+    {
+        std::strcpy(input.parts[i].name,names[i]);input.parts[i].nummodels=1;input.parts[i].modelindex=int(offsetof(Input,models)+i*sizeof(mstudiomodel_t));
+        const int start=i==0?0:i==1?5:6;
+        input.models[i].numverts=i==0?5:1;input.models[i].vertindex=int(offsetof(Input,vertices)+start*sizeof(Vector));
+        input.models[i].vertinfoindex=int(offsetof(Input,owners)+start);input.models[i].blendvertinfoindex=int(offsetof(Input,weights)+start*sizeof(mstudioboneweight_t));
+    }
+    for(int i=0;i<5;++i) {input.vertices[i]=Vector(1.2f*i,1.6f*i,i%2?1.0f:-1.0f);input.owners[i]=1;}
+    input.vertices[5]=Vector(1000,1000,1000);input.owners[5]=1;input.vertices[6]=Vector(3,4,0);input.owners[6]=1;
+    ViewerSettings settings;StudioModel model(settings);model.m_pstudiohdr=&h;
+    std::vector<matrix3x4> ref(3);
+    for(int i=0;i<3;++i)
+    {
+        auto &b=input.bones[i];const matrix3x4 local(Vector(b.value[0],b.value[1],b.value[2]),Radian(b.value[3],b.value[4],b.value[5]));
+        ref[i]=b.parent<0?local:ref[b.parent].ConcatTransforms(local);model.m_plocaltransform[i]=ref[i].Invert();
+        model.m_pbonetransform[i]=matrix3x4(Vector(999,99,9),Vector(50,60,70),1.0f);model.m_pworldtransform[i]=model.m_pbonetransform[i];
+    }
+    std::vector<std::vector<Vector>> points;
+    Check(model.GetRagdollFitVertices(points,{"gun"})&&points[1].size()==6,"accessory token excluded while gunner is retained");
+    Check(points[1][1].x==1.2f&&points[1][1].y==1.6f,"rigid bind samples independent of current pose");
+    Check(model.GetRagdollFitVertices(points,{})&&points[1].size()==7,"explicit inclusion control");
+    const auto rigid=points;
+    h.flags=STUDIO_HAS_BONEWEIGHTS;
+    for(int i=0;i<7;++i)
+    {
+        const Vector local=input.vertices[i];input.vertices[i]=ref[1].VectorTransform(local);
+        for(int k=0;k<4;++k) input.weights[i].bone[k]=-1;
+        input.weights[i].bone[0]=1;input.weights[i].weight[0]=200;input.weights[i].bone[1]=0;input.weights[i].weight[1]=55;
+    }
+    Check(model.GetRagdollFitVertices(points,{"gun"})&&points[1].size()==6,"strongest-weight assignment excludes accessories");
+    bool equal=true;for(size_t i=0;i<5;++i) equal=equal&&(points[1][i]-rigid[1][i]).Length()<0.001f;
+    Check(equal,"weighted inverse-bind collection agrees with equivalent rigid model");
+    PhysicsAssetEditor editor(nullptr,model,settings);editor.m_modelPath=std::string(argv[1])+"/synthetic.mdl";editor.m_assetPath=std::string(argv[1])+"/synthetic.phys";
+    std::vector<ragtemplate::Bone> collected;std::string error;
+    Check(editor.CollectTemplateBones(collected,error,{"gun"})&&collected[1].vertices.size()==6&&collected[1].boundsMax.x<10,"production filtered bounds collection");
+    Check(std::fabs(collected[1].localAngles.x-0.3f)<1e-6,"Studio reference rotations retained");
+    // Check portable/engine rotations using independently implemented production matrices.
+    bool rotation=true;
+    for(physicsasset::Vec3 angles: {physicsasset::Vec3{22,31,-40},physicsasset::Vec3{90,13,21}})
+    {
+        matrix3x4 engine(Vector(0,0,0),Vector(angles.x,angles.y,angles.z),1.0f);auto portable=raggeometry::Euler(angles);
+        Vector value(2,3,4);auto expected=engine.VectorRotate(value);auto actual=portable.Rotate({2,3,4});
+        rotation=rotation&&(expected-Vector(actual.x,actual.y,actual.z)).Length()<0.0001f;
+    }
+    Check(rotation,"portable frame convention agrees with engine Euler implementation");
+    editor.AutoGenerate();auto &dialog=*editor.m_templateDialog;dialog.m_draft=ragtemplate::Builtins()[2];dialog.m_builtin=false;
+    dialog.m_draft.excludedSections={"gun"};ragtemplate::Role role;role.id="limb";role.parent="root";role.aliases={"limb"};role.joint.frameMode=ragtemplate::FrameMode::Flexion;
+    role.joint.twistLow=0;role.joint.twistHigh=130;dialog.m_draft.roles.push_back(role);dialog.ShowTemplate();
+    Check(dialog.GeneratePreview()&&editor.m_generation.Preview().axisReviews==1,"actual dialog infers a reviewable flexion frame");
+    const auto empty=physicsasset::Serialize(editor.m_asset);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(dialog.isVisible()&&physicsasset::Serialize(editor.m_asset)==empty,"unchecked axis review blocks Apply");
+    dialog.m_axisReviewed->setChecked(true);dialog.m_risksReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(!dialog.isVisible()&&editor.m_asset.bodies.size()==2&&editor.m_dirty,"reviewed candidate applies through actual dialog");
+    editor.ShowJoint(0);editor.m_frameAnchor[0]->setLabel("1.25");editor.m_frameAnchor[1]->setLabel("-2.5");editor.m_frameAnchor[2]->setLabel("3.75");
+    editor.m_frameAngles[0]->setLabel("15");editor.m_frameAngles[1]->setLabel("-60");editor.m_frameAngles[2]->setLabel("25");
+    Check(editor.ApplyJointFields()&&editor.m_asset.joints[0].frameAnchor.y==-2.5f&&editor.m_asset.joints[0].frameAngles.y==-60,"production joint frame editing");
+    const std::string edited=physicsasset::Serialize(editor.m_asset);editor.m_frameAngles[1]->setLabel("nan");
+    Check(!editor.ApplyJointFields()&&physicsasset::Serialize(editor.m_asset)==edited,"nonfinite frame edit leaves asset unchanged");editor.ShowJoint(0);
+    Check(editor.SaveAsset()&&!editor.m_dirty,"production frame Save");editor.m_asset.joints[0].frameAnchor={};editor.ReloadAsset();
+    Check(physicsasset::Serialize(editor.m_asset)==edited&&editor.m_frameAngles[1]->getLabel()!=nullptr,"production frame Reload restores all fields");
+    dialog.Open();dialog.m_draft.roles[1].joint.frameMode=ragtemplate::FrameMode::Explicit;dialog.ShowTemplate();dialog.m_roles->select(1);dialog.ShowRole(1);dialog.m_templateAngles[1]->setLabel("33.25");dialog.m_templateAnchor[1]->setLabel("-1.5");Check(dialog.ReadFields()&&dialog.m_draft.roles[1].joint.frameAngles.y==33.25f&&dialog.m_draft.roles[1].joint.frameAnchor.y==-1.5f,"production template frame editing");Check(dialog.GeneratePreview()&&editor.m_generation.Preview().axisReviews==0,"explicit frames need no inferred-axis review");
+    Action(dialog,RagdollTemplateDialog::Apply);editor.UndoGeneration();Check(physicsasset::Serialize(editor.m_asset)==edited,"production Undo restores edited frames");
+    dialog.Open();Check(dialog.GeneratePreview(),"second isolated preview");Action(dialog,RagdollTemplateDialog::Close);
+    Check(physicsasset::Serialize(editor.m_asset)==edited,"Cancel preserves saved frames");
+    input.bones[1].parent=1;Check(!model.GetRagdollFitVertices(points,{"gun"}),"invalid cyclic reference rejected safely");
+    std::filesystem::remove(editor.m_assetPath);
+    std::cout<<"F2 production rigid/weighted fit, animation independence, axis review, frame edit/Save/Reload/Undo: "<<checks<<" checks PASS (synthetic Studio model; GUI adapters; NO PhysX/game)\n";
+}

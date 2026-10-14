@@ -1,0 +1,12 @@
+version = 3
+id = preview_jhp
+chamber = 9x19
+projectile = jhp
+mass_grams = 8.04
+diameter_mm = 9.02
+drag_coefficient = 0.3
+reference_velocity_mps = 360
+projectile_count = 1
+damage_coefficient = 3.3
+sprite = sprites/cool.spr
+category = 9x19/jhp

@@ -1,0 +1,183 @@
+#include "performance_profile.h"
+#include <cassert>
+#include <cmath>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
+
+extern "C" const char *__asan_default_options() { return "detect_leaks=0:halt_on_error=1"; }
+
+static std::vector<std::string> events;
+struct Cvar { float value; };
+static Cvar gravity{800};
+static Cvar *g_psv_gravity = &gravity;
+static Cvar ragdoll_drive_strength{1800}, ragdoll_drive_damping{90}, ragdoll_drive_maxforce{12000};
+static Cvar ragdoll_diagnostics{0}, ragdoll_freeze{1}, ragdoll_freeze_delay{3};
+struct Globals { float time = 10; };
+static Globals globals;
+static Globals *gpGlobals = &globals;
+constexpr int SERVER_ACTIVE = 1, at_aiconsole = 0;
+static int GET_SERVER_STATE() { return SERVER_ACTIVE; }
+static void CVAR_SET_FLOAT(const char *, float value) { gravity.value = value; }
+static void ALERT(int, const char *, ...) {}
+constexpr double k_SimulationStepSize = 1.0 / 100.0;
+namespace physx
+{
+struct PxVec3 { float z = -800; };
+struct PxSimulationStatistics { unsigned nbActiveDynamicBodies = 8, nbDynamicBodies = 24; };
+}
+using namespace physx;
+struct Scene
+{
+    PxVec3 getGravity() { return {}; }
+    void setGravity(PxVec3) { events.push_back("gravity"); }
+    void simulate(double step) { assert(step == .01); events.push_back("simulate"); }
+    void fetchResults(bool block) { assert(block); events.push_back("fetch"); }
+    void getSimulationStatistics(PxSimulationStatistics &stats) { stats = {}; }
+};
+struct Holdable { void ApplyForces() { events.push_back("holdable"); } };
+struct Asset
+{
+    int id; bool sleep, frozen;
+    void Log(const char *event) { events.push_back(std::string(event) + std::to_string(id)); }
+    void FollowAnimation() { Log("follow"); }
+    bool IsRagdoll() const { return true; }
+    bool NeedsAnimationControl() const { return id == 0; }
+    void UpdateAnimationPose(float) { Log("animation"); }
+    void ApplyAnimationControl(float step, float, float, float) { assert(step == float(.01)); Log("drive"); }
+    void CaptureSimulationPose() { Log("capture"); }
+    void RecordDiagnostics(float, PxSimulationStatistics *, float, float = -1, float = -1) { Log("diagnostics"); }
+    void UpdateSleepFreeze(float, bool, float) { Log("freeze"); }
+    bool HasSimulationPose() const { return true; }
+    bool HasActors() const { return true; }
+    bool IsFrozen() const { return frozen; }
+    bool IsSleeping() const { return sleep; }
+};
+struct CPhysicPhysX
+{
+    Scene scene;
+    Scene *m_pScene = &scene;
+    Holdable holdable;
+    Holdable *m_holdableController = &holdable;
+    double m_flAccumulator = 0;
+    std::vector<std::unique_ptr<Asset>> m_physicsAssets;
+    CPhysicPhysX()
+    {
+        for(int i = 0; i < 3; ++i) m_physicsAssets.emplace_back(new Asset{i, i != 0, i == 2});
+    }
+    void UpdatePhysicsAssetCollisionBodygroups() { events.push_back("bodygroups"); }
+    void UpdateAnimatedCollisionActors() { events.push_back("collision"); }
+    void HandleEvents() { events.push_back("events"); }
+    void ApplyInteractivePartDrives(float step) { assert(step == float(.01)); events.push_back("parts"); }
+    void UpdateRagdollPresentation(Asset *asset) { asset->Log("presentation"); }
+    void SendInteractivePartPoses() { events.push_back("part_network"); }
+    void Update(float);
+    void Baseline(float);
+};
+void CPhysicPhysX :: Baseline( float flTimeDelta )
+{
+	if( !m_pScene || GET_SERVER_STATE() != SERVER_ACTIVE )
+		return;
+
+	if( g_psv_gravity )
+	{
+		// clamp gravity
+		if( g_psv_gravity->value < 0.0f )
+			CVAR_SET_FLOAT( "sv_gravity", 0.0f );
+		if( g_psv_gravity->value > 800.0f )
+			CVAR_SET_FLOAT( "sv_gravity", 800.0f );
+
+		PxVec3 gravity = m_pScene->getGravity();
+		if( gravity.z != -( g_psv_gravity->value ))
+		{
+			ALERT( at_aiconsole, "gravity changed from %g to %g\n", gravity.z, -(g_psv_gravity->value));
+			gravity.z = -(g_psv_gravity->value);
+			m_pScene->setGravity( gravity );
+		}
+	}
+
+	// Legacy game code sometimes assigns pev->body directly instead of calling
+	// CBaseAnimating::SetBodygroup(). Keep collision proxies synchronized anyway.
+	UpdatePhysicsAssetCollisionBodygroups();
+	UpdateAnimatedCollisionActors();
+	HandleEvents();
+
+	for( auto &asset : m_physicsAssets )
+	{
+		asset->FollowAnimation();
+		if( asset->IsRagdoll() && asset->NeedsAnimationControl() )
+			asset->UpdateAnimationPose( gpGlobals ? gpGlobals->time : 0.0f );
+	}
+
+	m_flAccumulator += flTimeDelta;
+	while (m_flAccumulator > k_SimulationStepSize)
+	{
+		m_flAccumulator -= k_SimulationStepSize;
+		m_holdableController->ApplyForces();
+		ApplyInteractivePartDrives( static_cast<float>(k_SimulationStepSize) );
+		for( auto &asset : m_physicsAssets )
+			asset->ApplyAnimationControl( static_cast<float>( k_SimulationStepSize ),
+				ragdoll_drive_strength.value, ragdoll_drive_damping.value, ragdoll_drive_maxforce.value );
+		m_pScene->simulate(k_SimulationStepSize);
+		m_pScene->fetchResults(true);
+
+		for( auto &asset : m_physicsAssets )
+			asset->CaptureSimulationPose();
+		if(std::isfinite(ragdoll_diagnostics.value) && ragdoll_diagnostics.value > 0)
+		{
+			PxSimulationStatistics diagnosticStats;
+			m_pScene->getSimulationStatistics(diagnosticStats);
+			for( auto &asset : m_physicsAssets )
+				asset->RecordDiagnostics(static_cast<float>(k_SimulationStepSize),&diagnosticStats,ragdoll_diagnostics.value,
+					flTimeDelta,static_cast<float>(m_flAccumulator));
+		}
+		else for( auto &asset : m_physicsAssets )
+			asset->RecordDiagnostics(static_cast<float>(k_SimulationStepSize),nullptr,0); // reset capture on disable
+	}
+
+	// Presentation is intentionally published once per server update, not once
+	// per 100 Hz PhysX substep. Sleeping full ragdolls can be kinematic-frozen
+	// after a grace period; direct .phys bullet queries remain valid and any
+	// physical impulse thaws them before applying force.
+	const float now = gpGlobals ? gpGlobals->time : 0.0f;
+	for( auto &asset : m_physicsAssets )
+	{
+		if( !asset->IsRagdoll() ) continue;
+		asset->UpdateSleepFreeze( now, ragdoll_freeze.value > 0.0f, ragdoll_freeze_delay.value );
+		if( asset->HasSimulationPose() )
+			UpdateRagdollPresentation( asset.get() );
+	}
+    // Sample completed solver poses after the final physics substep.
+    SendInteractivePartPoses();
+}
+@PRODUCTION@
+int main()
+{
+    CPhysicPhysX baseline, disabled, enabled;
+    const float deltas[] = {.005f, .016f, .2f, .01f, .025f, .003f};
+    for(float diagnostics : {0.0f, 1.0f})
+    {
+        ragdoll_diagnostics.value = diagnostics;
+        for(float delta : deltas)
+        {
+            globals.time += delta;
+            pxperf::Get().Reset(); events.clear(); baseline.Baseline(delta);
+            const auto expected = events;
+            events.clear(); pxperf::Get().BeginFrame(0, 2, globals.time, delta);
+            disabled.Update(delta); pxperf::Get().EndFrame();
+            assert(events == expected && disabled.m_flAccumulator == baseline.m_flAccumulator);
+            events.clear(); pxperf::Get().BeginFrame(1, 2, globals.time, delta);
+            enabled.Update(delta); pxperf::Get().EndFrame();
+            assert(events == expected && enabled.m_flAccumulator == baseline.m_flAccumulator);
+            assert(pxperf::Get().Stats(pxperf::Metric::AwakeBodies).mean == 8);
+            assert(pxperf::Get().Stats(pxperf::Metric::DynamicBodies).mean == 24);
+            assert(pxperf::Get().Stats(pxperf::Metric::ActiveRagdolls).mean == 1);
+            assert(pxperf::Get().Stats(pxperf::Metric::SleepingRagdolls).mean == 1);
+            assert(pxperf::Get().Stats(pxperf::Metric::FrozenRagdolls).mean == 1);
+            unsigned steps = 0; for(const auto &event : expected) if(event == "simulate") ++steps;
+            assert(pxperf::Get().Stats(pxperf::Metric::PhysicsSteps).mean == steps);
+        }
+    }
+    std::cout << "PASS real PhysX Update method: original call order, 100 Hz substeps, accumulation and profiling counters (12 frame comparisons, SDK recording adapter)\n";
+}

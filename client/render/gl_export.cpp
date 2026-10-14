@@ -18,6 +18,7 @@ GNU General Public License for more details.
 #include "hud.h"
 #include "utils.h"
 #include "gl_local.h"
+#include "gl_performance.h"
 #include <stringlib.h>
 #include "gl_world.h"
 #include "gl_decals.h"
@@ -1017,6 +1018,7 @@ GL_Init
 */
 bool GL_Init( void )
 {
+	R_ProfileInitialize();
 	R_InitRefState();
 	GL_InitExtensions();
 	BuildGammaTable();
@@ -1031,6 +1033,7 @@ bool GL_Init( void )
 
 	DBG_PrintVertexVBOSizes();
 	GL_InitGPUShaders();
+	ADD_COMMAND( "r_render_report", R_RenderReport );
 	InitPostEffects();
 	GL_InitTextures();
 	COM_InitMatdef();
@@ -1059,6 +1062,7 @@ GL_Shutdown
 */
 void GL_Shutdown( void )
 {
+	R_ProfileShutdown();
 	int	i;
 
 	g_StudioRenderer.DestroyAllModelInstances();

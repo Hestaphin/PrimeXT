@@ -1,0 +1,310 @@
+// Production types; functions below are inserted unchanged by the verifier.
+#include "hud.h"
+#include "utils.h"
+#include "gl_local.h"
+#include "gl_world.h"
+#include "gl_render_budget.h"
+#include "gl_shader.h"
+#include "gl_grass.h"
+#include "gl_decals.h"
+#include "gl_cvars.h"
+#include "brush_material.h"
+#include <stringlib.h>
+#include <cassert>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+#include <set>
+#include <string>
+#include <vector>
+
+// Some managed process runners do not forward sanitizer environment variables.
+extern "C" const char *__asan_default_options() { return "/* ASAN_DEFAULT_OPTIONS */"; }
+extern "C" const char *__ubsan_default_options() { return "halt_on_error=1:print_stacktrace=1"; }
+
+cl_enginefunc_t gEngfuncs = {};
+render_api_t gRenderfuncs = {};
+glState_t glState;
+glConfig_t glConfig;
+ref_globals_t tr;
+ref_instance_t *RI = nullptr;
+ref_buildstats_t r_buildstats;
+model_t *worldmodel = nullptr;
+static gl_world_t worlddata;
+gl_world_t *world = &worlddata;
+bool g_fRenderInitialized = false;
+static int rtable[MOD_FRAMES][MOD_FRAMES] = {};
+static brushdecal_t gDecalPool[4096];
+static unsigned int g_decalVertUsed, g_decalElemUsed;
+static int gDecalCount, gDecalCycle;
+static cvar_t disabled = {};
+cvar_t *cv_brdf = &disabled, *cv_bump = &disabled, *cv_specular = &disabled;
+cvar_t *cv_parallax = &disabled, *r_cubemap = &disabled;
+cvar_t *r_lightmap = &disabled, *r_detailtextures = &disabled;
+cvar_t *r_shadows = &disabled, *r_sunshadows = &disabled;
+static cl_entity_t *engineEntity = nullptr;
+static std::set<void *> allocations;
+static std::vector<int> freedTextures;
+static std::string shaderOptions;
+static int shaderFeatures, gammaCalls, lightCacheCalls, destroyedInstances;
+static bool skipShader = false;
+
+// Only the studio-instance owner and the driver are adapters.
+struct StudioOwnerAdapter {
+    void DestroyAllModelInstances() { ++destroyedInstances; }
+} g_StudioRenderer;
+void GL_SetDefaultState() {}
+void Mod_FreeCubemaps() {}
+void R_FreeCinematics() {}
+void R_FreeLandscapes() {}
+void GL_DeleteOcclusionQuery(msurface_t *) {}
+void R_RemoveGrassForSurface(mextrasurf_t *) {}
+void R_StudioClearLightCache() { ++lightCacheCalls; }
+bool R_FullBright() { return true; }
+bool R_UseSkyLightstyle(int) { return true; }
+bool GL_UsingAlphaToCoverage() { return false; }
+bool GL_Support(int) { return false; }
+void GL_AddShaderDirective(char *options, const char *directive) {
+    std::strcat(options, directive);
+    std::strcat(options, "\n");
+}
+void GL_AddShaderFeature(word, int feature) { shaderFeatures |= feature; }
+void GL_EncodeNormal(char *, TextureHandle) {}
+word GL_FindUberShader(const char *, const char *options) { shaderOptions = options; return 1; }
+matdesc_t *CL_FindMaterial(const char *) { static matdesc_t desc = {}; return &desc; }
+void QuietPrint(const char *, ...) {}
+void TestHostError(const char *message, ...) {
+    std::fprintf(stderr, "Engine assertion: %s\n", message);
+    std::exit(77);
+}
+void ALERT(ALERT_TYPE, char *, ...) {}
+CFrameBuffer::CFrameBuffer() {}
+CFrameBuffer::~CFrameBuffer() {}
+decltype(pglDeleteVertexArrays) pglDeleteVertexArrays = nullptr;
+decltype(pglDeleteBuffersARB) pglDeleteBuffersARB = nullptr;
+static void Mod_LoadWorld(model_t *, const byte *);
+/* PRODUCTION_FUNCTIONS */
+
+// The BSP parser is an adapter. This follows its material/precache call order;
+// Mod_PrecacheShaders, both shader selectors and animation are production code.
+static void Mod_LoadWorld(model_t *, const byte *) {
+    tr.glsl_valid_sequence = 1;
+    Mod_LoadWorldMaterials();
+    if (!skipShader) Mod_PrecacheShaders();
+}
+
+static void *Allocate(size_t bytes, const char *, int) {
+    void *p = std::calloc(1, bytes ? bytes : 1);
+    assert(p && allocations.insert(p).second);
+    return p;
+}
+static void Release(void *p, const char *, int) {
+    assert(allocations.erase(p) == 1);
+    std::free(p);
+}
+static void SetupApi() {
+    gRenderfuncs.pfnMemAlloc = Allocate;
+    gRenderfuncs.pfnMemFree = Release;
+    gRenderfuncs.Host_Error = TestHostError;
+    gRenderfuncs.COM_CompareFileTime = [](const char *, const char *, int *) { return 0; };
+    gRenderfuncs.GL_FreeTexture = [](unsigned int texture) { freedTextures.push_back(texture); };
+    gRenderfuncs.RenderGetParm = [](int, int) -> intptr_t { return 0; };
+    gRenderfuncs.LightToTexGamma = [](byte value) { ++gammaCalls; return value; };
+    gEngfuncs.GetEntityByIndex = [](int index) { return index == 0 ? engineEntity : nullptr; };
+    gEngfuncs.pfnSys_FloatTime = []() { return 0.0; };
+    gEngfuncs.Con_Printf = QuietPrint;
+    pglDeleteVertexArrays = [](GLsizei, const GLuint *) {};
+    pglDeleteBuffersARB = [](GLsizei, const GLuint *) {};
+    R_InitRefState();
+}
+
+struct WorldFixture {
+    model_t model = {};
+    texture_t texture = {};
+    texture_t missingName = {};
+    texture_t *textures[3] = {&texture, nullptr, &missingName};
+    msurface_t surface = {};
+    mextrasurf_t extra = {};
+    mtexinfo_t texinfo = {};
+    dmodel_t submodel = {};
+    unsigned short sorted = 0;
+    WorldFixture() {
+        std::strcpy(texture.name, "test");
+        texture.gl_texturenum = 11;
+        texture.width = texture.height = 32;
+        model.numtextures = 3;
+        model.textures = textures;
+        model.numsurfaces = 1;
+        model.surfaces = &surface;
+        model.submodels = &submodel;
+        submodel.numfaces = 1;
+        surface.info = &extra;
+        surface.texinfo = &texinfo;
+        std::memset(surface.styles, 255, sizeof(surface.styles));
+        extra.surf = &surface;
+        texinfo.texture = &texture;
+        world->sortedfaces = &sorted;
+    }
+    void Load() {
+        world->sortedfaces = &sorted;
+        R_ProcessWorldData(&model, true, nullptr);
+    }
+    void Unload() {
+        // This fixture's face-index table is borrowed; real tables are allocated.
+        if (world->sortedfaces == &sorted) world->sortedfaces = nullptr;
+        R_ProcessWorldData(&model, false, nullptr);
+        assert(allocations.empty());
+    }
+};
+
+static void AssertContextEmpty() {
+    for (int i = 0; i < MAX_REF_STACK; ++i) {
+        auto &view = glState.stack[i];
+        assert(!view.currententity && !view.currentmodel && !view.currentlight);
+        assert(!view.reject_face && !view.view.leaf && !view.currentshader);
+        assert(view.frame.solid_faces.Count() == 0);
+        assert(view.frame.trans_list.Count() == 0);
+        assert(view.frame.grass_list.Count() == 0);
+        assert(view.frame.num_subview_faces == 0);
+    }
+    assert(glState.stack_position == 0 && RI == &glState.stack[0]);
+    assert(!tr.sky_camera && tr.num_draw_entities == 0);
+}
+
+int main(int argc, char **argv) {
+    assert(argc == 2);
+    SetupApi();
+    const std::string test = argv[1];
+    if (test == "runtime_animation") {
+        WorldFixture f;
+        cl_entity_t e = {};
+        texture_t alternate = {};
+        f.texture.alternate_anims = &alternate;
+        RI->currententity = &e;
+        e.curstate.frame = 1;
+        assert(R_TextureAnimation(&f.surface) == &alternate);
+        e.curstate.frame = 0;
+        assert(R_TextureAnimation(&f.surface) == &f.texture);
+        RI->currententity = nullptr;
+        assert(R_TextureAnimation(&f.surface) == &f.texture);
+        world->sortedfaces = nullptr;
+    } else if (test == "disconnected_decals") {
+        gDecalCount = gDecalCycle = 7;
+        g_decalVertUsed = g_decalElemUsed = 9;
+        ClearDecals();
+        assert(!gDecalCount && !gDecalCycle && !g_decalVertUsed && !g_decalElemUsed);
+    } else if (test == "disconnected_lightmaps") {
+        g_fRenderInitialized = true;
+        HUD_BuildLightmaps();
+        assert(gammaCalls == 0 && lightCacheCalls == 0);
+    } else if (test == "parent_shader") {
+        WorldFixture f;
+        f.model.numtextures = 1;
+        cl_entity_t e = {};
+        engineEntity = &e;
+        f.Load();
+        f.extra.parent = &e;
+        RI->currententity = &e;
+        e.curstate.rendermode = kRenderTransAdd;
+        f.extra.forwardScene[0].Invalidate();
+        assert(Mod_ShaderSceneForward(&f.surface) == 1);
+        assert(shaderFeatures & SHADER_ADDITIVE);
+        f.surface.flags |= SURF_SCREEN;
+        e.curstate.iuser1 = CF_MONOCHROME;
+        e.curstate.rendermode = kRenderTransTexture;
+        f.extra.forwardScene[0].Invalidate();
+        assert(Mod_ShaderSceneForward(&f.surface) == 1);
+        assert(shaderOptions.find("MONITOR_BRUSH") != std::string::npos);
+        assert(shaderOptions.find("MONOCHROME") != std::string::npos);
+        assert(shaderOptions.find("ALPHA_BLENDING") != std::string::npos);
+        f.Unload();
+    } else if (test == "stale_world_load") {
+        WorldFixture f;
+        auto *dead = new cl_entity_t();
+        RI->currententity = dead;
+        delete dead;
+        // Supply a fresh, valid world entity so the old code reaches the stale
+        // R_TextureAnimation read rather than the separate missing-edict fault.
+        cl_entity_t fresh = {};
+        engineEntity = &fresh;
+        f.Load();
+        assert(f.extra.lastRenderMode == kRenderNormal);
+        f.Unload();
+    } else if (test == "null_world_load") {
+        WorldFixture f;
+        f.surface.flags |= SURF_SCREEN;
+        f.Load();
+        assert(f.extra.lastRenderMode == kRenderNormal);
+        assert(shaderOptions.find("MONOCHROME") == std::string::npos);
+        f.Unload();
+    } else if (test == "disconnect" || test == "recursive_context") {
+        WorldFixture f;
+        auto *dead = new cl_entity_t();
+        for (int i = 0; i < MAX_REF_STACK; ++i) {
+            auto &view = glState.stack[i];
+            view.currententity = dead;
+            view.currentmodel = &f.model;
+            view.reject_face = &f.surface;
+            view.frame.solid_faces.AddToTail();
+            view.frame.trans_list.AddToTail();
+            view.frame.grass_list.AddToTail(nullptr);
+            view.frame.subview_faces[0] = &f.surface;
+            view.frame.num_subview_faces = 1;
+        }
+        tr.sky_camera = dead;
+        tr.draw_entities[0] = dead;
+        tr.num_draw_entities = 1;
+        glState.stack_position = MAX_REF_STACK - 1;
+        RI = &glState.stack[glState.stack_position];
+        if (test == "disconnect") {
+            g_fRenderInitialized = true;
+            Mod_ThrowModelInstances();
+            delete dead;
+            AssertContextEmpty();
+            assert(destroyedInstances == 1);
+        } else {
+            delete dead;
+            f.Load();
+            AssertContextEmpty();
+            f.Unload();
+        }
+        assert(R_TextureAnimation(&f.surface) == &f.texture);
+        world->sortedfaces = nullptr;
+    } else if (test == "material_lifetime" || test == "missing_texture_cleanup") {
+        skipShader = true;
+        WorldFixture f;
+        if (test == "material_lifetime") f.model.numtextures = 1;
+        f.Load();
+        auto weak = std::weak_ptr<mbrushmaterial_t>(world->materials[0].impl);
+        f.Unload();
+        assert(weak.expired());
+        assert(!f.texture.material && !worldmodel);
+    } else if (test == "repeated_unload") {
+        skipShader = true;
+        for (int cycle = 0; cycle < 128; ++cycle) {
+            WorldFixture f;
+            f.model.numtextures = 1;
+            f.Load();
+            auto weak = std::weak_ptr<mbrushmaterial_t>(world->materials[0].impl);
+            assert(!weak.expired());
+            world->surfnormals = static_cast<dvertnorm_t *>(Allocate(64, "test", 1));
+            world->normals = static_cast<dnormal_t *>(Allocate(64, "test", 1));
+            world->leaflights = static_cast<mlightprobe_t *>(Allocate(64, "test", 1));
+            world->worldlights = static_cast<mworldlight_t *>(Allocate(64, "test", 1));
+            world->vislightdata = static_cast<byte *>(Allocate(64, "test", 1));
+            world->shadowzbuffers = static_cast<lightzbuffer_t *>(Allocate(64, "test", 1));
+            world->sortedfaces = static_cast<unsigned short *>(Allocate(64, "test", 1));
+            f.Unload();
+            assert(weak.expired());
+            assert(!f.texture.material && !worldmodel);
+            ClearDecals();
+            HUD_BuildLightmaps();
+        }
+    } else {
+        assert(false && "Unknown case");
+    }
+    std::printf("%s passed\n", argv[1]);
+    return 0;
+}

@@ -32,6 +32,7 @@
 #include "monsters.h"
 #include "weapons.h"
 #include "env_sprite.h"
+#include "modular_npc.h"
 
 extern Vector VecBModelOrigin( entvars_t* pevBModel );
 
@@ -60,6 +61,9 @@ public:
 	void Spawn(void);
 	virtual void Precache(void);
 	void KeyValue( KeyValueData *pkvd );
+	// Data-driven firing shared by turret, miniturret and sentry.
+	// Returns true when a modular definition handles this shot (even if empty).
+	bool TryModularShoot( const Vector &source, const Vector &direction );
 	void TurretUse( CBaseEntity *pActivator, CBaseEntity *pCaller, USE_TYPE useType, float value );
 	
 	virtual void TraceAttack( entvars_t *pevAttacker, float flDamage, Vector vecDir, TraceResult *ptr, int bitsDamageType);
@@ -95,6 +99,10 @@ public:
 	int MoveTurret(void);
 	virtual void Shoot(Vector &vecSrc, Vector &vecDirToEnemy) { };
 
+    string_t m_iszModularWeapon = iStringNull;
+    string_t m_iszModularCartridge = iStringNull;
+    int m_iModularRounds = -1; // -1 = unlimited, matching legacy turret behavior
+    bool m_useModularWeapon = false;
 	float m_flMaxSpin;		// Max time to spin the barrel w/o a target
 	int m_iSpin;
 

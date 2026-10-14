@@ -41,6 +41,7 @@ list(APPEND SVDLL_SOURCES
 	"soundent.cpp"
 	"spectator.cpp"
 	"stats.cpp"
+	"studio_pose_cache.cpp"
 	"strings.cpp"
 	"subs.cpp"
 	"sv_materials.cpp"
@@ -49,6 +50,9 @@ list(APPEND SVDLL_SOURCES
 	"util.cpp"
 	"weapons.cpp"
 	"server_weapon_layer_impl.cpp"
+	"modular_ballistics.cpp"
+	"modular_ballistic_exit.cpp"
+	"modular_npc.cpp"
 	"world.cpp"
 )
 
@@ -70,8 +74,14 @@ list(APPEND SVDLL_SOURCES
 	"${CMAKE_SOURCE_DIR}/game_shared/seeded_random_generator.cpp"
 	"${CMAKE_SOURCE_DIR}/game_shared/meshdesc.cpp"
 	"${CMAKE_SOURCE_DIR}/game_shared/meshdesc_factory.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/performance_profile.cpp"
 	"${CMAKE_SOURCE_DIR}/game_shared/filesystem_utils.cpp"
 	"${CMAKE_SOURCE_DIR}/game_shared/filesystem_manager.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/physics_asset_format.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/modular_weapons.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/ballistic_flight.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/ballistic_penetration.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/ballistic_path_cache.cpp"
 	"${CMAKE_SOURCE_DIR}/public/crclib.cpp"
 )
 
@@ -79,6 +89,7 @@ if(ENABLE_PHYSX)
 	include(FindPhysX)
 	list(APPEND SVDLL_SOURCES
 		"physx/physx_impl.cpp"
+		"physx/physics_asset.cpp"
 		"physx/event_handler.cpp"
 		"physx/assert_handler.cpp"
 		"physx/collision_filter_data.cpp"

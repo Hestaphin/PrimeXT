@@ -25,6 +25,7 @@
 #include	"weapons.h"
 #include	"game.h"
 #include "user_messages.h"
+#include "studio_pose_cache.h"
 #include "beam.h"
 
 //#define USE_ENGINE_TOUCH_TRIGGERS
@@ -1449,6 +1450,7 @@ int CBaseEntity::Save( CSave &save )
 
 int CBaseEntity::Restore( CRestore &restore )
 {
+	ClearServerStudioPoseCache();
 	int status;
 	EHANDLE hParent, hChild, hNextChild;
 

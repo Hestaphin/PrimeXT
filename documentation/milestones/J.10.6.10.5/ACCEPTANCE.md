@@ -1,0 +1,12 @@
+# F5 actual-model/native acceptance — pending
+
+1. Build server/client/pxmv with installed dependencies on Windows x64/Win32 Debug/Release and supported Linux, PhysX ON/OFF. Use verify_j10_6_10_5_native.py in separate build directories; retain configure/link logs. CMake was unavailable here, so no native configuration/link began.
+2. Use a matching actual quadruped, a branching monster/wing/tail model and a second humanoid convention. Generate from the model; resolve missing/ambiguous roles explicitly. Synthetic fixtures do not replace these actual assets/runs.
+3. Check Simple/Standard/Detailed body graphs, torso/limb pivots, optional neck/feet/jaw, every expanded mapping, depth truncation and passive bones. Reject accidental weapon/accessory discovery or unintended branch capture. Inspect fitting, mass ratios and pair clearance; tune actual geometry before claiming stability.
+4. Exercise Duplicate/Import/Save As/Reset, depth/branch controls, profile and pair editing, stale Apply, Cancel, Undo and main-panel body/joint edits in the native GUI. Check controls, labels, DPI, resizing and window lifecycle.
+5. Compare selected-joint guides with real PhysX local frames/limits: explicit anchors/angles, asymmetric flexion signs, hinges and moving bodies. Toggle guides and verify model/floor/next-frame GL state. Independent arcs are orientation/range guides; use diagnostics for coupled cone error and anchor drift.
+6. Drop Quad/Creature and Heavy/Loose rigs in upright, side, head/shoulder-first and limb-first orientations at normal/stressed timestep cadence. Compare self-collision Off/Selective, anchor gaps, angular speeds, penetration, settling/sleep and impulse wake. Do not mask poor pivots/overlap with extra damping or forced sleep.
+7. Repeat F4's ten controlled deaths, initial zero bullet impulse then normal limb/pellet/explosion hits, debug bodies versus mesh, positive uniform scales, single-player and remote networking, PVS/reentry, partial/full ragdoll, freeze/thaw and save/load. Confirm static/animated/hinged props, _cp import, trace/hitgroups, materials/decals and modular ballistics remain correct under v5.
+8. Record representative model/asset/source hashes, platform/configuration, diagnostics, clips and FPS/timing with diagnostics/guides Off/On. Mark actual-model and physical/game acceptance passed only after the applicable runs pass.
+
+Current status: portable implementation/evidence delivered; additional actual models and native solver/GUI/GPU/game/FPS acceptance NOT_RUN.

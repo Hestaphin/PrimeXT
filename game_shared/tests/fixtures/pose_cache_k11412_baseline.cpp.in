@@ -1,0 +1,303 @@
+// Frozen K.11.4.1.1 production methods for exact geometry comparison.
+void CPhysicPhysX::BaselineCollision( CBaseEntity *pObject, PhysicsAssetCollisionState &state, const PhysicsAssetDef &asset )
+{
+    pxperf::Scope profileScope(pxperf::Metric::CollisionMesh);
+    if( state.articulatedOverride )
+    {
+        state.animatedTraceMesh.reset();
+        return;
+    }
+    // The same actor owns each section before and after handoff. The GoldSrc
+    // gameplay sweep representation follows its CURRENT pose in either mode.
+    const auto sectionAvailable = [&]( size_t index ) -> bool {
+        if( asset.collisions[index].bone.empty() ) return true;
+        for( const PhysicsPartRuntime &part : state.parts )
+            for( const PhysicsPartShape &shape : part.shapes )
+                if( shape.collisionIndex == index ) return part.actor != nullptr;
+        return false;
+    };
+    struct PrimitivePartMesh
+    {
+        const PhysicsPartRuntime *part;
+        const physicsasset::BodyDef *body;
+        std::vector<physicsasset::PrimitiveTriangle> triangles;
+    };
+    std::vector<PrimitivePartMesh> primitives;
+    for( const PhysicsPartRuntime &part : state.parts )
+    {
+        if( !part.actor || part.bodyIndex < 0 ||
+            static_cast<size_t>(part.bodyIndex) >= asset.bodies.size() ) continue;
+        bool hasActivePrimitive = false;
+        for( const PhysicsPartShape &shape : part.shapes )
+            if( shape.shape && shape.collisionIndex == asset.collisions.size() &&
+                (shape.shape->getFlags() & (PxShapeFlag::eSIMULATION_SHAPE | PxShapeFlag::eSCENE_QUERY_SHAPE)))
+                hasActivePrimitive = true;
+        if( !hasActivePrimitive ) continue; // never duplicate a mesh-backed part
+        PrimitivePartMesh entry{ &part, &asset.bodies[part.bodyIndex], {} };
+        physicsasset::BuildPrimitiveTraceTriangles( entry.body->shape, entry.triangles );
+        if( !entry.triangles.empty() ) primitives.push_back(std::move(entry));
+    }
+	bool hasBoneBound = false;
+	for( const auto &collision : asset.collisions )
+		if( !collision.bone.empty() ) { hasBoneBound = true; break; }
+	if( !hasBoneBound && primitives.empty() )
+	{
+		state.animatedTraceMesh.reset();
+		return;
+	}
+
+	model_t *renderModel = (model_t *)MODEL_HANDLE( pObject->pev->modelindex );
+	if( !renderModel || renderModel->type != mod_studio )
+	{
+		state.animatedTraceMesh.reset();
+		return;
+	}
+
+	size_t triangleCount = 0;
+	for( size_t sectionIndex = 0; sectionIndex < asset.collisions.size(); ++sectionIndex )
+	{
+        const auto &collision = asset.collisions[sectionIndex];
+		if( !sectionAvailable( sectionIndex ) || collision.disabled || !CollisionSectionActive( collision, renderModel, pObject->pev->body ) ) continue;
+		triangleCount += collision.indices.size() / 3;
+	}
+	for( const auto &primitive : primitives ) triangleCount += primitive.triangles.size();
+	if( triangleCount == 0 )
+	{
+		state.animatedTraceMesh.reset();
+		return;
+	}
+
+	pxperf::Get().Add(pxperf::Metric::CollisionMeshBuilds, 1);
+	pxperf::Get().Add(pxperf::Metric::CollisionTriangles, static_cast<double>(triangleCount));
+	auto mesh = std::make_unique<CMeshDesc>();
+	mesh->SetDebugName( pObject->GetModel() );
+	mesh->SetModel( renderModel, pObject->pev->body, pObject->pev->skin );
+	mesh->SetGeometryType( clipfile::GeometryType::CookedTriangleMesh );
+    if( triangleCount > static_cast<size_t>(MAX_TRIANGLES_SOFT) ||
+        !mesh->InitMeshBuild(static_cast<int>(triangleCount)) )
+    {
+        state.animatedTraceMesh.reset();
+        return;
+    }
+
+	// The finished trace mesh is unscaled entity-local. SetMeshOrientation
+    // applies GetScale() once. Never store an already-scaled bone pivot here.
+    const matrix4x4 entityToWorld( pObject->GetAbsOrigin(), pObject->GetAbsAngles(), 1.0f );
+    const Vector modelScale = pObject->GetScale();
+	for( size_t sectionIndex = 0; sectionIndex < asset.collisions.size(); ++sectionIndex )
+	{
+        const auto &collision = asset.collisions[sectionIndex];
+		if( !sectionAvailable( sectionIndex ) || collision.disabled || !CollisionSectionActive( collision, renderModel, pObject->pev->body ) ) continue;
+
+		matrix4x4 boneToWorld;
+        physicsasset::ScaledTraceBoneFrame traceBone;
+		bool boneBound = !collision.bone.empty();
+		if( boneBound )
+		{
+			const int boneIndex = FindStudioBoneIndex( renderModel, collision.bone.c_str() );
+			if( boneIndex < 0 ) continue;
+            bool physicalPose = false;
+            for( const PhysicsPartRuntime &part : state.parts )
+                if( part.boneIndex == boneIndex && part.actor &&
+                    part.owner == physicsasset::PartOwner::ArticulatedBody )
+                {
+                    boneToWorld = MatrixFromPxTransform( part.actor->getGlobalPose() );
+                    physicalPose = true;
+                    break;
+                }
+            if( !physicalPose )
+            {
+                // GET_BONE_POSITION reports an unscaled Studio bone pivot.
+                // Reuse the scaled physical actor pivot convention.
+                boneToWorld = MatrixFromPxTransform( StudioBoneWorldTransform( pObject, boneIndex ) );
+            }
+            if( !traceBone.Initialize( entityToWorld, boneToWorld, modelScale ) ) continue;
+		}
+
+		for( size_t i = 0; i + 2 < collision.indices.size(); i += 3 )
+		{
+			Vector triangle[3];
+			for( int corner = 0; corner < 3; ++corner )
+			{
+				const std::uint32_t index = collision.indices[i + corner];
+				if( index >= collision.vertices.size() ) continue;
+				const physicsasset::Vec3 &v = collision.vertices[index];
+				Vector local( v.x, v.y, v.z );
+				if( boneBound )
+				{
+                    local = traceBone.ToTraceLocal( local );
+				}
+				triangle[corner] = local;
+			}
+			mesh->AddMeshTrinagle( triangle );
+		}
+	}
+
+    // Primitive-only hinges have no authored collision section. Their actual
+    // PhysX actor pose (including Free/Driven motion) owns the trace surface.
+    // The shape-local offset/angles are applied before the shared I.10.2
+    // bone-frame conversion; SetMeshOrientation applies entity scale once.
+    for( const PrimitivePartMesh &primitive : primitives )
+    {
+        physicsasset::ScaledTraceBoneFrame frame;
+        // Kinematic animation may be ahead of the last PhysX simulation
+        // step. Use the same live Studio pivot as animated mesh-backed parts;
+        // dynamic/Driven parts use their actual PhysX pose instead.
+        const PxTransform actorPose =
+            primitive.part->owner == physicsasset::PartOwner::AnimatedProxy &&
+            primitive.part->mode == PhysicsPartMode::Animated
+                ? StudioBoneWorldTransform(pObject,primitive.part->boneIndex)
+                : primitive.part->actor->getGlobalPose();
+        if( !frame.Initialize(entityToWorld,
+            MatrixFromPxTransform(actorPose),modelScale) ) continue;
+        const auto &body = *primitive.body;
+        const matrix4x4 shapeToBone(Vector(body.offset.x,body.offset.y,body.offset.z),
+            Vector(body.angles.x,body.angles.y,body.angles.z),1.0f);
+        for( const auto &src : primitive.triangles )
+        {
+            Vector triangle[3];
+            for( int i=0;i<3;++i )
+            {
+                const Vector local(src[i].x,src[i].y,src[i].z);
+                triangle[i] = frame.ToTraceLocal(shapeToBone.VectorTransform(local));
+            }
+            mesh->AddMeshTrinagle(triangle);
+        }
+    }
+
+	if( !mesh->FinishMeshBuild() )
+	{
+		mesh->FreeMeshBuild();
+		return;
+	}
+	mesh->FreeMeshBuild();
+	state.animatedTraceMesh = std::move( mesh );
+}
+
+static bool BuildCurrentStudioRenderMeshBaseline( CBaseEntity *pEntity, CMeshDesc &mesh )
+{
+    pxperf::Scope profileScope(pxperf::Metric::ImpactMesh);
+	if( !pEntity ) return false;
+	model_t *model = (model_t *)MODEL_HANDLE( pEntity->pev->modelindex );
+	if( !model || model->type != mod_studio ) return false;
+	studiohdr_t *header = (studiohdr_t *)model->cache.data;
+	if( !header || header->numbones <= 0 ) return false;
+
+	int triangleCount = 0;
+	for( int bodyPartIndex = 0; bodyPartIndex < header->numbodyparts; ++bodyPartIndex )
+	{
+		mstudiobodyparts_t *bodyPart = (mstudiobodyparts_t *)((byte *)header + header->bodypartindex) + bodyPartIndex;
+		if( bodyPart->nummodels <= 0 || bodyPart->base <= 0 ) continue;
+		const int modelIndex = ( pEntity->pev->body / bodyPart->base ) % bodyPart->nummodels;
+		mstudiomodel_t *subModel = (mstudiomodel_t *)((byte *)header + bodyPart->modelindex) + modelIndex;
+		for( int meshIndex = 0; meshIndex < subModel->nummesh; ++meshIndex )
+		{
+			mstudiomesh_t *studioMesh = (mstudiomesh_t *)((byte *)header + subModel->meshindex) + meshIndex;
+			short *commands = (short *)((byte *)header + studioMesh->triindex);
+			while( int count = *commands++ )
+			{
+				count = count < 0 ? -count : count;
+				if( count >= 3 ) triangleCount += count - 2;
+				commands += count * 4;
+			}
+		}
+	}
+	if( triangleCount <= 0 ) return false;
+
+	mesh.SetDebugName( pEntity->GetModel() );
+	mesh.SetModel( model, pEntity->pev->body, pEntity->pev->skin );
+	mesh.SetGeometryType( clipfile::GeometryType::Original );
+	pxperf::Get().Add(pxperf::Metric::ImpactMeshBuilds, 1);
+	if( !mesh.InitMeshBuild( triangleCount ) ) return false;
+
+	const matrix4x4 entityToWorld( pEntity->GetAbsOrigin(), pEntity->GetAbsAngles(), 1.0f );
+	std::vector<matrix4x4> boneToWorld( header->numbones );
+	for( int bone = 0; bone < header->numbones; ++bone )
+	{
+		pxperf::Scope profileBone(pxperf::Metric::ServerBoneQuery);
+		Vector origin, angles;
+		GET_BONE_POSITION( pEntity->edict(), bone, origin, angles );
+		boneToWorld[bone] = matrix4x4( origin, angles, 1.0f );
+	}
+
+	bool addedAny = false;
+	for( int bodyPartIndex = 0; bodyPartIndex < header->numbodyparts; ++bodyPartIndex )
+	{
+		mstudiobodyparts_t *bodyPart = (mstudiobodyparts_t *)((byte *)header + header->bodypartindex) + bodyPartIndex;
+		if( bodyPart->nummodels <= 0 || bodyPart->base <= 0 ) continue;
+		const int modelIndex = ( pEntity->pev->body / bodyPart->base ) % bodyPart->nummodels;
+		mstudiomodel_t *subModel = (mstudiomodel_t *)((byte *)header + bodyPart->modelindex) + modelIndex;
+		Vector *studioVertices = (Vector *)((byte *)header + subModel->vertindex);
+		byte *vertexBones = (byte *)header + subModel->vertinfoindex;
+
+		for( int meshIndex = 0; meshIndex < subModel->nummesh; ++meshIndex )
+		{
+			mstudiomesh_t *studioMesh = (mstudiomesh_t *)((byte *)header + subModel->meshindex) + meshIndex;
+			short *commands = (short *)((byte *)header + studioMesh->triindex);
+			while( int rawCount = *commands++ )
+			{
+				const bool strip = rawCount > 0;
+				const int count = rawCount < 0 ? -rawCount : rawCount;
+				std::vector<mvert_t> primitive;
+				primitive.reserve( count );
+				for( int v = 0; v < count; ++v, commands += 4 )
+				{
+					mvert_t out = {};
+					const int vertexIndex = commands[0];
+					if( vertexIndex < 0 || vertexIndex >= subModel->numverts )
+						continue;
+					const int boneIndex = vertexBones[vertexIndex];
+					if( boneIndex < 0 || boneIndex >= header->numbones )
+						continue;
+					const Vector world = boneToWorld[boneIndex].VectorTransform( studioVertices[vertexIndex] );
+					out.point = entityToWorld.VectorITransform( world );
+					// Material lookup only requires skinref. TraceMesh's server-side masked
+					// texture pixel test currently has no pixel source, so UVs do not affect
+					// this effects-only trace.
+					out.st[0] = out.st[1] = 0.0f;
+					primitive.push_back( out );
+				}
+				if( primitive.size() < 3 ) continue;
+
+				mvert_t triangle[3];
+				triangle[0] = primitive[0];
+				triangle[1] = primitive[1];
+				triangle[2] = primitive[2];
+				addedAny |= mesh.AddMeshTrinagle( triangle, studioMesh->skinref );
+				for( size_t v = 3; v < primitive.size(); ++v )
+				{
+					if( strip )
+					{
+						const int vertexState = static_cast<int>( v ) + 1;
+						if( vertexState & 1 )
+						{
+							triangle[0] = primitive[v - 2];
+							triangle[1] = primitive[v - 1];
+						}
+						else
+						{
+							triangle[0] = primitive[v - 1];
+							triangle[1] = primitive[v - 2];
+						}
+						triangle[2] = primitive[v];
+					}
+					else
+					{
+						triangle[0] = primitive[0];
+						triangle[1] = primitive[v - 1];
+						triangle[2] = primitive[v];
+					}
+					addedAny |= mesh.AddMeshTrinagle( triangle, studioMesh->skinref );
+				}
+			}
+		}
+	}
+
+	if( !addedAny || !mesh.FinishMeshBuild() )
+	{
+		mesh.FreeMeshBuild();
+		return false;
+	}
+	mesh.FreeMeshBuild();
+	return true;
+}

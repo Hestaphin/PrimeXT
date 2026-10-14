@@ -611,6 +611,9 @@ public:
 	int  _cdecl MsgFunc_CustomDecal(const char *pszName, int iSize, void *pbuf);
 	int  _cdecl MsgFunc_StudioDecal( const char *pszName, int iSize, void *pbuf );
 	int  _cdecl MsgFunc_SetupBones( const char *pszName, int iSize, void *pbuf );
+	int  _cdecl MsgFunc_RagdollPose( const char *pszName, int iSize, void *pbuf );
+	int  _cdecl MsgFunc_PartPose( const char *pszName, int iSize, void *pbuf );
+	int  _cdecl MsgFunc_RagdollDecal( const char *pszName, int iSize, void *pbuf );
 	int  _cdecl MsgFunc_PostFxSettings( const char *pszName, int iSize, void *pbuf );
 
 	// Screen information

@@ -179,7 +179,7 @@ void CGibShooter :: ShootThink ( void )
 		pShot->SetAbsVelocity( vecShootDir * m_flGibVelocity );
 
 		if( pShot->m_iActorType == ACTOR_DYNAMIC )
-			WorldPhysic->AddForce( pShot, vecShootDir * m_flGibVelocity * ( 1.0f / gpGlobals->frametime ) * 0.1f );
+			WorldPhysic->AddForce( pShot, vecShootDir * m_flGibVelocity * 0.1f, IPhysicLayer::ForceMode::Impulse );
 
 		// custom particles already set this
 		if( FClassnameIs( pShot->pev, "gib" ))

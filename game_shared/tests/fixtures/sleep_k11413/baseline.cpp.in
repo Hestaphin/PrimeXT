@@ -1,0 +1,135 @@
+// Frozen K.11.4.1.2 production methods for pose/frame/bounds comparison.
+void PhysicsAssetInstance::BaselineCapture()
+{
+    if(!m_ragdoll || !m_actorsCreated)
+    {
+        m_hasSimulationPose = false;
+        return;
+    }
+
+    bool haveBounds = false;
+    PxBounds3 bounds;
+    bool havePose = false;
+
+    for(size_t i = 0; i < m_bodies.size(); ++i)
+    {
+        auto &runtime = m_bodies[i];
+        runtime.hasSimulationPose = false;
+        if(!runtime.actor) continue;
+
+        const PxTransform bodyWorld = runtime.actor->getGlobalPose();
+        if(!bodyWorld.isValid()) continue;
+
+        // actor = bone * authoredBodyLocal, therefore
+        // bone = actor * inverse(authoredBodyLocal).
+        const PxTransform boneWorld = bodyWorld * runtime.bodyToBonePose;
+        if(!boneWorld.isValid()) continue;
+
+        runtime.simulatedBonePose = boneWorld;
+        runtime.hasSimulationPose = true;
+        havePose = true;
+
+        const PxBounds3 actorBounds = runtime.actor->getWorldBounds(1.02f);
+        if(actorBounds.isValid())
+        {
+            if(!haveBounds)
+            {
+                bounds = actorBounds;
+                haveBounds = true;
+            }
+            else
+            {
+                bounds.minimum.x = std::min(bounds.minimum.x, actorBounds.minimum.x);
+                bounds.minimum.y = std::min(bounds.minimum.y, actorBounds.minimum.y);
+                bounds.minimum.z = std::min(bounds.minimum.z, actorBounds.minimum.z);
+                bounds.maximum.x = std::max(bounds.maximum.x, actorBounds.maximum.x);
+                bounds.maximum.y = std::max(bounds.maximum.y, actorBounds.maximum.y);
+                bounds.maximum.z = std::max(bounds.maximum.z, actorBounds.maximum.z);
+            }
+        }
+    }
+
+    m_hasSimulationPose = havePose;
+    m_hasSimulationBounds = haveBounds;
+    if(haveBounds) m_simulationBounds = bounds;
+}
+void CPhysicPhysX::BaselinePresentation( PhysicsAssetInstance *asset )
+{
+	if( !asset || !asset->IsRagdoll() || !asset->HasSimulationPose() ) return;
+	CBaseEntity *owner = asset->Owner();
+	if( !owner ) return;
+
+	PxTransform rootPose;
+	if( !asset->GetRootBonePose( rootPose ) || !rootPose.isValid() ) return;
+
+	// Partial ragdoll / physical-animation mode keeps normal GoldSrc movement
+	// ownership. The .phys bodies are an articulated visual/query layer driven
+	// around the animation pose, so never drag the entity origin/hull behind a
+	// temporarily displaced limb/root. Full weight=1 ragdolls use the D behavior
+	// below and make the articulated body authoritative for presentation bounds.
+	if( asset->NeedsAnimationControl() )
+	{
+		SetBits( owner->pev->iuser1, CF_RAGDOLL );
+		SendRagdollPose( asset );
+		return;
+	}
+
+	Vector rootOrigin( rootPose.p.x, rootPose.p.y, rootPose.p.z );
+	Vector entityOrigin = rootOrigin;
+	Vector entityAngles = owner->GetAbsAngles();
+
+	const int entityIndex = ENTINDEX( owner->edict() );
+	auto stateIt = m_ragdollEntityState.find( entityIndex );
+	if( stateIt != m_ragdollEntityState.end() && stateIt->second.hasRootRelation )
+	{
+		matrix4x4 rootWorld = MatrixFromPxTransform( rootPose );
+		matrix4x4 entityWorld = rootWorld.ConcatTransforms( stateIt->second.rootToEntity );
+		entityWorld.GetOrigin( entityOrigin );
+		entityWorld.GetAngles( entityAngles );
+	}
+
+	// Keep the network/PVS/entity frame attached to the ragdoll while preserving
+	// its authored relationship to the selected physics root. This avoids moving
+	// a feet-origin model to its pelvis when ragdoll starts. Ragdoll snapshots
+	// carry their own world-space root plus root-relative children, so rendering
+	// does not depend on packet ordering of this entity transform.
+	owner->SetAbsOrigin( entityOrigin );
+	owner->SetAbsAngles( entityAngles );
+
+	PxBounds3 bounds;
+	if( asset->GetSimulationBounds( bounds ) )
+	{
+		// curstate.mins/maxs are interpreted in entity-local coordinates and the
+		// client renderer rotates them by entity angles. Convert the PhysX world
+		// AABB into this frame first instead of rotating a world AABB twice.
+		const matrix4x4 worldToEntity = matrix4x4( entityOrigin, entityAngles, 1.0f ).Invert();
+		Vector mins, maxs;
+		ClearBounds( mins, maxs );
+		for( int x = 0; x < 2; ++x )
+		for( int y = 0; y < 2; ++y )
+		for( int z = 0; z < 2; ++z )
+		{
+			const Vector corner(
+				x ? bounds.maximum.x : bounds.minimum.x,
+				y ? bounds.maximum.y : bounds.minimum.y,
+				z ? bounds.maximum.z : bounds.minimum.z );
+			AddPointToBounds( worldToEntity.VectorTransform( corner ), mins, maxs );
+		}
+		ExpandBounds( mins, maxs, 8.0f );
+		UTIL_SetSize( owner->pev, mins, maxs );
+	}
+
+	const int rootIndex = asset->RootBodyIndex();
+	if( rootIndex >= 0 && rootIndex < static_cast<int>(asset->Bodies().size()) )
+	{
+		const auto &rootBody = asset->Bodies()[rootIndex];
+		if( rootBody.actor )
+		{
+			const PxVec3 velocity = rootBody.actor->getLinearVelocity();
+			owner->SetAbsVelocity( Vector( velocity.x, velocity.y, velocity.z ) );
+		}
+	}
+
+	owner->RelinkEntity( TRUE );
+	SendRagdollPose( asset );
+}

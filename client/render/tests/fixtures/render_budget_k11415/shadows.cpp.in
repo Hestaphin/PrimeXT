@@ -1,0 +1,118 @@
+#undef GL_DEBUG_SCOPE
+#define GL_DEBUG_SCOPE() ((void)0)
+#include <map>
+static void SetupApi();
+void Mod_LoadWorldMaterials(){}
+void Mod_PrecacheShaders(){}
+static cvar_t enabled={},shadowLimit={},secondaryLimit={},shadowCache={},particles={};
+cvar_t *r_nocull=&enabled;
+static int draws,particleDraws;
+static std::map<int,int> contents;
+ref_stats_t r_stats;
+int HasDynamicLights(){return 1;}
+bool Mod_CheckBoxVisible(const Vector &,const Vector &){return true;}
+#undef R_CullBox
+bool R_CullBox(const Vector &,const Vector &){return false;}
+void GL_BindFBO(GLuint f){glState.frameBuffer=f;}
+void R_FreeFrameBuffer(int){}
+void R_SetupDynamicLights(){}
+void GL_BindShader(glsl_program_t *s){RI->currentshader=s;}
+static TextureHandle ShadowImage(TextureHandle old)
+{return old.Initialized()?old:CREATE_TEXTURE("*test_depth",512,512,nullptr,TF_SHADOW);}
+void R_RenderShadowScene(CDynLight *light,int split=0)
+{
+    ++draws;
+    int slot=tr.num_2D_shadows_used++;
+    assert(slot<MAX_SHADOWS);R_MarkShadowWrite(light->type,slot);
+    tr.shadowTextures[slot]=ShadowImage(tr.shadowTextures[slot]);light->shadowTexture[split]=tr.shadowTextures[slot];
+    contents[light->shadowTexture[split].ToInt()]=light->key;
+    light->shadowMatrix[split]=matrix4x4(Vector(float(light->key),0,0),Vector(0,0,0));
+    light->shadowMatrix[split].CopyToArray(light->gl_shadowMatrix[split]);
+}
+void R_RenderShadowCubeSide(CDynLight *light,int side)
+{
+    ++draws;if(side==0)++tr.num_CM_shadows_used;
+    const int slot=tr.num_CM_shadows_used-1;assert(slot>=0 && slot<MAX_SHADOWS);
+    R_MarkShadowWrite(LIGHT_OMNI,slot);tr.shadowCubemaps[slot]=ShadowImage(tr.shadowCubemaps[slot]);
+    light->shadowTexture[0]=tr.shadowCubemaps[slot];contents[light->shadowTexture[0].ToInt()]=light->key;
+    light->shadowMatrix[0]=matrix4x4(Vector(float(light->key),0,0),Vector(0,0,0));
+    light->shadowMatrix[0].CopyToArray(light->gl_shadowMatrix[0]);
+}
+@PRODUCTION@
+int main(int argc,char **argv)
+{
+    assert(argc==2);const std::string test=argv[1];SetupApi();R_InitRefState();
+    enabled.value=1;shadowLimit.value=16;secondaryLimit.value=8;shadowCache.value=1;particles.value=0;
+    r_shadows=&enabled;r_sunshadows=&enabled;worldmodel=new model_t{};worldmodel->type=mod_brush;
+    tr.sky_normal=Vector(0,0,-1);
+    static int nextTexture=100;
+    gRenderfuncs.GL_CreateTexture=[](const char *,int,int,const void *,texFlags_t)->int{return ++nextTexture;};
+    gRenderfuncs.RenderGetParm=[](int parm,int)->intptr_t{return parm==PARM_TEX_TEXNUM?77:512;};
+    gEngfuncs.GetClientTime=[]()->float{return float(tr.time);};
+    gEngfuncs.pfnGetCvarPointer=[](const char *name)->cvar_t* {
+        if(!std::strcmp(name,"r_shadow_budget"))return &shadowLimit;
+        if(!std::strcmp(name,"r_shadow_subview_budget"))return &secondaryLimit;
+        if(!std::strcmp(name,"r_shadow_cache"))return &shadowCache;
+        if(!std::strcmp(name,"r_shadow_particles"))return &particles;
+        return nullptr;
+    };
+    auto light=[&](int index,int type,int key,float distance){auto &l=tr.dlights[index];l.type=type;l.key=key;l.radius=100;l.die=100;l.origin=Vector(distance,0,0);l.fov=90;};
+    auto frame=[&](double time){tr.time=time;++tr.realframecount;tr.num_2D_shadows_used=tr.num_CM_shadows_used=0;draws=0;glState.frameBuffer=77;RI->params=RP_NONE;R_RenderShadowmaps();assert(glState.stack_position==0 && glState.frameBuffer==77);};
+    if(test=="shadow_atomic")
+    {
+        light(0,LIGHT_DIRECTIONAL,10,100);light(1,LIGHT_OMNI,20,1);light(2,LIGHT_SPOT,30,2);shadowLimit.value=5;frame(0);
+        assert(draws==5 && tr.dlights[1].shadowTexture[0]==tr.depthCubemap && contents[tr.dlights[2].shadowTexture[0].ToInt()]==30);
+    }
+    else if(test=="shadow_cube")
+    {
+        light(0,LIGHT_OMNI,10,1);shadowLimit.value=5;frame(0);assert(draws==0 && tr.num_CM_shadows_used==0);
+        shadowLimit.value=6;frame(.01);assert(draws==6 && tr.num_CM_shadows_used==1);
+    }
+    else if(test=="shadow_cache")
+    {
+        light(0,LIGHT_SPOT,10,1);light(1,LIGHT_OMNI,20,2);frame(0);assert(draws==7);
+        frame(.01);assert(draws==0 && tr.num_2D_shadows_used==1 && tr.num_CM_shadows_used==1);
+        assert(contents[tr.dlights[0].shadowTexture[0].ToInt()]==10 && contents[tr.dlights[1].shadowTexture[0].ToInt()]==20);
+        tr.dlights[0].origin.x=3;frame(.02);assert(draws==1);frame(.03);assert(draws==0);
+        R_ResetRenderBudgetCache();frame(.04);assert(draws==7);
+    }
+    else if(test=="shadow_slots")
+    {
+        light(0,LIGHT_SPOT,10,1);light(1,LIGHT_SPOT,20,2);frame(0);assert(draws==2);
+        light(2,LIGHT_SPOT,30,.5f);frame(.01);assert(draws==3);
+        for(int i=0;i<3;++i)assert(contents[tr.dlights[i].shadowTexture[0].ToInt()]==tr.dlights[i].key);
+        frame(.02);assert(draws==0 && tr.num_2D_shadows_used==3);
+        R_MarkShadowWrite(LIGHT_SPOT,0);contents[tr.shadowTextures[0].ToInt()]=999;frame(.03);assert(draws==1);
+        for(int i=0;i<3;++i)assert(contents[tr.dlights[i].shadowTexture[0].ToInt()]==tr.dlights[i].key);
+    }
+    else if(test=="shadow_dynamic")
+    {
+        light(0,LIGHT_SPOT,10,1);cl_entity_t actor={};model_t model={};model.type=mod_studio;actor.model=&model;tr.draw_entities[0]=&actor;tr.num_draw_entities=1;
+        frame(0);assert(draws==1);frame(0);assert(draws==1); // unknown pose may change even at equal game time
+        tr.num_draw_entities=0;particles.value=1;frame(.01);frame(.01);assert(draws==1);
+    }
+    else if(test=="shadow_feeds")
+    {
+        light(0,LIGHT_SPOT,10,1);world->features=WORLD_HAS_SCREENS;frame(0);frame(0);assert(draws==1);
+        world->features=WORLD_HAS_MOVIES;frame(.01);frame(.01);assert(draws==1);
+    }
+    else if(test=="shadow_brush")
+    {
+        light(0,LIGHT_SPOT,10,1);cl_entity_t actor={};model_t model={};model.type=mod_brush;actor.model=&model;tr.draw_entities[0]=&actor;tr.num_draw_entities=1;
+        frame(0);frame(.01);assert(draws==0);actor.origin.x=2;frame(.02);assert(draws==1);
+    }
+    else if(test=="shadow_secondary")
+    {
+        light(0,LIGHT_OMNI,10,1);secondaryLimit.value=0;
+        tr.realframecount=1;RI->params=RP_SCREENVIEW;R_RenderShadowmaps();assert(draws==0);
+        frame(.01);assert(draws==6);
+    }
+    else if(test=="shadow_zero_legacy")
+    {
+        light(0,LIGHT_SPOT,10,1);shadowLimit.value=0;frame(0);assert(draws==0);
+        shadowLimit.value=-1;frame(.01);assert(draws==1);shadowCache.value=0;frame(.02);assert(draws==1);
+    }
+    else assert(false);
+    delete worldmodel;worldmodel=nullptr;
+    std::printf("PASS %s: actual shadow caller, group budgets, exact reuse and texture ownership\n",test.c_str());
+}

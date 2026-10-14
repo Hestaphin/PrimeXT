@@ -53,6 +53,8 @@ struct WEAPON
 	wrect_t	rcZoomedCrosshair;
 	SpriteHandle	hZoomedAutoaim;
 	wrect_t	rcZoomedAutoaim;
+    char modularHudSprite[256];
+    char modularAmmoSprite[256];
 };
 
 #endif//AMMO_H

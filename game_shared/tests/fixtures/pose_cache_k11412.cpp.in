@@ -1,0 +1,402 @@
+// Recording adapters around the extracted production cache and mesh methods.
+// Matrix arithmetic, .phys layout, primitive tessellation and scale conversion
+// are the project's real implementations. This is not a PhysX solver test.
+#include "matrix.h"
+#include "studio.h"
+#include "physics_asset_format.h"
+#include "physics_asset_primitive_trace.h"
+#include "physics_asset_trace_coordinates.h"
+#include "physics_asset_collision_ownership.h"
+#include "physics_asset_scale.h"
+#include "ragdoll_restore_i95_policy.h"
+#include "exact_geometry_cache.h"
+#include "performance_profile.h"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cstring>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <unordered_map>
+#include <vector>
+#include <strings.h>
+extern "C" const char *__asan_default_options() { return "detect_leaks=0:halt_on_error=1"; }
+#define Q_stricmp strcasecmp
+struct CBaseEntity;
+struct entvars_t
+{
+    Vector origin{0,0,0}, angles{0,0,0};
+    int modelindex=1,sequence=0,gaitsequence=0,body=0,skin=0,movetype=0,iuser1=0,solid=1;
+    float frame=0,animtime=0,framerate=1,scale=1;
+    byte controller[4]{},blending[2]{};
+};
+struct edict_s { bool free=false; int serialnumber=1; CBaseEntity *owner=nullptr; };
+static std::array<model_t *, 256> models{};
+#define MODEL_HANDLE(index) models[index]
+struct CBaseEntity
+{
+    entvars_t vars; entvars_t *pev=&vars; edict_t ed; int index=1;
+    Vector absOrigin{0,0,0},absAngles{0,0,0},scale{1,1,1};
+    CBaseEntity() { ed.owner=this; }
+    edict_t *edict() { return &ed; }
+    int entindex() { return index; }
+    Vector GetAbsOrigin() { return absOrigin; }
+    Vector GetAbsAngles() { return absAngles; }
+    Vector GetScale() { return scale; }
+    const char *GetModel() { return models[pev->modelindex]->name; }
+};
+static int boneQueries=0;
+static bool badBone=false;
+static bool unwrittenBone=false;
+static void GET_BONE_POSITION(edict_t *edict,int bone,Vector &origin,Vector &angles)
+{
+    ++boneQueries;
+    if(unwrittenBone) return;
+    const entvars_t &v=*edict->owner->pev;
+    const float phase=v.frame+v.sequence+float(v.controller[0])*.01f+float(v.blending[0])*.001f;
+    matrix4x4 root(v.origin,v.angles,1.0f);
+    origin=root.VectorTransform(Vector(20.0f*bone+phase,0,0));
+    angles=v.angles; angles.y+=phase;
+    if(badBone) origin.x=NAN;
+}
+namespace physx
+{
+using PxU32=std::uint32_t;
+struct PxMat44 {float m[16];explicit PxMat44(const float *v){std::copy(v,v+16,m);}};
+struct PxIdentityType {}; constexpr PxIdentityType PxIdentity{};
+struct PxTransform
+{
+    matrix4x4 matrix;
+    explicit PxTransform(PxIdentityType):matrix(Vector(0,0,0),Vector(0,0,0),1.0f){}
+    explicit PxTransform(PxMat44 m):matrix(m.m){}
+    explicit PxTransform(matrix4x4 m):matrix(m){}
+    PxTransform operator*(const PxTransform &other) const {return PxTransform(matrix.ConcatTransforms(other.matrix));}
+};
+struct PxShapeFlag {enum Enum {eSIMULATION_SHAPE=1,eSCENE_QUERY_SHAPE=2};};
+struct PxShape {unsigned flags=3;unsigned getFlags() const {return flags;}};
+struct PxRigidDynamic
+{
+    PxTransform pose{PxIdentity};
+    PxTransform getGlobalPose() const {return pose;}
+};
+struct PxRevoluteJoint {};
+}
+using namespace physx;
+static matrix4x4 MatrixFromPxTransform(const PxTransform &pose) {return pose.matrix;}
+using PhysicsAssetDef=physicsasset::AssetDef;
+using PhysicsAssetBodyDef=physicsasset::BodyDef;
+struct PhysicsAssetInstance
+{
+    CBaseEntity *m_owner;
+    float m_rigidScale;
+    PxTransform BodyLocalTransform(const PhysicsAssetBodyDef &) const;
+    PxTransform BoneWorldTransform(int,const PhysicsAssetBodyDef &) const;
+};
+enum class PhysicsPartMode { Animated, Free, Driven };
+namespace clipfile {enum class GeometryType {Original,CookedTriangleMesh};}
+struct mvert_t {Vector point;float st[2]{};};
+struct RecordedTriangle {std::array<Vector,3> point;int skin=0;};
+struct CMeshDesc
+{
+    inline static int builds=0,finishes=0;
+    inline static bool failInit=false,failFinish=false;
+    inline static std::size_t forcedMemory=0;
+    std::vector<RecordedTriangle> triangles;
+    bool finished=false;
+    int body=0,skin=0;
+    void SetDebugName(const char *) {}
+    void SetModel(const model_t *,int b,int s) {body=b;skin=s;}
+    void SetGeometryType(clipfile::GeometryType) {}
+    bool InitMeshBuild(int) {++builds;return !failInit;}
+    bool AddMeshTrinagle(Vector *points)
+    {triangles.push_back({{points[0],points[1],points[2]},0});return true;}
+    bool AddMeshTrinagle(mvert_t *points,int material)
+    {triangles.push_back({{points[0].point,points[1].point,points[2].point},material});return true;}
+    bool FinishMeshBuild() {++finishes;finished=!failFinish;return finished;}
+    void FreeMeshBuild() {}
+    CMeshDesc *GetMesh() {return finished?this:nullptr;}
+    std::size_t GetMeshMemorySize() const {return forcedMemory?forcedMemory:triangles.size()*sizeof(RecordedTriangle);}
+    void *GetHeadNode() {return nullptr;}
+    int GetBody() {return body;} int GetSkin() {return skin;}
+    void StudioConstructMesh() {finished=true;triangles.push_back({{Vector(0,0,0),Vector(1,0,0),Vector(0,1,0)},0});}
+};
+constexpr int MAX_TRIANGLES_SOFT=100000;
+struct TraceMesh
+{
+    CMeshDesc *mesh=nullptr;int skin=0;
+    trace_t *result=nullptr;
+    void SetTraceMesh(CMeshDesc *m,void *,int,int,int s) {mesh=m;skin=s;}
+    void SetMeshOrientation(const Vector &,const Vector &,const Vector &) {}
+    void SetupTrace(const Vector &,const Vector &,const Vector &,const Vector &,trace_t *r) {result=r;}
+    bool DoTrace()
+    {
+        if(!mesh || mesh->triangles.empty()) return false;
+        result->fraction=.5f;result->endpos=mesh->triangles[0].point[0];result->plane.normal=Vector(0,0,1);return true;
+    }
+    std::uint32_t GetLastHitSurface() {return std::uint32_t(500+skin);}
+};
+static std::uint32_t COM_GetMaterialHash(std::uint32_t value) {return value;}
+struct CMeshDescFactory
+{
+    CMeshDesc reference;
+    static CMeshDescFactory &Instance() {static CMeshDescFactory factory;return factory;}
+    CMeshDesc &CreateObject(int,int b,int s,clipfile::GeometryType) {reference.body=b;reference.skin=s;return reference;}
+};
+struct CPhysicPhysX
+{
+    @STRUCTS@
+    bool HasPhysicsAssetCollision(CBaseEntity *) {return true;}
+    void RebuildAnimatedCollisionTraceMesh(CBaseEntity *,PhysicsAssetCollisionState &,const PhysicsAssetDef &);
+    void BaselineCollision(CBaseEntity *,PhysicsAssetCollisionState &,const PhysicsAssetDef &);
+    bool ResolveRenderImpact(CBaseEntity *,const Vector &,const Vector &,Vector &,Vector &,std::uint32_t &);
+};
+
+@SERVER_POSE_CACHE@
+@INSTANCE_METHODS@
+@SERVER_METHODS@
+@BASELINE_METHODS@
+
+struct cl_entity_t
+{
+    int index=1;model_t *model=nullptr;entvars_t curstate;
+    std::array<matrix3x4,2> bones;
+    std::array<bool,2> available{{true,true}};
+};
+static int clientBoneQueries=0;
+static bool R_StudioGetCollisionBonePose(cl_entity_t *entity,int bone,matrix3x4 &out)
+{
+    ++clientBoneQueries;
+    if(bone<0 || bone>=2 || !entity->available[bone]) return false;
+    out=entity->bones[bone];return true;
+}
+static float clientTime=10;
+struct EngineFuncs {float (*GetClientTime)();};
+static EngineFuncs gEngfuncs{[](){return clientTime;}};
+@CLIENT_METHODS@
+
+struct TestModel
+{
+    studiohdr_t header{};
+    mstudiobone_t bones[2]{};
+    mstudiobodyparts_t parts[1]{};
+    mstudiomodel_t submodels[2]{};
+    mstudiomesh_t meshes[2]{};
+    Vector vertices[6];
+    byte vertexBones[6]{0,1,1,0,1,1};
+    short commands[2][14]{};
+    model_t model{};
+    TestModel()
+    {
+        const auto offset=[&](const void *pointer){return static_cast<int>((const byte *)pointer-(const byte *)&header);};
+        model.cache.data=&header;model.type=mod_studio;model.modelCRC=1;std::strcpy(model.name,"models/test.mdl");
+        header.numbones=2;header.boneindex=offset(bones);header.numbodyparts=1;header.bodypartindex=offset(parts);
+        std::strcpy(bones[0].name,"root");std::strcpy(bones[1].name,"door");
+        std::strcpy(parts[0].name,"doors");parts[0].base=1;parts[0].nummodels=2;parts[0].modelindex=offset(submodels);
+        for(int i=0;i<2;++i)
+        {
+            submodels[i].nummesh=1;submodels[i].meshindex=offset(&meshes[i]);submodels[i].numverts=3;
+            submodels[i].vertindex=offset(&vertices[3*i]);submodels[i].vertinfoindex=offset(&vertexBones[3*i]);
+            meshes[i].skinref=i+7;meshes[i].triindex=offset(commands[i]);
+            commands[i][0]=3;commands[i][1]=0;commands[i][5]=1;commands[i][9]=2;
+            vertices[3*i]=Vector(float(i*3),0,0);vertices[3*i+1]=Vector(1,0,0);vertices[3*i+2]=Vector(0,1,0);
+        }
+    }
+};
+static void Near(Vector a,Vector b) {assert((a-b).Length()<.003f);}
+static void SameMesh(const CMeshDesc &a,const CMeshDesc &b)
+{
+    assert(a.triangles.size()==b.triangles.size());
+    for(std::size_t t=0;t<a.triangles.size();++t)
+    {assert(a.triangles[t].skin==b.triangles[t].skin);for(int v=0;v<3;++v) assert(a.triangles[t].point[v]==b.triangles[t].point[v]);}
+}
+
+static void BoneCases(TestModel &mdl)
+{
+    ClearServerStudioPoseCache();CBaseEntity entity;Vector origin,angles;
+    const int start=boneQueries;
+    assert(GetServerStudioBonePose(&entity,1,origin,angles));
+    const Vector expected=origin;
+    for(int frame=0;frame<20;++frame)
+    {BeginServerStudioPoseFrame(float(frame));assert(GetServerStudioBonePose(&entity,1,origin,angles));Near(origin,expected);}
+    assert(boneQueries==start+1);
+    auto mutate=[&](auto change)
+    {
+        const auto before=ServerStudioPoseRevision(&entity);const int calls=boneQueries;
+        change();assert(ServerStudioPoseRevision(&entity)!=before);
+        assert(GetServerStudioBonePose(&entity,1,origin,angles));assert(boneQueries==calls+1);
+        assert(GetServerStudioBonePose(&entity,1,origin,angles));assert(boneQueries==calls+1);
+    };
+    mutate([&](){entity.pev->frame=10;});mutate([&](){entity.pev->sequence=1;});
+    for(auto &control:entity.pev->controller) mutate([&](){++control;});
+    for(auto &blend:entity.pev->blending) mutate([&](){++blend;});
+    mutate([&](){entity.pev->body=1;});mutate([&](){entity.pev->skin=1;});
+    mutate([&](){entity.pev->origin.x=3;});mutate([&](){entity.pev->angles.y=30;});
+    mutate([&](){entity.absOrigin.x=3;});mutate([&](){entity.absAngles.y=30;});
+    mutate([&](){entity.scale=Vector(2,2,2);});mutate([&](){entity.pev->animtime=4;});
+    mutate([&](){entity.pev->framerate=2;});mutate([&](){entity.pev->scale=2;});
+    mutate([&](){entity.pev->gaitsequence=1;});mutate([&](){entity.pev->movetype=1;});
+    mutate([&](){++entity.ed.serialnumber;});mutate([&](){++mdl.model.modelCRC;});
+    mutate([&](){mdl.model.name[1]='x';});
+    TestModel second;
+    mutate([&](){mdl.model.cache.data=&second.header;});
+    mutate([&](){mdl.model.cache.data=&mdl.header;});
+    mutate([&](){models[1]=&second.model;});
+    const auto before=ServerStudioPoseRevision(&entity);BeginServerStudioPoseFrame(1);
+    assert(ServerStudioPoseRevision(&entity)!=before);
+    const auto restore=ServerStudioPoseRevision(&entity);ClearServerStudioPoseCache();
+    assert(ServerStudioPoseRevision(&entity)!=restore);
+    entity.ed.free=true;assert(!GetServerStudioBonePose(&entity,1,origin,angles));entity.ed.free=false;
+    assert(!GetServerStudioBonePose(&entity,-1,origin,angles));assert(!GetServerStudioBonePose(&entity,2,origin,angles));
+    entity.pev->frame=NAN;assert(!GetServerStudioBonePose(&entity,1,origin,angles));entity.pev->frame=11;
+    badBone=true;assert(!GetServerStudioBonePose(&entity,1,origin,angles));badBone=false;
+    assert(GetServerStudioBonePose(&entity,1,origin,angles));
+    ++entity.pev->frame;unwrittenBone=true;assert(!GetServerStudioBonePose(&entity,1,origin,angles));
+    unwrittenBone=false;assert(GetServerStudioBonePose(&entity,1,origin,angles));
+    const auto oldest=ServerStudioPoseRevision(&entity);
+    for(int i=2;i<140;++i) {CBaseEntity other;other.index=i;assert(ServerStudioPoseRevision(&other));}
+    assert(g_poses.size()==kPoseEntryLimit);assert(ServerStudioPoseRevision(&entity)!=oldest);
+    models[1]=&mdl.model;ClearServerStudioPoseCache();
+    CBaseEntity shared;shared.scale=Vector(2,2,2);PhysicsAssetInstance instance{&shared,2};
+    PhysicsAssetBodyDef body;body.offset={1,2,3};
+    const int sharedQueries=boneQueries;
+    const auto physical=instance.BoneWorldTransform(1,body);
+    Near(physical.matrix.GetOrigin(),Vector(42,4,6));
+    const auto collision=StudioBoneWorldTransform(&shared,1);
+    Near(collision.matrix.GetOrigin(),Vector(40,0,0));
+    assert(GetServerStudioBonePose(&shared,1,origin,angles));Near(origin,Vector(20,0,0));
+    assert(boneQueries==sharedQueries+1);
+    std::cout<<"server bones: shared queries, exact input changes, lifecycle, invalid/unwritten input and bounded eviction PASS\n";
+}
+
+static PhysicsAssetDef DoorAsset()
+{
+    PhysicsAssetDef asset;asset.collisionFingerprint=10;
+    physicsasset::CollisionDef section;section.bone="door";section.bodyGroup="doors";section.variant=0;
+    section.vertices={{0,0,0},{1,0,0},{0,1,0}};section.indices={0,1,2};asset.collisions.push_back(section);
+    return asset;
+}
+static void CollisionCases(TestModel &mdl)
+{
+    CPhysicPhysX physics;CBaseEntity entity;auto asset=DoorAsset();
+    CPhysicPhysX::PhysicsAssetCollisionState state;
+    PxRigidDynamic actor;PxShape shape;
+    state.parts.emplace_back();auto &part=state.parts.back();part.actor=&actor;part.boneIndex=1;part.shapes.push_back({0,&shape});
+    auto build=[&](){physics.RebuildAnimatedCollisionTraceMesh(&entity,state,asset);};
+    build();assert(state.animatedTraceMesh);const int built=CMeshDesc::builds;const int queried=boneQueries;
+    const CMeshDesc initial=*state.animatedTraceMesh;
+    for(int i=0;i<100;++i) build();assert(CMeshDesc::builds==built);assert(boneQueries==queried);
+    auto changed=[&](auto mutate)
+    {const int before=CMeshDesc::builds;mutate();build();assert(CMeshDesc::builds==before+1);assert(state.animatedTraceMesh);
+     const auto cached=*state.animatedTraceMesh;state.traceStamp.Invalidate();build();SameMesh(cached,*state.animatedTraceMesh);
+     CPhysicPhysX::PhysicsAssetCollisionState baseline;baseline.parts=state.parts;
+     physics.BaselineCollision(&entity,baseline,asset);assert(baseline.animatedTraceMesh);SameMesh(cached,*baseline.animatedTraceMesh);};
+    changed([&](){entity.pev->frame=9;});assert((state.animatedTraceMesh->triangles[0].point[0]-initial.triangles[0].point[0]).Length()>1);
+    changed([&](){entity.scale=Vector(2,2,2);});
+    changed([&](){entity.absOrigin=entity.pev->origin=Vector(10,5,3);entity.absAngles=entity.pev->angles=Vector(0,40,0);});
+    changed([&](){part.owner=physicsasset::PartOwner::ArticulatedBody;part.mode=PhysicsPartMode::Free;actor.pose=PxTransform(matrix4x4(Vector(42,5,3),Vector(0,15,0),1));});
+    changed([&](){actor.pose=PxTransform(matrix4x4(Vector(43,5,3),Vector(0,18,0),1));});
+    changed([&](){part.mode=PhysicsPartMode::Driven;});changed([&](){part.detached=true;});
+    changed([&](){shape.flags=1;});changed([&](){++asset.collisionFingerprint;});
+    changed([&](){++mdl.model.modelCRC;});changed([&](){++entity.ed.serialnumber;});
+    changed([&](){ClearServerStudioPoseCache();});
+    entity.pev->body=1;build();assert(!state.animatedTraceMesh);const int empty=CMeshDesc::builds;
+    build();assert(CMeshDesc::builds==empty);entity.pev->body=0;build();assert(state.animatedTraceMesh);
+    state.articulatedOverride=true;build();assert(!state.animatedTraceMesh);state.articulatedOverride=false;build();assert(state.animatedTraceMesh);
+    CMeshDesc::failFinish=true;actor.pose=PxTransform(matrix4x4(Vector(44,5,3),Vector(0,19,0),1));build();assert(!state.animatedTraceMesh);
+    CMeshDesc::failFinish=false;build();assert(state.animatedTraceMesh);
+    CMeshDesc::failInit=true;actor.pose=PxTransform(matrix4x4(Vector(45,5,3),Vector(0,20,0),1));build();assert(!state.animatedTraceMesh);
+    CMeshDesc::failInit=false;build();assert(state.animatedTraceMesh);
+    // Primitive-only parts retain source triangles; fingerprint changes replace,
+    // rather than append to, their tessellation. Animated targets may lead actors.
+    asset.collisions.clear();physicsasset::BodyDef body;body.shape.type=physicsasset::ShapeType::Box;body.shape.halfExtents={1,2,3};
+    asset.bodies.push_back(body);part.bodyIndex=0;part.shapes[0].collisionIndex=0;
+    part.owner=physicsasset::PartOwner::AnimatedProxy;part.mode=PhysicsPartMode::Animated;
+    build();assert(state.animatedTraceMesh && state.animatedTraceMesh->triangles.size()==12);
+    const int primitive=CMeshDesc::builds;auto *source=part.traceTriangles.data();build();assert(CMeshDesc::builds==primitive && part.traceTriangles.data()==source);
+    ++asset.collisionFingerprint;body.shape.halfExtents.x=2;asset.bodies[0]=body;build();assert(part.traceTriangles.size()==12 && state.animatedTraceMesh->triangles.size()==12);
+    CPhysicPhysX::PhysicsAssetCollisionState baseline;baseline.parts=state.parts;
+    physics.BaselineCollision(&entity,baseline,asset);SameMesh(*state.animatedTraceMesh,*baseline.animatedTraceMesh);
+    shape.flags=0;build();assert(!state.animatedTraceMesh);shape.flags=3;build();assert(state.animatedTraceMesh);
+    const int beforeDisabled=CMeshDesc::builds;models[1]=nullptr;build();assert(!state.animatedTraceMesh);models[1]=&mdl.model;build();assert(CMeshDesc::builds==beforeDisabled+1);
+    std::cout<<"server collision: 100 unchanged calls / 0 rebuilds; live poses, scale, selection, ownership, empty and failure recovery PASS\n";
+}
+
+static void ImpactCases(TestModel &mdl)
+{
+    CPhysicPhysX physics;CBaseEntity entity;Vector point,normal;std::uint32_t material=0;
+    auto impact=[&](){return physics.ResolveRenderImpact(&entity,Vector(-100,0,0),Vector(100,0,0),point,normal,material);};
+    assert(impact());const int built=CMeshDesc::builds;const int queried=boneQueries;const auto initial=point;
+    for(int i=0;i<100;++i) assert(impact());assert(CMeshDesc::builds==built && boneQueries==queried);
+    assert(material==500);entity.pev->skin=1;assert(impact() && material==501 && CMeshDesc::builds==built+1);
+    entity.pev->body=1;assert(impact());assert((point-initial).Length()>1);
+    const auto revision=physics.m_impactPoseMeshes[1].revision;ClearServerStudioPoseCache();assert(impact());
+    assert(physics.m_impactPoseMeshes[1].revision!=revision);
+    CMeshDesc direct;assert(BuildCurrentStudioRenderMesh(&entity,direct));SameMesh(direct,*physics.m_impactPoseMeshes[1].mesh);
+    CMeshDesc baseline;assert(BuildCurrentStudioRenderMeshBaseline(&entity,baseline));SameMesh(direct,baseline);
+    entity.pev->frame=12;CMeshDesc::failFinish=true;assert(impact());assert(!physics.m_impactPoseMeshes[1].mesh);
+    const int failed=CMeshDesc::builds;assert(impact());assert(CMeshDesc::builds==failed);
+    CMeshDesc::failFinish=false;entity.pev->frame=13;assert(impact());assert(physics.m_impactPoseMeshes[1].mesh);
+    for(int i=2;i<36;++i) {CBaseEntity other;other.index=i;assert(physics.ResolveRenderImpact(&other,Vector(-1,0,0),Vector(1,0,0),point,normal,material));}
+    assert(physics.m_impactPoseMeshes.size()==32);assert(!physics.m_impactPoseMeshes.count(1));
+    ++mdl.model.modelCRC;assert(impact());
+    physics.m_impactPoseMeshes.clear();CMeshDesc::forcedMemory=10*1024*1024;
+    for(int i=1;i<=3;++i) {entity.index=i;assert(impact());}
+    assert(physics.m_impactPoseMeshes.size()==1 && physics.m_impactPoseMeshes.count(3));
+    CMeshDesc::forcedMemory=32*1024*1024;++entity.pev->frame;
+    const int oversize=CMeshDesc::builds;assert(impact());assert(!physics.m_impactPoseMeshes[3].mesh);
+    assert(impact());assert(CMeshDesc::builds==oversize+2);CMeshDesc::forcedMemory=0;
+    std::cout<<"impact: 100 repeated rays / 1 live build; exact mesh/material, fallback and bounded eviction PASS\n";
+}
+
+static void PredictionCases(TestModel &mdl)
+{
+    HUD_ClearPhysCollisionCache();cl_entity_t entity;entity.model=&mdl.model;
+    entity.bones[0]=matrix3x4(Vector(0,0,0),Vector(0,0,0),1);
+    entity.bones[1]=matrix3x4(Vector(20,0,0),Vector(0,0,0),1);
+    auto asset=DoorAsset();const Vector scale(1,1,1);
+    std::unique_ptr<CMeshDesc> transient;
+    auto build=[&](){return CachedPredictedPhysicsMesh(&entity,asset,scale,transient);};
+    assert(!PredictionHasPrimitiveHinges(asset));
+    auto *first=build();assert(first);const auto initial=*first;const int built=CMeshDesc::builds;
+    for(int i=0;i<100;++i) {++clientTime;assert(build()==first);}assert(CMeshDesc::builds==built);
+    entity.bones[1]=matrix3x4(Vector(25,0,0),Vector(0,35,0),1);auto *moved=build();assert(moved && CMeshDesc::builds==built+1);
+    assert((moved->triangles[0].point[0]-initial.triangles[0].point[0]).Length()>1);
+    CMeshDesc direct;assert(BuildPredictedPhysicsMesh(&entity,asset,scale,direct));SameMesh(direct,*moved);
+    entity.available[1]=false;assert(!build());entity.available[1]=true;assert(build());
+    auto root=asset.collisions[0];root.bone.clear();root.bodyGroup.clear();
+    asset.collisions.push_back(root);++asset.collisionFingerprint;
+    entity.available[1]=false;auto *partial=build();assert(partial && partial->triangles.size()==1);
+    entity.available[1]=true;auto *complete=build();assert(complete && complete->triangles.size()==2);
+    asset.collisions.pop_back();++asset.collisionFingerprint;assert(build());
+    entity.curstate.body=1;assert(!build());entity.curstate.body=0;assert(build());
+    ++asset.collisionFingerprint;auto *fresh=build();assert(fresh);
+    const int beforeReset=CMeshDesc::builds;clientTime=1;assert(build());assert(CMeshDesc::builds==beforeReset+1);
+    HUD_ClearPhysCollisionCache();assert(s_predictionPoseMeshes.empty());assert(build());
+    CMeshDesc::failFinish=true;entity.bones[1]=matrix3x4(Vector(26,0,0),Vector(0,36,0),1);assert(!build());
+    CMeshDesc::failFinish=false;assert(build());
+    for(int i=2;i<20;++i) {cl_entity_t other;other.index=i;other.model=&mdl.model;other.bones=entity.bones;assert(CachedPredictedPhysicsMesh(&other,asset,scale,transient));}
+    assert(s_predictionPoseMeshes.size()==16 && !s_predictionPoseMeshes.count(1));
+    HUD_ClearPhysCollisionCache();CMeshDesc::forcedMemory=10*1024*1024;
+    for(int i=1;i<=3;++i) {entity.index=i;assert(build());}
+    assert(s_predictionPoseMeshes.size()==1 && s_predictionPoseMeshes.count(3));
+    CMeshDesc::forcedMemory=32*1024*1024;entity.bones[1]=matrix3x4(Vector(27,0,0),Vector(0,37,0),1);
+    const int oversize=CMeshDesc::builds;assert(build());assert(transient && !s_predictionPoseMeshes[3].mesh);
+    assert(build());assert(CMeshDesc::builds==oversize+2);CMeshDesc::forcedMemory=0;
+    std::cout<<"prediction: 100 unchanged sweeps / 0 rebuilds; interpolated poses, missing bones, empty selection, reset and failure recovery PASS\n";
+}
+int main(int argc,char **)
+{
+    TestModel mdl;models[1]=&mdl.model;
+    const bool profiling=argc==1;
+    pxperf::Get().BeginFrame(profiling?1:0,60,0,0);
+    BoneCases(mdl);CollisionCases(mdl);ImpactCases(mdl);PredictionCases(mdl);
+    pxperf::Get().EndFrame();
+    if(profiling)
+    {
+        assert(pxperf::Get().Stats(pxperf::Metric::ServerPoseCacheHits).mean>100);
+        assert(pxperf::Get().Stats(pxperf::Metric::CollisionPoseCacheHits).mean>=200);
+        assert(pxperf::Get().Stats(pxperf::Metric::ImpactPoseCacheHits).mean>=100);
+    }
+    std::cout<<"K.11.4.1.2 production cache / geometry adapters PASS\n";
+}

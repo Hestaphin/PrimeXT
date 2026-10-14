@@ -1,0 +1,56 @@
+ragdoll_template
+{
+    template_version 1
+    id "custom"
+    name "Custom"
+    description "Duplicate and edit roles/aliases to define a custom skeleton."
+    anatomy "custom"
+    mass_budget 70
+    linear_damping 0.0500000007
+    angular_damping 0.0500000007
+    solver_position_iterations 16
+    solver_velocity_iterations 4
+    max_linear_velocity 2000
+    max_angular_velocity 20
+    max_depenetration_velocity 200
+    sleep_threshold 0.5
+    contact_offset 0.787401557
+    rest_offset 0
+    ccd 1
+    angular_resistance 0
+    drive_max_torque 1000
+    projection off
+    projection_linear_tolerance 0.25
+    projection_angular_tolerance 10
+    self_collision off
+    collision_neighbor_depth 2
+    collision_overlap_margin 0.100000001
+    radius_ratio 0.219999999
+    end_trim 0.0599999987
+    mass_ratio_warning 10
+
+    role "root"
+    {
+        parent ""
+        alias "root"
+        alias "Bip01 Pelvis"
+        override ""
+        required 1
+        minimum_detail 0
+        shape box
+        hitgroup 0
+        mass_weight 1
+        region ""
+        frame_mode bone
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 45
+        swing2 45
+        twist_low -45
+        twist_high 45
+    }
+}

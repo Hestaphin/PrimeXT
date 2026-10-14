@@ -17,6 +17,7 @@ GNU General Public License for more details.
 #include "enginecallback.h"
 
 cvar_t *r_test;	// just cvar for testify new effects
+cvar_t *cl_ragdoll_diagnostics;
 cvar_t *r_stencilbits;
 cvar_t *r_drawentities;
 cvar_t *gl_extensions;
@@ -76,6 +77,9 @@ cvar_t *cv_show_tbn;
 cvar_t *cv_nosort;
 cvar_t *r_lightmap;
 cvar_t *r_speeds;
+cvar_t *r_profile;
+cvar_t *r_profile_interval;
+cvar_t *r_profile_gpu;
 cvar_t *r_decals;
 cvar_t *r_studio_decals;
 cvar_t *r_hand;
@@ -109,6 +113,18 @@ cvar_t *r_postfx_enable;
 
 void R_InitializeConVars()
 {
+	CVAR_REGISTER("r_monitor_hz","30",FCVAR_ARCHIVE);
+	CVAR_REGISTER("r_monitor_size","512",FCVAR_ARCHIVE);
+	CVAR_REGISTER("r_reflection_scale","0.5",FCVAR_ARCHIVE);
+	CVAR_REGISTER("r_reflection_cache","1",FCVAR_ARCHIVE);
+	CVAR_REGISTER("r_shadow_budget","16",FCVAR_ARCHIVE);
+	CVAR_REGISTER("r_shadow_subview_budget","8",FCVAR_ARCHIVE);
+	CVAR_REGISTER("r_shadow_cache","1",FCVAR_ARCHIVE);
+	CVAR_REGISTER("r_shadow_particles","0",FCVAR_ARCHIVE);
+    r_profile = CVAR_REGISTER("r_profile", "0", 0); // 1: summary, 2: CSV
+    r_profile_interval = CVAR_REGISTER("r_profile_interval", "2", 0);
+    r_profile_gpu = CVAR_REGISTER("r_profile_gpu", "1", 0);
+    cl_ragdoll_diagnostics = CVAR_REGISTER("cl_ragdoll_diagnostics","0",0); // F0: 1 = 1 Hz, 2 = every rebuilt pose
 	// setup some engine cvars for custom rendering
 	r_shadows = CVAR_REGISTER("r_shadows", "4", FCVAR_ARCHIVE);
 	r_shadow_split_weight = CVAR_REGISTER("r_pssm_split_weight", "0.9", FCVAR_ARCHIVE);

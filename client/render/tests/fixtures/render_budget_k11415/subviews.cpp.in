@@ -1,0 +1,115 @@
+// Additional recording-driver cases. View, allocator, cache and math are production code.
+#include <map>
+static cvar_t monitorHz={},monitorSize={},reflectionScale={},reflectionCache={},shadowParticles={};
+static cvar_t *BudgetCvar(const char *name)
+{
+    if(!std::strcmp(name,"r_monitor_hz"))return &monitorHz;
+    if(!std::strcmp(name,"r_monitor_size"))return &monitorSize;
+    if(!std::strcmp(name,"r_reflection_scale"))return &reflectionScale;
+    if(!std::strcmp(name,"r_reflection_cache"))return &reflectionCache;
+    if(!std::strcmp(name,"r_shadow_particles"))return &shadowParticles;
+    return nullptr;
+}
+struct TextureMeta{int width,height;texFlags_t flags;};
+static std::map<int,TextureMeta> textureMetadata;
+static decltype(gRenderfuncs.GL_CreateTexture) previousCreate;
+static decltype(gRenderfuncs.RenderGetParm) previousParm;
+static void SetupBudgetApi()
+{
+    gEngfuncs.pfnGetCvarPointer=BudgetCvar;
+    monitorHz.value=30;monitorSize.value=512;reflectionScale.value=.5f;reflectionCache.value=1;shadowParticles.value=0;
+    previousCreate=gRenderfuncs.GL_CreateTexture;previousParm=gRenderfuncs.RenderGetParm;
+    gRenderfuncs.GL_CreateTexture=[](const char *name,int w,int h,const void *data,texFlags_t flags) {
+        const auto id=previousCreate(name,w,h,data,flags);
+        if(id)textureMetadata[int(id)]={w,h,flags};return id;
+    };
+    gRenderfuncs.RenderGetParm=[](int parm,int arg)->intptr_t {
+        if(textureMetadata.count(arg))
+        {
+            const auto &meta=textureMetadata.at(arg);
+            if(parm==PARM_TEX_WIDTH)return meta.width;
+            if(parm==PARM_TEX_HEIGHT)return meta.height;
+            if(parm==PARM_TEX_FLAGS)return meta.flags;
+        }
+        return previousParm(parm,arg);
+    };
+}
+static void BudgetSubviewCase(const std::string &test,msurface_t &surface,mextrasurf_t &extra,
+    cl_entity_t &parent,cl_entity_t &camera)
+{
+    SetupBudgetApi();surface.flags=SURF_SCREEN;world->features=WORLD_HAS_SCREENS|WORLD_HAS_MIRRORS|WORLD_HAS_PORTALS;
+    camera.player=false;camera.origin=Vector(0,0,0);parent.latched.prevanimtime=0;
+    tr.time=0;tr.realframecount=1;
+    auto frame=[&](double time){const auto target=glState.frameBuffer;tr.time=time;++tr.realframecount;R_RenderSubview();assert(glState.stack_position==0 && glState.frameBuffer==target);};
+    if(test=="budget_monitor_30" || test=="budget_monitor_15" || test=="budget_fallback")
+    {
+        if(test=="budget_monitor_15")monitorHz.value=15;
+        if(test=="budget_fallback")fbo=false;
+        for(int i=0;i<=240;++i)frame(double(float(i/120.0)));
+        assert(capturedCalls>=int(monitorHz.value*2) && capturedCalls<=int(monitorHz.value*2)+1);
+        assert(createdTextures==1 && tr.num_subview_used==1 && extra.subtexture[0]==1);
+        assert(tr.subviewTextures[0].cachePinned && Surf_CheckSubview(&extra,false));
+        assert(copyCalls==(fbo?0:capturedCalls));
+    }
+    else if(test=="budget_pin")
+    {
+        frame(0);const auto owner=tr.subviewTextures[0].texturenum;
+        ++tr.realframecount;
+        const int other=R_AllocateSubviewTexture(CViewport(capturedView.viewport),TF_NOMIPMAP);
+        assert(other==2 && tr.subviewTextures[0].texturenum==owner);
+        frame(.01);assert(capturedCalls==1 && extra.subtexture[0]==1);
+    }
+    else if(test=="budget_camera")
+    {
+        frame(0);assert(capturedCalls==1);parent.curstate.fuser2=70;frame(.001);assert(capturedCalls==2);
+        model_t replacement={};replacement.type=mod_sprite;camera.model=&replacement;frame(.002);assert(capturedCalls==3);
+        selectedCamera=nullptr;frame(.003);assert(extra.subtexture[0]==0 && !tr.subviewTextures[0].cachePinned);
+        selectedCamera=&camera;frame(.004);assert(capturedCalls==4 && extra.subtexture[0]>0);
+    }
+    else if(test=="budget_resize")
+    {
+        frame(0);const auto original=tr.subviewTextures[0].texturenum;
+        monitorSize.value=256;frame(.001);assert(capturedCalls==2 && extra.subtexture[0]==1);
+        assert(tr.subviewTextures[0].texturenum.GetWidth()==256 && !freedTextures.empty());
+        assert(tr.num_framebuffers==1 && deletedFramebuffers==1 && deletedRenderbuffers==1);
+    }
+    else if(test=="budget_failed_then_retry")
+    {
+        driverFault=5;frame(0);assert(capturedCalls==0 && extra.subtexture[0]==0 && tr.num_subview_used==0);
+        driverFault=0;frame(.001);assert(capturedCalls==1 && extra.subtexture[0]==1 && tr.subviewTextures[0].cachePinned);
+    }
+    else if(test=="budget_expire_reset")
+    {
+        frame(1);RI->frame.num_subview_faces=0;
+        for(int i=0;i<4;++i)frame(1.001+i*.001);
+        assert(!tr.subviewTextures[0].cachePinned);RI->frame.num_subview_faces=1;frame(.5);assert(capturedCalls==2);
+        R_ResetRenderBudgetCache();assert(!tr.subviewTextures[0].cachePinned);
+        frame(.501);assert(capturedCalls==3);
+    }
+    else if(test=="budget_reflection")
+    {
+        surface.flags=SURF_REFLECT;
+        world->features=WORLD_HAS_MIRRORS;
+        material_t material={};surface.texinfo->texture->material=&material;
+        surface.plane->normal=Vector(0,0,1);surface.plane->dist=0;mirrorCache.transform.Identity();
+        RI->view.origin=Vector(0,0,10);RI->view.fov_x=90;RI->view.fov_y=60;
+        RI->view.port=CViewport(0,0,1920,1080);RI->view.matrix=matrix4x4(RI->view.origin,Vector(0,0,0));
+        tr.fGamePaused=true;frame(0);assert(capturedCalls==1);
+        assert(capturedView.viewport[2]==960 && capturedView.viewport[3]==540);
+        frame(0);assert(capturedCalls==1 && extra.subtexture[0]>0);
+        RI->view.origin.x=1;RI->view.matrix=matrix4x4(RI->view.origin,Vector(0,0,0));frame(0);assert(capturedCalls==2);
+        tr.fGamePaused=false;frame(.001);frame(.002);assert(capturedCalls==4);
+    }
+    else if(test=="budget_portal")
+    {
+        surface.flags=SURF_PORTAL;frame(0);frame(.001);assert(capturedCalls==2 && !tr.subviewTextures[0].cachePinned);
+    }
+    else if(test=="budget_clones")
+    {
+        frame(0);msurface_t other=surface;mextrasurf_t info=extra;mtexinfo_t texinfo=*surface.texinfo;texture_t texture=*texinfo.texture;
+        other.info=&info;other.texinfo=&texinfo;texinfo.texture=&texture;texture.width*=2;
+        glState.stack_position=1;assert(!R_CheckScreenSource(&other,&surface));glState.stack_position=0;
+    }
+    else assert(false);
+    std::printf("PASS %s: actual subview scheduling/allocation/restore path\n",test.c_str());
+}

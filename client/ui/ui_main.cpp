@@ -2,13 +2,16 @@
 #include "ui_demo_window.h"
 #include "ui_material_editor.h"
 #include "ui_postfx_menu.h"
+#include "ui_physics_menu.h"
 
 void CImGuiWindowSystem::LinkWindows()
 {
     static CImGuiDemoWindow demoWindow;
     static CImGuiMaterialEditor materialEditor;
     static CImGuiPostFxMenu postFxMenu;
+    static CImGuiPhysicsMenu physicsMenu;
     AddWindow(&demoWindow);
     AddWindow(&materialEditor);
     AddWindow(&postFxMenu);
+    AddWindow(&physicsMenu);
 }

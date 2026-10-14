@@ -128,7 +128,7 @@ void CTriggerPush :: Touch( CBaseEntity *pOther )
 	{
 		pOther->ApplyAbsVelocityImpulse( pev->speed * m_vecPushDir );
 		if( pOther->m_iActorType == ACTOR_DYNAMIC )
-			WorldPhysic->AddForce( pOther, pev->speed * m_vecPushDir * (1.0f / gpGlobals->frametime) * 0.5f );
+			WorldPhysic->AddForce( pOther, pev->speed * m_vecPushDir * 0.5f, IPhysicLayer::ForceMode::Impulse );
 
 		if( pOther->GetAbsVelocity().z > 0 )
 			pOther->pev->flags &= ~FL_ONGROUND;
@@ -151,7 +151,9 @@ void CTriggerPush :: Touch( CBaseEntity *pOther )
 		}
 
 		if( pOther->m_iActorType == ACTOR_DYNAMIC )
-			WorldPhysic->AddForce( pOther, vecPush * (1.0f / gpGlobals->frametime) * 0.5f );
+			// Continuous force at the previous 100 Hz / 100 FPS reference strength.
+			// AddForce integrates this server frame's duration independently of Hz.
+			WorldPhysic->AddForce( pOther, vecPush * 50.0f );
 		pOther->SetBaseVelocity( vecPush );
 		pevToucher->flags |= FL_BASEVELOCITY;
 

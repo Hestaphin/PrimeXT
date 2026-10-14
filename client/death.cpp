@@ -18,6 +18,7 @@
 #include "hud.h"
 #include "utils.h"
 #include "parsemsg.h"
+#include "modular_asset_selection.h"
 
 struct DeathNoticeItem
 {
@@ -30,6 +31,8 @@ struct DeathNoticeItem
 	float	flDisplayTime;
 	float	*KillerColor;
 	float	*VictimColor;
+    SpriteHandle customSprite;
+    wrect_t customRect;
 };
 
 #define MAX_DEATHNOTICES		4
@@ -107,7 +110,9 @@ int CHudDeathNotice :: Draw( float flTime )
 		y = DEATHNOTICE_TOP + (20 * i);  //!!!
 
 		int id = (rgDeathNoticeList[i].iId == -1) ? m_HUD_d_skull : rgDeathNoticeList[i].iId;
-		x = ScreenWidth - ConsoleStringLen( rgDeathNoticeList[i].szVictim ) - ( gHUD.GetSpriteRect( id ).right - gHUD.GetSpriteRect( id ).left );
+        const auto& rect = rgDeathNoticeList[i].customSprite ? rgDeathNoticeList[i].customRect : gHUD.GetSpriteRect(id);
+        const auto sprite = rgDeathNoticeList[i].customSprite ? rgDeathNoticeList[i].customSprite : gHUD.GetSprite(id);
+		x = ScreenWidth - ConsoleStringLen( rgDeathNoticeList[i].szVictim ) - (rect.right - rect.left);
 
 		if( !rgDeathNoticeList[i].iSuicide )
 		{
@@ -130,10 +135,10 @@ int CHudDeathNotice :: Draw( float flTime )
 		}
 
 		// Draw death weapon
-		SPR_Set( gHUD.GetSprite( id ), r, g, b );
-		SPR_DrawAdditive( 0, x, y, &gHUD.GetSpriteRect( id ));
+		SPR_Set( sprite, r, g, b );
+		SPR_DrawAdditive( 0, x, y, &rect );
 
-		x += (gHUD.GetSpriteRect( id ).right - gHUD.GetSpriteRect( id ).left );
+		x += rect.right - rect.left;
 
 		// Draw victims name
 		x = DrawConsoleString( x, y, rgDeathNoticeList[i].szVictim );
@@ -153,10 +158,20 @@ int CHudDeathNotice :: MsgFunc_DeathMsg( const char *pszName, int iSize, void *p
 	int killer = READ_BYTE();
 	int victim = READ_BYTE();
 
-	char killedwith[32];
+	char killedwith[MAX_WEAPON_NAME + 2];
 
 	Q_strcpy( killedwith, "d_" );
-	Q_strncat( killedwith, READ_STRING(), 32 );
+    const char* weaponName = READ_STRING();
+	Q_strncat( killedwith, weaponName, sizeof(killedwith) );
+    std::string killSprite;
+    extern bool ModularClientDefinitionsVerified();
+    if (iSize >= int(2 + strlen(weaponName) + 1 + 3)) {
+        const int runtimeId = READ_BYTE();
+        const modular::KillAssetReference reference{READ_BYTE(), READ_BYTE()};
+        if (ModularClientDefinitionsVerified())
+            if (const auto* weapon = modular::SharedRegistry().FindWeaponByRuntimeId(runtimeId))
+                killSprite = modular::ResolveKillAsset(*weapon, reference);
+    }
 
 	gHUD.m_Scoreboard.DeathMsg( killer, victim );
 
@@ -172,6 +187,7 @@ int CHudDeathNotice :: MsgFunc_DeathMsg( const char *pszName, int iSize, void *p
 		memmove( rgDeathNoticeList, rgDeathNoticeList + 1, sizeof( DeathNoticeItem ) * MAX_DEATHNOTICES );
 		i = MAX_DEATHNOTICES - 1;
 	}
+    memset(&rgDeathNoticeList[i], 0, sizeof(DeathNoticeItem));
 
 	gHUD.m_Scoreboard.GetAllPlayersInfo();
 
@@ -230,6 +246,15 @@ int CHudDeathNotice :: MsgFunc_DeathMsg( const char *pszName, int iSize, void *p
 	int spr = gHUD.GetSpriteIndex( killedwith );
 
 	rgDeathNoticeList[i].iId = spr;
+    if (!killSprite.empty()) {
+        const auto loaded = SPR_Load(killSprite.c_str());
+        if (loaded) {
+            rgDeathNoticeList[i].customSprite = loaded;
+            rgDeathNoticeList[i].customRect.right = SPR_Width(loaded, 0);
+            rgDeathNoticeList[i].customRect.bottom = SPR_Height(loaded, 0);
+            rgDeathNoticeList[i].iId = -1;
+        }
+    }
 
 	DEATHNOTICE_DISPLAY_TIME = CVAR_GET_FLOAT( "hud_deathnotice_time" );
 	rgDeathNoticeList[i].flDisplayTime = gHUD.m_flTime + DEATHNOTICE_DISPLAY_TIME;

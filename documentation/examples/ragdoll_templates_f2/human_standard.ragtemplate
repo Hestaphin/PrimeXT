@@ -1,0 +1,523 @@
+ragdoll_template
+{
+    template_version 1
+    id "human_standard"
+    name "Human Standard"
+    description "Anatomical F2 rig; review inferred flexion signs, overlaps and live drops."
+    anatomy "human"
+    mass_budget 70
+    linear_damping 0.0500000007
+    angular_damping 0.0500000007
+    radius_ratio 0.219999999
+    end_trim 0.0599999987
+    mass_ratio_warning 10
+    mass_region "torso" 0.439999998
+    mass_region "head" 0.0799999982
+    mass_region "left_arm" 0.0799999982
+    mass_region "right_arm" 0.0799999982
+    mass_region "left_leg" 0.159999996
+    mass_region "right_leg" 0.159999996
+    exclude_section "weapon"
+    exclude_section "gun"
+    exclude_section "accessory"
+
+    role "pelvis"
+    {
+        parent ""
+        alias "Bip01 Pelvis"
+        alias "ValveBiped.Bip01_Pelvis"
+        override ""
+        required 1
+        minimum_detail 0
+        shape box
+        hitgroup 3
+        mass_weight 16
+        region "torso"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+    }
+
+    role "spine"
+    {
+        parent "pelvis"
+        alias "Bip01 Spine"
+        alias "ValveBiped.Bip01_Spine"
+        override ""
+        required 0
+        minimum_detail 2
+        shape box
+        hitgroup 2
+        mass_weight 4
+        region "torso"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 20
+        swing2 20
+        twist_low -15
+        twist_high 15
+    }
+
+    role "spine_mid"
+    {
+        parent "spine"
+        alias "Bip01 Spine1"
+        alias "ValveBiped.Bip01_Spine1"
+        override ""
+        required 0
+        minimum_detail 2
+        shape box
+        hitgroup 2
+        mass_weight 4
+        region "torso"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 20
+        swing2 20
+        twist_low -15
+        twist_high 15
+    }
+
+    role "chest"
+    {
+        parent "spine_mid"
+        alias "Bip01 Spine3"
+        alias "ValveBiped.Bip01_Spine4"
+        override ""
+        required 1
+        minimum_detail 0
+        shape box
+        hitgroup 2
+        mass_weight 20
+        region "torso"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 20
+        swing2 20
+        twist_low -15
+        twist_high 15
+    }
+
+    role "head"
+    {
+        parent "neck"
+        alias "Bip01 Head"
+        alias "ValveBiped.Bip01_Head1"
+        override ""
+        required 1
+        minimum_detail 0
+        shape sphere
+        hitgroup 1
+        mass_weight 5
+        region "head"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 25
+        swing2 25
+        twist_low -35
+        twist_high 35
+    }
+
+    role "left_upper_arm"
+    {
+        parent "left_shoulder"
+        alias "Bip01 L Arm1"
+        alias "ValveBiped.Bip01_L_UpperArm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 4
+        mass_weight 2
+        region "left_arm"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 85
+        swing2 75
+        twist_low -65
+        twist_high 65
+    }
+
+    role "left_forearm"
+    {
+        parent "left_upper_arm"
+        alias "Bip01 L Arm2"
+        alias "ValveBiped.Bip01_L_Forearm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 4
+        mass_weight 1.60000002
+        region "left_arm"
+        frame_mode flexion
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+        swing1 45
+        swing2 45
+        twist_low 0
+        twist_high 140
+    }
+
+    role "left_hand"
+    {
+        parent "left_forearm"
+        alias "Bip01 L Hand"
+        alias "ValveBiped.Bip01_L_Hand"
+        override ""
+        required 0
+        minimum_detail 2
+        shape box
+        hitgroup 4
+        mass_weight 0.600000024
+        region "left_arm"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+    }
+
+    role "right_upper_arm"
+    {
+        parent "right_shoulder"
+        alias "Bip01 R Arm1"
+        alias "ValveBiped.Bip01_R_UpperArm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 5
+        mass_weight 2
+        region "right_arm"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 85
+        swing2 75
+        twist_low -65
+        twist_high 65
+    }
+
+    role "right_forearm"
+    {
+        parent "right_upper_arm"
+        alias "Bip01 R Arm2"
+        alias "ValveBiped.Bip01_R_Forearm"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 5
+        mass_weight 1.60000002
+        region "right_arm"
+        frame_mode flexion
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+        swing1 45
+        swing2 45
+        twist_low 0
+        twist_high 140
+    }
+
+    role "right_hand"
+    {
+        parent "right_forearm"
+        alias "Bip01 R Hand"
+        alias "ValveBiped.Bip01_R_Hand"
+        override ""
+        required 0
+        minimum_detail 2
+        shape box
+        hitgroup 5
+        mass_weight 0.600000024
+        region "right_arm"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+    }
+
+    role "left_thigh"
+    {
+        parent "pelvis"
+        alias "Bip01 L Leg"
+        alias "ValveBiped.Bip01_L_Thigh"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 6
+        mass_weight 7
+        region "left_leg"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 65
+        swing2 45
+        twist_low -35
+        twist_high 35
+    }
+
+    role "left_calf"
+    {
+        parent "left_thigh"
+        alias "Bip01 L Leg1"
+        alias "ValveBiped.Bip01_L_Calf"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 6
+        mass_weight 4
+        region "left_leg"
+        frame_mode flexion
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+        swing1 45
+        swing2 45
+        twist_low 0
+        twist_high 130
+    }
+
+    role "left_foot"
+    {
+        parent "left_calf"
+        alias "Bip01 L Foot"
+        alias "ValveBiped.Bip01_L_Foot"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 6
+        mass_weight 1
+        region "left_leg"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+    }
+
+    role "right_thigh"
+    {
+        parent "pelvis"
+        alias "Bip01 R Leg"
+        alias "ValveBiped.Bip01_R_Thigh"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 7
+        mass_weight 7
+        region "right_leg"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 65
+        swing2 45
+        twist_low -35
+        twist_high 35
+    }
+
+    role "right_calf"
+    {
+        parent "right_thigh"
+        alias "Bip01 R Leg1"
+        alias "ValveBiped.Bip01_R_Calf"
+        override ""
+        required 1
+        minimum_detail 0
+        shape capsule
+        hitgroup 7
+        mass_weight 4
+        region "right_leg"
+        frame_mode flexion
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion locked
+        swing2_motion locked
+        swing1 45
+        swing2 45
+        twist_low 0
+        twist_high 130
+    }
+
+    role "right_foot"
+    {
+        parent "right_calf"
+        alias "Bip01 R Foot"
+        alias "ValveBiped.Bip01_R_Foot"
+        override ""
+        required 0
+        minimum_detail 1
+        shape box
+        hitgroup 7
+        mass_weight 1
+        region "right_leg"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+    }
+
+    role "left_shoulder"
+    {
+        parent "chest"
+        alias "Bip01 L Arm"
+        alias "ValveBiped.Bip01_L_Clavicle"
+        override ""
+        required 0
+        minimum_detail 1
+        shape capsule
+        hitgroup 4
+        mass_weight 3
+        region "left_arm"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+    }
+
+    role "right_shoulder"
+    {
+        parent "chest"
+        alias "Bip01 R Arm"
+        alias "ValveBiped.Bip01_R_Clavicle"
+        override ""
+        required 0
+        minimum_detail 1
+        shape capsule
+        hitgroup 5
+        mass_weight 3
+        region "right_arm"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 25
+        swing2 25
+        twist_low -20
+        twist_high 20
+    }
+
+    role "neck"
+    {
+        parent "chest"
+        alias "Bip01 Neck"
+        alias "ValveBiped.Bip01_Neck1"
+        override ""
+        required 0
+        minimum_detail 2
+        shape capsule
+        hitgroup 1
+        mass_weight 2
+        region "head"
+        frame_mode segment
+        frame_anchor 0 0 0
+        frame_angles 0 0 0
+        flexion_sign 1
+        twist_motion limited
+        swing1_motion limited
+        swing2_motion limited
+        swing1 20
+        swing2 20
+        twist_low -20
+        twist_high 20
+    }
+}

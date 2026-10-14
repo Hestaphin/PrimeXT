@@ -1,0 +1,267 @@
+// Engine service adapter around unmodified CPU/packet/draw methods. All Studio
+// types, animation decoding, physical reconstruction and math are project code.
+#include <array>
+#include <vector>
+#include <memory>
+#include <optional>
+#include <string>
+#include <cmath>
+#include <cstring>
+#include <cassert>
+#include <iostream>
+#include "hud.h"
+#include "utils.h"
+#include "gl_local.h"
+#include "com_model.h"
+#include "r_studioint.h"
+#include "pm_movevars.h"
+#define private public
+#include "gl_studio.h"
+#undef private
+#include "event_api.h"
+#include "physics_part_net.h"
+#include "physics_asset_render_coordinates.h"
+#include "studio_pose_parameters.h"
+#include "studio_physical_pose.h"
+#include "studio_sleep_cache.h"
+
+cl_enginefunc_t gEngfuncs{};
+render_api_t gRenderfuncs{};
+ref_globals_t tr{};
+ref_instance_t renderInstance{};
+ref_instance_t* RI=&renderInstance;
+engine_studio_api_t IEngineStudio{};
+CStudioModelRenderer g_StudioRenderer;
+int developer_level=0;
+static float sampleTime=1.0f;
+static int ikUpdates=0;
+
+// These services are never used to evaluate geometry in this fixture.
+CFrameBuffer::CFrameBuffer() {}
+CFrameBuffer::~CFrameBuffer() {}
+CViewport::CViewport() {}
+vbomesh_t::~vbomesh_t() {}
+void COM_FileBase(const char*,char* out) { *out=0; }
+void COM_ExtractFilePath(const char*,char* out) { *out=0; }
+void ALERT(ALERT_TYPE,char*,...) {}
+
+void CBaseBoneSetup::debugMsg(char*, ...) {}
+void CBaseBoneSetup::debugLine(const Vector&,const Vector&,int,int,int,bool,float) {}
+mstudioanim_t* CBaseBoneSetup::GetAnimSourceData(mstudioseqdesc_t*) { return nullptr; }
+void CStudioModelRenderer::PurgeDecals(ModelInstance_t* inst) { inst->m_DecalList.Purge(); }
+bool CStudioModelRenderer::CheckBoneCache(float frame) {
+    m_pModelInstance->bonecache.frame=frame;
+    return false;
+}
+void CStudioModelRenderer::UpdateIKLocks(CIKContext*) { ++ikUpdates; }
+void CStudioModelRenderer::CalculateIKLocks(CIKContext*,const Vector&,const Vector&) {}
+
+@PRODUCTION@
+
+struct Fixture {
+    // Real binary-layout Studio header, bones, sequence descriptors and streams.
+    studiohdr_t hdr{};
+    mstudiobone_t bones[3]{};
+    mstudioboneinfo_t info[3]{};
+    mstudioseqdesc_t sequences[3]{};
+    mstudioseqgroup_t groups[1]{};
+    mstudiobonecontroller_t controls[2]{};
+    mstudioanim_t anim[12]{}; // four blends * three bones
+    mstudioanimvalue_t values[12][3]{};
+    studiohdr2_t hdr2{};
+    mstudioposeparamdesc_t params[16]{};
+    mstudioikchain_t ikChains[1]{};
+    mstudioiklink_t ikLinks[3]{};
+    mstudioaxisinterpbone_t procedural{};
+    model_t model{};
+    cl_entity_t entity{};
+    Fixture() {
+        hdr.length=offsetof(Fixture,model);
+        hdr.numbones=3; hdr.boneindex=offsetof(Fixture,bones);
+        hdr.numseq=1; hdr.seqindex=offsetof(Fixture,sequences);
+        hdr.numseqgroups=1; hdr.seqgroupindex=offsetof(Fixture,groups);
+        hdr.bonecontrollerindex=offsetof(Fixture,controls);
+        for(int i=0;i<3;++i) {
+            bones[i].parent=i-1;
+            for(int j=0;j<6;++j) {bones[i].bonecontroller[j]=-1; bones[i].scale[j]=1.0f;}
+            info[i].quat[3]=1;
+        }
+        std::strcpy(bones[0].name,"master");
+        std::strcpy(bones[1].name,"Bip01 Pelvis");
+        std::strcpy(bones[2].name,"door");
+        bones[1].value[0]=2; bones[2].value[0]=3;
+        sequences[0].numblends=4; sequences[0].groupsize[0]=2; sequences[0].groupsize[1]=2;
+        sequences[0].numframes=2; sequences[0].fps=0;
+        sequences[0].animindex=offsetof(Fixture,anim);
+        for(int blend=0;blend<4;++blend) {
+            int i=blend*3+2;
+            anim[i].offset[0]=reinterpret_cast<byte*>(&values[i])-reinterpret_cast<byte*>(&anim[i]);
+            values[i][0].num.valid=1; values[i][0].num.total=2;
+            values[i][1].value=blend*10;
+        }
+        model.type=mod_studio; model.cache.data=&hdr;
+        entity.model=&model; entity.modelhandle=INVALID_HANDLE;
+        entity.curstate.number=11; entity.curstate.messagenum=1;
+        entity.curstate.scale=1.0f;
+    }
+    ~Fixture() { g_StudioRenderer.DestroyAllModelInstances(); }
+};
+
+static void near(float actual,float expected) {
+    if (!(std::fabs(actual-expected)<0.001f))
+        std::cerr<<"actual "<<actual<<", expected "<<expected<<std::endl;
+    assert(std::fabs(actual-expected)<0.001f);
+}
+static void same(const matrix3x4& a,const matrix3x4& b) {
+    for(int i=0;i<3;++i) for(int j=0;j<4;++j) near(a[i][j],b[i][j]);
+}
+static matrix3x4 query(Fixture& f,int bone=2) {
+    matrix3x4 result;
+    assert(g_StudioRenderer.StudioGetCollisionBonePose(&f.entity,bone,result));
+    return result;
+}
+static void drawSame(Fixture& f) {
+    auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+    g_StudioRenderer.m_pModelInstance=inst;
+    g_StudioRenderer.m_pStudioHeader=&f.hdr;
+    RI->currententity=&f.entity;
+    inst->m_protationmatrix=inst->m_cpuPoseRoot;
+    tr.time=sampleTime;
+    g_StudioRenderer.StudioSetupBones();
+    for(int i=0;i<f.hdr.numbones;++i) same(inst->m_pbones[i],inst->m_predictionCollisionBones[i]);
+}
+@ADDITIONAL_CASES@
+
+int main() {
+    gEngfuncs.GetClientTime=[]()->float {return sampleTime;};
+    IEngineStudio.Mod_Extradata=[](model_t* model)->void* {return model->cache.data;};
+    gRenderfuncs.pfnMemFree=[](void* pointer,const char*,int) {std::free(pointer);};
+    {
+        Fixture f;
+        f.sequences[0].numblends=2;f.sequences[0].groupsize[1]=1;
+        f.entity.curstate.blending[0]=f.entity.latched.prevblending[0]=255;
+        auto p=query(f); // no draw, latch callback or pose message
+        near(p.GetOrigin().x,15); // pelvis 2 + door 3 + second blend 10
+        auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        assert(inst->materials==nullptr);
+        near(inst->m_poseparameter[0],1);
+        drawSame(f);
+        f.sequences[0].numblends=4;f.sequences[0].groupsize[1]=2;
+        f.entity.curstate.blending[1]=f.entity.latched.prevblending[1]=255;
+        p=query(f); near(p.GetOrigin().x,35); drawSame(f);
+        f.entity.curstate.blending[0]=0; f.entity.latched.prevblending[0]=255;
+        f.entity.curstate.blending[1]=f.entity.latched.prevblending[1]=0;
+        f.entity.curstate.animtime=sampleTime-0.05f;
+        f.entity.latched.prevanimtime=sampleTime-0.15f;
+        p=query(f); near(p.GetOrigin().x,10); drawSame(f);
+    }
+    {
+        Fixture f;
+        f.hdr.studiohdr2index=offsetof(Fixture,hdr2);
+        f.hdr2.numposeparameters=16; f.hdr2.poseparamindex=offsetof(Fixture,params);
+        for(auto& param:f.params) {param.start=-10;param.end=10;}
+        f.entity.curstate.vuser1[0]=1; f.entity.prevstate.vuser1[0]=0;
+        f.entity.curstate.animtime=sampleTime-0.05f;f.entity.latched.prevanimtime=sampleTime-0.15f;
+        query(f); auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        near(inst->m_poseparameter[0],0.5f);near(inst->m_poseparameter[15],0.5f);
+        f.entity.prevstate.vuser1[0]=0.8f;query(f);near(inst->m_poseparameter[0],0.9f);
+        drawSame(f);
+    }
+    {
+        Fixture f;
+        cvar_t compatible{};compatible.value=1;
+        g_StudioRenderer.m_pCvarCompatible=&compatible;
+        f.hdr.numbonecontrollers=1;f.controls[0].index=4;f.controls[0].type=STUDIO_X;
+        f.controls[0].end=10;f.bones[2].bonecontroller[0]=0;f.entity.mouth.mouthopen=32;
+        near(query(f).GetOrigin().x,10);drawSame(f);
+        f.controls[0].index=1;f.controls[0].type=STUDIO_ZR|STUDIO_RLOOP;
+        f.bones[2].bonecontroller[0]=-1;f.bones[2].bonecontroller[5]=0;
+        f.entity.curstate.controller[1]=250;f.entity.latched.prevcontroller[1]=6;
+        f.entity.curstate.animtime=sampleTime-0.05f;f.entity.latched.prevanimtime=sampleTime-0.15f;
+        query(f);auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        assert(inst->m_controller[1]==0);drawSame(f);
+        assert(inst->m_cpuCompatible);
+        g_StudioRenderer.m_pCvarCompatible=nullptr;
+        query(f);assert(!inst->m_cpuCompatible);drawSame(f);
+    }
+    {
+        Fixture f;
+        f.hdr.numseq=2;f.sequences[1]=f.sequences[0];f.sequences[1].numblends=1;
+        f.sequences[1].groupsize[0]=f.sequences[1].groupsize[1]=1;
+        f.sequences[1].animindex+=3*sizeof(mstudioanim_t);
+        near(query(f).GetOrigin().x,5);
+        f.entity.curstate.sequence=1;near(query(f).GetOrigin().x,5);drawSame(f);
+        sampleTime+=0.1f;near(query(f).GetOrigin().x,10);drawSame(f);
+        sampleTime+=0.11f;near(query(f).GetOrigin().x,15);drawSame(f);
+        g_StudioRenderer.UpdateLatchedVars(&f.entity,true);
+        f.entity.curstate.sequence=0;f.entity.curstate.gaitsequence=1;
+        near(query(f).GetOrigin().x,5); // first gait transition retains sequence 0
+        sampleTime+=0.21f;near(query(f).GetOrigin().x,15);drawSame(f);
+    }
+    {
+        Fixture f;
+        f.hdr.studiohdr2index=offsetof(Fixture,hdr2);f.hdr2.numikchains=1;
+        f.hdr2.ikchainindex=offsetof(Fixture,ikChains);f.ikChains[0].numlinks=3;
+        f.ikChains[0].linkindex=offsetof(Fixture,ikLinks);
+        for(int i=0;i<3;++i)f.ikLinks[i].bone=i;
+        const int before=ikUpdates;query(f);assert(ikUpdates==before+1);
+        query(f);drawSame(f);assert(ikUpdates==before+1);
+        sampleTime+=0.01f;query(f);assert(ikUpdates==before+2);
+    }
+    {
+        Fixture f;
+        f.hdr.flags|=STUDIO_HAS_BONEINFO;f.bones[2].flags|=BONE_ALWAYS_PROCEDURAL;
+        f.info[2].proctype=STUDIO_PROC_AXISINTERP;f.info[2].procindex=offsetof(Fixture,procedural);
+        f.procedural.control=1;f.procedural.axis=0;
+        for(int i=0;i<6;++i) {f.procedural.pos[i][0]=7;f.procedural.quat[i][3]=1;}
+        near(query(f).GetOrigin().x,9);drawSame(f);
+    }
+    {
+        Fixture f;
+        f.entity.origin=Vector(11,7,2); f.entity.angles=Vector(0,90,0);f.entity.curstate.scale=2;
+        auto before=query(f);
+        const Vector point=before.VectorTransform(Vector(1,0,0));
+        near(point.x,11);near(point.y,19);near(point.z,2);
+        f.entity.curstate.iuser1|=CF_RAGDOLL;
+        const byte indices[]={2};const Vector relative[]={Vector(3,0,0)};
+        const Vector4D rotations[]={Vector4D(0,0,0,1)};
+        g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,1,1,
+            Vector(40,0,0),Vector4D(0,0,0,1),1,indices,relative,rotations);
+        auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        assert(!inst->m_bRagdollEntryBlendPending);
+        sampleTime+=0.06f; query(f);drawSame(f);
+        sampleTime+=0.07f; auto pelvis=query(f,1);near(pelvis.GetOrigin().x,40);
+        auto ancestor=query(f,0);near(ancestor.GetOrigin().x,36);
+        auto child=query(f,2);near(child.GetOrigin().x,43);
+        near(child.VectorTransform(Vector(1,0,0)).x,45);drawSame(f);
+        matrix3x4 repeated=query(f);same(child,repeated);
+        f.entity.curstate.iuser1&=~CF_RAGDOLL;
+        g_StudioRenderer.StudioSetRagdollPose(&f.entity,true,false,false,2,1,
+            Vector(),Vector4D(0,0,0,1),0,nullptr,nullptr,nullptr);
+        sampleTime+=0.09f;query(f);drawSame(f);
+        sampleTime+=0.1f;query(f);assert(!inst->m_bRagdollExitBlend);drawSame(f);
+    }
+    {
+        Fixture f;
+        g_StudioRenderer.StudioSetPartPose(&f.entity,1,false,false,1,Vector(20,0,0),Vector4D(0,0,0,1));
+        auto* inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        assert(!inst->m_partPosePending[1]);assert(inst->materials==nullptr);
+        sampleTime+=0.06f;near(query(f,1).GetOrigin().x,11);drawSame(f);
+        sampleTime+=0.07f;near(query(f,2).GetOrigin().x,23);drawSame(f);
+        const auto stamp=inst->m_partPoseSequence[1];
+        g_StudioRenderer.StudioSetPartPose(&f.entity,1,false,false,2,Vector(NAN,0,0),Vector4D(0,0,0,1));
+        assert(inst->m_partPoseSequence[1]==stamp);
+        model_t replacement=f.model; f.entity.model=&replacement;
+        query(f); inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        assert(!inst->m_partPoseActive[1]); assert(inst->m_pModel==&replacement);
+        f.entity.curstate.messagenum=0;inst->m_partPoseActive[1]=true;
+        query(f);assert(!inst->m_partPoseActive[1]);
+        inst->m_partPoseActive[1]=true;
+        g_StudioRenderer.UpdateLatchedVars(&f.entity,true);
+        assert(!inst->m_partPoseActive[1]);
+        g_StudioRenderer.DestroyAllModelInstances();assert(f.entity.modelhandle==INVALID_HANDLE);
+        query(f);assert(f.entity.modelhandle!=INVALID_HANDLE);
+    }
+    @RUN_ADDITIONAL_CASES@
+    std::cout<<"PASS J.10.6.2 actual CPU pose: first query, classic/extended blends, controllers/mouth/gait/sequence fades, IK cadence, procedural geometry, scaled physical ancestors/descendants, shared draw, transitions, model/reset lifecycle\n";
+}

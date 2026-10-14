@@ -1,0 +1,59 @@
+// Executes the actual Win32 scroll/layout callbacks using a recording API.
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <iostream>
+#include <map>
+#include <vector>
+using HWND=void*;using HFONT=void*;using HDC=void*;using WPARAM=std::uintptr_t;using LPARAM=std::intptr_t;using LRESULT=std::intptr_t;using DWORD_PTR=std::uintptr_t;using UINT=unsigned;using UINT_PTR=std::uintptr_t;using HDWP=void*;
+#define CALLBACK
+struct mxWindow {};
+struct RECT {int left,top,right,bottom;};
+struct SCROLLINFO {unsigned cbSize,fMask;int nMin,nMax;unsigned nPage;int nPos,nTrackPos;};
+constexpr int TRUE=1,SB_HORZ=0,SB_VERT=1;
+constexpr int SIF_RANGE=1,SIF_PAGE=2,SIF_POS=4,SIF_ALL=7;
+constexpr int SWP_NOZORDER=1,SWP_NOACTIVATE=2,SWP_NOCOPYBITS=4;
+constexpr int RDW_INVALIDATE=1,RDW_ERASE=2,RDW_ALLCHILDREN=4,RDW_UPDATENOW=8;
+constexpr int WM_NCDESTROY=1,WM_SIZE=2,WM_VSCROLL=3,WM_HSCROLL=4,WM_MOUSEWHEEL=5,WM_ERASEBKGND=6;
+constexpr int SB_LINEUP=0,SB_LINEDOWN=1,SB_PAGEUP=2,SB_PAGEDOWN=3,SB_THUMBTRACK=4,COLOR_BTNFACE=15;
+constexpr UINT_PTR kScalerId=0x50485953;
+#define LOWORD(x) (int((x)&65535))
+#define GET_WHEEL_DELTA_WPARAM(x) (int(std::int16_t((x)>>16)))
+static SCROLLINFO bars[2];static int redraws,eraseCalls,lastRedrawFlags;static bool failBatch;
+static std::map<HWND,RECT> positions,pending;
+static std::map<HWND,int> moveFlags;
+static int MulDiv(int value,int numerator,int denominator){return int(std::lround(double(value)*numerator/denominator));}
+static bool IsWindow(HWND window){return window!=0;}
+static void GetClientRect(HWND,RECT *out){*out={0,0,500,300};}
+static void SetScrollInfo(HWND,int bar,SCROLLINFO *info,int){bars[bar]=*info;bars[bar].nPos=std::clamp(info->nPos,0,std::max(0,info->nMax-int(info->nPage)+1));}
+static int GetScrollPos(HWND,int bar){return bars[bar].nPos;}
+static void GetScrollInfo(HWND,int bar,SCROLLINFO *out){*out=bars[bar];}
+static HDWP BeginDeferWindowPos(int){pending.clear();return reinterpret_cast<HDWP>(1);}
+static HDWP DeferWindowPos(HDWP,HWND h,std::nullptr_t,int x,int y,int w,int height,int flags){
+    if(failBatch){pending.clear();return 0;}
+    pending[h]={x,y,x+w,y+height};moveFlags[h]=flags;return reinterpret_cast<HDWP>(1);
+}
+static bool EndDeferWindowPos(HDWP){for(auto p:pending)positions[p.first]=p.second;return true;}
+static void SetWindowPos(HWND h,std::nullptr_t,int x,int y,int w,int height,int flags){positions[h]={x,y,x+w,y+height};moveFlags[h]=flags;}
+static void RedrawWindow(HWND,std::nullptr_t,std::nullptr_t,int flags){++redraws;lastRedrawFlags=flags;}
+static void FillRect(HDC,const RECT*,int){++eraseCalls;}
+static int GetSysColorBrush(int value){return value;}
+static void DeleteObject(HFONT){}
+template<class Callback>static void RemoveWindowSubclass(HWND,Callback,UINT_PTR){}
+static LRESULT DefSubclassProc(HWND,UINT,WPARAM,LPARAM){return 0;}
+@PRODUCTION@
+int main(){
+    const HWND window=reinterpret_cast<HWND>(1),a=reinterpret_cast<HWND>(2),b=reinterpret_cast<HWND>(3);
+    auto *state=new NativeScaler;state->window=window;state->originalWidth=860;state->originalHeight=690;state->geometryScale=188;
+    state->items={{a,{10,80,100,108}},{b,{110,80,230,108}}};state->scrollY=40;
+    ResizeNative(state);assert(positions[a].top==MulDiv(80,188,100)-40);
+    assert(positions[a].bottom-positions[a].top==MulDiv(28,188,100));
+    assert((moveFlags[a]&SWP_NOCOPYBITS)&&(lastRedrawFlags&RDW_ERASE)&&(lastRedrawFlags&RDW_ALLCHILDREN));
+    for(int repeat=0;repeat<10;++repeat){ScalerProc(window,WM_VSCROLL,SB_LINEDOWN,0,0,reinterpret_cast<DWORD_PTR>(state));ScalerProc(window,WM_VSCROLL,SB_LINEUP,0,0,reinterpret_cast<DWORD_PTR>(state));}
+    assert(state->scrollY==40&&positions[a].top==MulDiv(80,188,100)-40);
+    failBatch=true;state->scrollY=55;ResizeNative(state);assert(positions[a].top==MulDiv(80,188,100)-55&&positions[b].top==positions[a].top);
+    ScalerProc(window,WM_ERASEBKGND,1,0,0,reinterpret_cast<DWORD_PTR>(state));assert(eraseCalls==1&&redraws>=22);
+    ScalerProc(window,WM_NCDESTROY,0,0,0,reinterpret_cast<DWORD_PTR>(state));
+    std::cout<<"PASS actual Win32 scroll callbacks: DPI geometry, erase/redraw, reversible scrolling and batch fallback (recording API)\n";
+}

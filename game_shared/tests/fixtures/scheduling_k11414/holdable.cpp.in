@@ -1,0 +1,84 @@
+// Production controller with recording body/entity services. The test integrates
+// its acceleration independently; this is not a contact/joint PhysX solver.
+#include "physics_drive_timestep.h"
+#include <cassert>
+#include <cmath>
+#include <iostream>
+#include <map>
+extern "C" const char *__asan_default_options() { return "detect_leaks=0:halt_on_error=1"; }
+namespace physx
+{
+using PxReal=float;constexpr float PxPi=3.14159265358979323846f;
+struct PxVec3
+{
+    float x=0,y=0,z=0;PxVec3()=default;explicit PxVec3(float v):x(v),y(v),z(v){};PxVec3(float a,float b,float c):x(a),y(b),z(c){}
+    PxVec3 operator+(PxVec3 v) const {return {x+v.x,y+v.y,z+v.z};}
+    PxVec3 operator-(PxVec3 v) const {return {x-v.x,y-v.y,z-v.z};}
+    PxVec3 operator*(float s) const {return {x*s,y*s,z*s};}
+    PxVec3 &operator-=(PxVec3 v) {*this=*this-v;return *this;}
+    float dot(PxVec3 v) const {return x*v.x+y*v.y+z*v.z;}
+};
+struct PxQuat
+{
+    float x=0,y=0,z=0,w=1;PxQuat()=default;PxQuat(float a,float b,float c,float d):x(a),y(b),z(c),w(d){}
+    PxQuat getConjugate() const {return {-x,-y,-z,w};}
+    PxQuat operator*(PxQuat q) const {return {w*q.x+x*q.w+y*q.z-z*q.y,w*q.y-x*q.z+y*q.w+z*q.x,w*q.z+x*q.y-y*q.x+z*q.w,w*q.w-x*q.x-y*q.y-z*q.z};}
+    void toRadiansAndUnitAxis(float &angle,PxVec3 &axis) const
+    {angle=2*std::acos(w);const float s=std::sqrt(1-w*w);axis=s>1e-6f?PxVec3(x/s,y/s,z/s):PxVec3(1,0,0);}
+};
+struct PxTransform {PxVec3 p;PxQuat q;};
+struct PxRigidBodyFlag {enum Enum{eKINEMATIC=1};};
+struct PxForceMode {enum Enum{eACCELERATION=2};};
+struct PxActor {virtual ~PxActor()=default;template<class T>T *is(){return dynamic_cast<T *>(this);}};
+struct PxRigidDynamic:PxActor
+{
+    struct Flags {bool kinematic=false;bool isSet(PxRigidBodyFlag::Enum) const{return kinematic;}};
+    Flags flags;PxTransform pose;PxVec3 linear,angular,force,torque;int forces=0,torques=0;
+    Flags getRigidBodyFlags() const{return flags;}
+    PxTransform getGlobalPose() const{return pose;}
+    PxVec3 getLinearVelocity() const{return linear;}PxVec3 getAngularVelocity() const{return angular;}
+    void addForce(PxVec3 v,PxForceMode::Enum mode){assert(mode==PxForceMode::eACCELERATION);force=v;++forces;}
+    void addTorque(PxVec3 v,PxForceMode::Enum mode){assert(mode==PxForceMode::eACCELERATION);torque=v;++torques;}
+};
+}
+using namespace physx;
+using Vector=PxVec3;using Vector4D=PxQuat;
+struct CBaseEntity {void *m_pUserData=nullptr;int index=1;int entindex(){return index;}};
+struct Handle {CBaseEntity *entity=nullptr;bool alive=true;explicit operator bool() const{return alive;}CBaseEntity *GetPointer(){return entity;}};
+class HoldableItemController
+{
+public:
+    struct Target {Vector origin;Vector4D quat;};
+    struct Entry {Handle handle;Target target;};
+    std::map<int,Entry> m_entries;
+    void ApplyForces(float dt);
+};
+@CONSTANTS@
+@PRODUCTION@
+int main()
+{
+    for(int hz:{30,60,100})
+    {
+        PxRigidDynamic actor;actor.pose.p={10,0,0};CBaseEntity entity{&actor,1};
+        HoldableItemController controller;controller.m_entries[1]={{&entity,true},{{0,0,0},{0,0,0,1}}};
+        const float dt=1.0f/hz;
+        controller.ApplyForces(dt);
+        const double denominator=hz==100?1:1+80*double(dt)+2000*double(dt)*dt;
+        assert(std::fabs(actor.force.x+20000/denominator)<.005);
+        // Long steps settle, instead of the legacy 30 Hz damping oscillation.
+        for(int frame=0;frame<hz*5;++frame)
+        {
+            controller.ApplyForces(dt);
+            actor.linear=actor.linear+actor.force*dt;actor.pose.p=actor.pose.p+actor.linear*dt;
+            assert(std::isfinite(actor.pose.p.x) && std::fabs(actor.pose.p.x)<=10.001);
+        }
+        assert(std::fabs(actor.pose.p.x)<.001 && std::fabs(actor.linear.x)<.001);
+        actor.angular={1,2,3};actor.pose.q={0,0,std::sin(.1f),std::cos(.1f)};
+        controller.ApplyForces(dt);assert(actor.torque.x<0 && actor.torque.y<0 && actor.torque.z<0);
+        const int count=actor.forces;controller.ApplyForces(NAN);controller.ApplyForces(-1);assert(actor.forces==count);
+        actor.flags.kinematic=true;controller.ApplyForces(dt);assert(actor.forces==count);
+        actor.flags.kinematic=false;entity.m_pUserData=nullptr;controller.ApplyForces(dt);assert(controller.m_entries.empty());
+        controller.m_entries[1]={{&entity,false},{{0,0,0},{0,0,0,1}}};controller.ApplyForces(dt);assert(controller.m_entries.empty());
+    }
+    std::cout<<"PASS actual held-item controller at 30/60/100 Hz: acceleration units, legacy response, independent five-second settling, angular damping, invalid dt, kinematic and stale-handle cleanup\n";
+}

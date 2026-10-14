@@ -16,6 +16,7 @@ GNU General Public License for more details.
 #include "hud.h"
 #include "utils.h"
 #include "gl_local.h"
+#include "gl_render_budget.h"
 #include "pm_defs.h"
 #include "event_api.h"
 #include <stringlib.h>
@@ -27,9 +28,45 @@ GNU General Public License for more details.
 #include "gl_cvars.h"
 #include "vertex_fmt.h"
 #include "brush_material.h"
+#include <new>
 
 static gl_world_t	worlddata;
 gl_world_t *world = &worlddata;
+
+// Client edicts and BSP surfaces do not survive a map transition. In
+// particular, shader precaching calls R_TextureAnimation before a new client
+// entity array exists. Clear every recursive view, not just the active one.
+static void Mod_ClearRenderContext( void )
+{
+	R_ResetRenderBudgetCache();
+	for( int i = 0; i < MAX_REF_STACK; ++i )
+	{
+		ref_instance_t &state = glState.stack[i];
+		state.currententity = NULL;
+		state.currentmodel = NULL;
+		state.currentlight = NULL;
+		state.currentshader = NULL;
+		state.reject_face = NULL;
+		state.view.leaf = NULL;
+		state.view.client_frame = -1;
+		state.params = RP_NONE;
+		state.skyPortalRendered = false;
+		state.frame.solid_faces.RemoveAll();
+		state.frame.solid_meshes.RemoveAll();
+		state.frame.trans_list.RemoveAll();
+		state.frame.grass_list.RemoveAll();
+		state.frame.primverts.RemoveAll();
+		state.frame.light_faces.RemoveAll();
+		state.frame.light_meshes.RemoveAll();
+		state.frame.light_grass.RemoveAll();
+		memset( state.frame.subview_faces, 0, sizeof( state.frame.subview_faces ));
+		state.frame.num_subview_faces = 0;
+	}
+	tr.sky_camera = NULL;
+	memset( tr.draw_entities, 0, sizeof( tr.draw_entities ));
+	tr.num_draw_entities = 0;
+	R_InitRefState();
+}
 
 /*
 ==================
@@ -71,6 +108,7 @@ bool Surf_CheckSubview( mextrasurf_t *es, bool puddle )
 	ASSERT( glState.stack_position >= 0 && glState.stack_position < MAX_REF_STACK );
 	int handle = es->subtexture[glState.stack_position];
 	if( !handle ) return false;
+	if(handle<1 || handle>tr.num_subview_used || !tr.subviewTextures[handle-1].texturenum.Initialized()) return false;
 
 	ASSERT( handle > 0 && handle <= MAX_SUBVIEW_TEXTURES );
 
@@ -133,6 +171,10 @@ static void Mod_LoadWorldMaterials( void )
 	char	heightmap[128];
 
 	world->materials = (material_t *)Mem_Alloc( sizeof( material_t ) * worldmodel->numtextures );
+	// Mem_Alloc returns raw storage; material_t owns a shared_ptr and needs
+	// a real C++ lifetime even for empty or missing texture slots.
+	for( int i = 0; i < worldmodel->numtextures; ++i )
+		new( &world->materials[i] ) material_t();
 
 	for( int i = 0; i < worldmodel->numtextures; i++ )
 	{
@@ -277,14 +319,14 @@ static void Mod_LoadWorldMaterials( void )
 		if( !Q_strnicmp( tx->name, "{scroll", 7 ))
 			SetBits( mat->flags, BRUSH_CONVEYOR|BRUSH_TRANSPARENT );
 
-		if( !Q_strncmp( tx->name, "mirror", 6 ) || !Q_strncmp( tx->name, "reflect", 7 ))
+		if( !Q_strnicmp( tx->name, "mirror", 6 ) || !Q_strnicmp( tx->name, "reflect", 7 ))
 			SetBits( mat->flags, BRUSH_REFLECT );
 
-		if( !Q_strncmp( tx->name, "movie", 5 ))
+		if( !Q_strnicmp( tx->name, "movie", 5 ))
 			SetBits( mat->flags, BRUSH_FULLBRIGHT );
 
-		bool liquidScrollFlag = !Q_strncmp(tx->name, "!scroll", 7);
-		if (tx->name[0] == '!' || !Q_strncmp(tx->name, "water", 5) || liquidScrollFlag)
+		bool liquidScrollFlag = !Q_strnicmp(tx->name, "!scroll", 7);
+		if (tx->name[0] == '!' || !Q_strnicmp(tx->name, "water", 5) || liquidScrollFlag)
 		{
 			// liquid surface should be smooth and reflective
 			SetBits(mat->flags, BRUSH_REFLECT | BRUSH_LIQUID);
@@ -301,7 +343,7 @@ static void Mod_LoadWorldMaterials( void )
 			}
 		}
 
-		if( !Q_strncmp( tx->name, "sky", 3 ))
+		if( !Q_strnicmp( tx->name, "sky", 3 ))
 			SetBits( world->features, WORLD_HAS_SKYBOX );
 	}
 }
@@ -792,6 +834,9 @@ static word Mod_ShaderSceneForward( msurface_t *s )
 	char options[MAX_OPTIONS_LENGTH];
 	mextrasurf_t *es = s->info;
 	cl_entity_t *e = es->parent ? es->parent : GET_ENTITY( 0 );
+	// World loading runs before client sign-on and may have no entity zero.
+	const int rendermode = e ? e->curstate.rendermode : kRenderNormal;
+	const int entityFlags = e ? e->curstate.iuser1 : 0;
 
 	// don't cache shader for skyfaces!
 	if( FBitSet( s->flags, SURF_DRAWSKY ))
@@ -803,7 +848,7 @@ static word Mod_ShaderSceneForward( msurface_t *s )
 	bool surf_movie = FBitSet(s->flags, SURF_MOVIE);
 	bool mirror = Surf_CheckSubview( s->info ) && !surf_monitor && !surf_portal && !surf_movie;
 
-	if( es->forwardScene[mirror].IsValid() && es->lastRenderMode == e->curstate.rendermode )
+	if( es->forwardScene[mirror].IsValid() && es->lastRenderMode == rendermode )
 		return es->forwardScene[mirror].GetHandle(); // valid
 
 	Q_strncpy( glname, "forward/scene_bmodel", sizeof( glname ));
@@ -825,7 +870,7 @@ static word Mod_ShaderSceneForward( msurface_t *s )
 		fullbright = true;
 	}
 
-	if( e->curstate.rendermode == kRenderTransAdd )
+	if( rendermode == kRenderTransAdd )
 	{
 		shader_additive = true;
 		fullbright = true;
@@ -877,12 +922,12 @@ static word Mod_ShaderSceneForward( msurface_t *s )
 	if (surf_monitor) 
 	{
 		GL_AddShaderDirective(options, "MONITOR_BRUSH");
-		if (FBitSet(e->curstate.iuser1, CF_MONOCHROME))
+		if (FBitSet(entityFlags, CF_MONOCHROME))
 			GL_AddShaderDirective(options, "MONOCHROME");
 	}
 	else if (surf_movie)
 	{
-		if (FBitSet(e->curstate.iuser1, CF_MONOCHROME))
+		if (FBitSet(entityFlags, CF_MONOCHROME))
 			GL_AddShaderDirective(options, "MONOCHROME");
 	}
 
@@ -903,7 +948,7 @@ static word Mod_ShaderSceneForward( msurface_t *s )
 	if( !RP_CUBEPASS() && ( FBitSet( mat->flags, BRUSH_HAS_BUMP ) && (CVAR_TO_BOOL( cv_bump ) || FBitSet( mat->flags, BRUSH_LIQUID ))))
 	{
 		// FIXME: all the waternormals should be encoded as first frame
-		if( FBitSet( mat->flags, BRUSH_LIQUID ))
+		if( FBitSet( mat->flags, BRUSH_LIQUID ) && tr.waterTextures.Count() > 0 )
 			GL_EncodeNormal( options, tr.waterTextures[0] );
 		else 
 			GL_EncodeNormal( options, mat->impl->gl_normalmap_id );
@@ -955,13 +1000,13 @@ static word Mod_ShaderSceneForward( msurface_t *s )
 		shader_use_screencopy = true;
 	}
 
-	if (FBitSet(mat->flags, BRUSH_TRANSPARENT) || e->curstate.rendermode == kRenderTransTexture) 
+	if (FBitSet(mat->flags, BRUSH_TRANSPARENT) || rendermode == kRenderTransTexture)
 	{
 		// don't need alpha blending when using screen copy
-		if (e->curstate.rendermode == kRenderTransTexture && !shader_use_screencopy) {
+		if (rendermode == kRenderTransTexture && !shader_use_screencopy) {
 			GL_AddShaderDirective(options, "ALPHA_BLENDING");
 		}
-		else if (e->curstate.rendermode == kRenderTransAlpha)
+		else if (rendermode == kRenderTransAlpha)
 		{
 			// case when using textures with prefix '{'
 			if (GL_UsingAlphaToCoverage() && GL_Support(R_A2C_DITHER_CONTROL))
@@ -1015,7 +1060,7 @@ static word Mod_ShaderSceneForward( msurface_t *s )
 	if( using_cubemaps )
 		GL_AddShaderFeature( shaderNum, SHADER_USE_CUBEMAPS );
 
-	es->lastRenderMode = e->curstate.rendermode;
+	es->lastRenderMode = rendermode;
 	ClearBits( s->flags, SURF_NODRAW );
 	es->forwardScene[mirror].SetShader( shaderNum );
 	
@@ -1085,7 +1130,7 @@ static word Mod_ShaderLightForward( CDynLight *dl, msurface_t *s )
 		if( FBitSet( mat->flags, BRUSH_HAS_BUMP ) && !FBitSet( dl->flags, DLF_NOBUMP ))
 		{
 			// FIXME: all the waternormals should be encoded as first frame
-			if( FBitSet( mat->flags, BRUSH_LIQUID ))
+			if( FBitSet( mat->flags, BRUSH_LIQUID ) && tr.waterTextures.Count() > 0 )
 				GL_EncodeNormal( options, tr.waterTextures[0] );
 			else GL_EncodeNormal( options, mat->impl->gl_normalmap_id );
 			GL_AddShaderDirective( options, "HAS_NORMALMAP" );
@@ -1984,6 +2029,7 @@ void Mod_ThrowModelInstances( void )
 	// engine already released entity array so we can't release
 	// model instance for each entity personally 
 	g_StudioRenderer.DestroyAllModelInstances();
+	Mod_ClearRenderContext();
 
 	// may caused by Host_Error, so clear gl state
 	if( g_fRenderInitialized )
@@ -1996,6 +2042,34 @@ Mod_LoadWorld
 
 =================
 */
+static void Mod_SetWorldSurfaceTextureFlags( msurface_t *surf )
+{
+	const texture_t *tex = surf->texinfo->texture;
+	if( FBitSet( surf->flags, SURF_DRAWSKY ))
+		SetBits( world->features, WORLD_HAS_SKYBOX );
+	if( !Q_strnicmp( tex->name, "movie", 5 ))
+	{
+		SetBits( world->features, WORLD_HAS_MOVIES );
+		SetBits( surf->flags, SURF_MOVIE );
+	}
+	if( !Q_strnicmp( tex->name, "mirror", 6 ) || !Q_strnicmp( tex->name, "reflect", 7 ) ||
+		!Q_strnicmp( tex->name, "!reflect", 8 ))
+	{
+		SetBits( world->features, WORLD_HAS_MIRRORS );
+		SetBits( surf->flags, SURF_REFLECT );
+	}
+	if( !Q_strnicmp( tex->name, "portal", 6 ))
+	{
+		SetBits( world->features, WORLD_HAS_PORTALS );
+		SetBits( surf->flags, SURF_PORTAL );
+	}
+	if( !Q_strnicmp( tex->name, "monitor", 7 ))
+	{
+		SetBits( world->features, WORLD_HAS_SCREENS );
+		SetBits( surf->flags, SURF_SCREEN );
+	}
+}
+
 static void Mod_LoadWorld( model_t *mod, const byte *buf )
 {
 	dheader_t	*header;
@@ -2080,37 +2154,7 @@ static void Mod_LoadWorld( model_t *mod, const byte *buf )
 	for( i = 0; i < worldmodel->numsurfaces; i++ )
 	{
 		msurface_t *surf = &worldmodel->surfaces[i];
-		texture_t *tex = surf->texinfo->texture;
-
-		if( FBitSet( surf->flags, SURF_DRAWSKY ))
-			SetBits( world->features, WORLD_HAS_SKYBOX );
-
-		if( !Q_strncmp(tex->name, "movie", 5 ))
-		{
-			SetBits( world->features, WORLD_HAS_MOVIES );
-			SetBits( surf->flags, SURF_MOVIE );
-		}
-
-		if( !Q_strncmp(tex->name, "mirror", 6)
-			|| !Q_strncmp(tex->name, "reflect", 7)
-			|| !Q_strncmp(tex->name, "reflect1", 8)
-			|| !Q_strncmp(tex->name, "!reflect", 8))
-		{
-			SetBits(world->features, WORLD_HAS_MIRRORS);
-			SetBits(surf->flags, SURF_REFLECT);
-		}
-
-		if (!Q_strncmp(tex->name, "portal", 6))
-		{
-			SetBits(world->features, WORLD_HAS_PORTALS);
-			SetBits(surf->flags, SURF_PORTAL);
-		}
-
-		if (!Q_strncmp(tex->name, "monitor", 7))
-		{
-			SetBits(world->features, WORLD_HAS_SCREENS);
-			SetBits(surf->flags, SURF_SCREEN);
-		}
+		Mod_SetWorldSurfaceTextureFlags( surf );
 
 		if( FBitSet( surf->flags, SURF_REFLECT ))
 			GL_AllocOcclusionQuery( surf );
@@ -2162,6 +2206,16 @@ static void Mod_FreeWorld( model_t *mod )
 		Mem_Free( world->surface_lighting );
 	world->surface_lighting = NULL;
 
+	// These arrays also belong to the client renderer, not the engine BSP
+	// pool. Dropping them in the final memset leaked memory on every map.
+	if( world->surfnormals ) Mem_Free( world->surfnormals );
+	if( world->normals ) Mem_Free( world->normals );
+	if( world->leaflights ) Mem_Free( world->leaflights );
+	if( world->worldlights ) Mem_Free( world->worldlights );
+	if( world->vislightdata ) Mem_Free( world->vislightdata );
+	if( world->shadowzbuffers ) Mem_Free( world->shadowzbuffers );
+	if( world->sortedfaces ) Mem_Free( world->sortedfaces );
+
 	// free old cinematics
 	R_FreeCinematics();
 
@@ -2172,26 +2226,29 @@ static void Mod_FreeWorld( model_t *mod )
 	{
 		for( int i = 0; i < worldmodel->numtextures; i++ )
 		{
-			texture_t *tx = worldmodel->textures[i];
 			material_t *mat = &world->materials[i];
-			TextureHandle texHandle = tx;
-
-			if( !mat->pSource ) continue;	// not initialized?
-
-			if( !FBitSet( mat->flags, BRUSH_MULTI_LAYERS ))
+			texture_t *tx = mat->pSource;
+			if( tx && mat->impl )
 			{
-				if( texHandle != mat->impl->gl_diffuse_id )
-					FREE_TEXTURE( mat->impl->gl_diffuse_id );
-
-				if( mat->impl->gl_normalmap_id != tr.normalmapTexture )
-					FREE_TEXTURE( mat->impl->gl_normalmap_id );
-
-				if( mat->impl->gl_specular_id != tr.blackTexture )
-					FREE_TEXTURE( mat->impl->gl_specular_id );
-            }
-
-			if( mat->impl->gl_glowmap_id != tr.blackTexture )
-				FREE_TEXTURE( mat->impl->gl_glowmap_id );
+				TextureHandle texHandle = tx;
+				if( !FBitSet( mat->flags, BRUSH_MULTI_LAYERS ))
+				{
+					if( texHandle != mat->impl->gl_diffuse_id )
+						FREE_TEXTURE( mat->impl->gl_diffuse_id );
+					if( mat->impl->gl_normalmap_id != tr.normalmapTexture )
+						FREE_TEXTURE( mat->impl->gl_normalmap_id );
+					if( mat->impl->gl_specular_id != tr.blackTexture )
+						FREE_TEXTURE( mat->impl->gl_specular_id );
+					if( mat->impl->gl_heightmap_id != tr.blackTexture )
+						FREE_TEXTURE( mat->impl->gl_heightmap_id );
+					if( mat->impl->gl_detailmap_id != tr.grayTexture )
+						FREE_TEXTURE( mat->impl->gl_detailmap_id );
+				}
+				if( mat->impl->gl_glowmap_id != tr.blackTexture )
+					FREE_TEXTURE( mat->impl->gl_glowmap_id );
+			}
+			if( tx ) tx->material = NULL;
+			mat->~material_t();
 		}
 
 		Mem_Free( world->materials );
@@ -2238,6 +2295,9 @@ resource management
 */
 void R_ProcessWorldData( model_t *mod, qboolean create, const byte *buffer )
 {
+	// Model loading can happen before GL_MapChanged and must never inherit
+	// a draw entity from the map being freed (or from a recursive subview).
+	Mod_ClearRenderContext();
 	worldmodel = mod;
 
 	if( create )
@@ -2248,7 +2308,11 @@ void R_ProcessWorldData( model_t *mod, qboolean create, const byte *buffer )
 		r_buildstats.create_buffer_object += (end - start);
 		r_buildstats.total_buildtime += (end - start);
 	}
-	else Mod_FreeWorld( mod );
+	else
+	{
+		Mod_FreeWorld( mod );
+		worldmodel = NULL;
+	}
 }
 
 /*

@@ -24,7 +24,7 @@ class CMeshDescFactory
 public:
 	static CMeshDescFactory& Instance();
 	void ClearCache();
-	CMeshDesc& CreateObject(int32_t modelIndex, int32_t body, int32_t skin, clipfile::GeometryType geomType);
+	CMeshDesc& CreateObject(int32_t modelIndex, int32_t body, int32_t skin, clipfile::GeometryType geomType, uint64_t fingerprint = 0);
 
 private:
 	CMeshDescFactory();

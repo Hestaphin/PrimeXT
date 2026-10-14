@@ -26,6 +26,7 @@ GNU General Public License for more details.
 #include "pmtrace.h"
 #include "event_api.h"
 #include "gl_local.h"
+#include "performance_gpu.h"
 #include "gl_studio.h"
 #include "gl_sprite.h"
 #include "gl_world.h"
@@ -472,37 +473,45 @@ void GL_BackendEndFrame( ref_viewpass_t *rvp, RefParams params )
 	RI->view.fov_x = rvp->fov_x;
 	RI->view.fov_y = rvp->fov_y; 
 
-	R_DrawViewModel();		// 3D
-
-	if (hdr_rendering)
 	{
-		if (multisampling)
+		pxperf::Scope cpuViewModel(pxperf::Metric::ViewModel);
+		pxperf::GpuScope gpuViewModel(pxperf::Metric::GpuViewModel);
+		R_DrawViewModel();		// 3D
+	}
+
+	{
+		pxperf::Scope cpuPostEffects(pxperf::Metric::PostEffects);
+		pxperf::GpuScope gpuPostEffects(pxperf::Metric::GpuPostEffects);
+		if (hdr_rendering)
 		{
-			// copy image from multisampling framebuffer to screen framebuffer
-			pglBindFramebuffer(GL_DRAW_FRAMEBUFFER, tr.screen_hdr_fbo->id);
-			pglBindFramebuffer(GL_READ_FRAMEBUFFER, tr.screen_multisample_fbo->id);
-			pglBlitFramebuffer(0, 0, glState.width, glState.height, 0, 0, glState.width, glState.height, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+			if (multisampling)
+			{
+				// copy image from multisampling framebuffer to screen framebuffer
+				pglBindFramebuffer(GL_DRAW_FRAMEBUFFER, tr.screen_hdr_fbo->id);
+				pglBindFramebuffer(GL_READ_FRAMEBUFFER, tr.screen_multisample_fbo->id);
+				pglBlitFramebuffer(0, 0, glState.width, glState.height, 0, 0, glState.width, glState.height, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+			}
+			GL_BindFBO(tr.screen_hdr_fbo->id);
+			RenderAverageLuminance();
 		}
-		GL_BindFBO(tr.screen_hdr_fbo->id);
-		RenderAverageLuminance();
-	}
 
-	RenderDOF();				// 2D
-	RenderNerveGasBlur();		// 2D
-	RenderUnderwaterBlur();		// 2D
-	if (hdr_rendering)
-	{
-		RenderBloom();
-		RenderTonemap();		// should be last step in HDR pipeline!!!
-	}
+		RenderDOF();				// 2D
+		RenderNerveGasBlur();		// 2D
+		RenderUnderwaterBlur();		// 2D
+		if (hdr_rendering)
+		{
+			RenderBloom();
+			RenderTonemap();		// should be last step in HDR pipeline!!!
+		}
 
-	R_RenderDebugStudioList( true ); // 3D
-	RenderSunShafts();			// 2D
-	RenderPostprocessing();		// 2D
-	R_ShowLightMaps();			// 2D
-	
-	if (hdr_rendering) {
-		R_RenderScreenQuad();
+		R_RenderDebugStudioList( true ); // 3D
+		RenderSunShafts();			// 2D
+		RenderPostprocessing();		// 2D
+		R_ShowLightMaps();			// 2D
+
+		if (hdr_rendering) {
+			R_RenderScreenQuad();
+		}
 	}
 
 	GL_CleanupDrawState();
@@ -674,28 +683,37 @@ int R_AllocFrameBuffer(const CViewport &viewport)
 	}
 
 	gl_fbo_t *fbo = &tr.frame_buffers[i];
-	tr.num_framebuffers++;
 
 	if( fbo->init )
 	{
 		ALERT( at_warning, "R_AllocFrameBuffer: buffer %i already initialized\n", i );
+		tr.num_framebuffers++;
 		return i;
 	}
 
 	// create a depth-buffer
 	pglGenRenderbuffers( 1, &fbo->renderbuffer );
+	if(!fbo->renderbuffer) return -1;
 	pglBindRenderbuffer( GL_RENDERBUFFER_EXT, fbo->renderbuffer );
 	pglRenderbufferStorage( GL_RENDERBUFFER_EXT, GL_DEPTH_COMPONENT24, viewport.GetWidth(), viewport.GetHeight() );
 	pglBindRenderbuffer( GL_RENDERBUFFER_EXT, 0 );
 
 	// create frame-buffer
 	pglGenFramebuffers( 1, &fbo->framebuffer );
+	if(!fbo->framebuffer)
+	{
+		pglDeleteRenderbuffers(1, &fbo->renderbuffer);
+		memset(fbo, 0, sizeof(*fbo));
+		return -1;
+	}
+	const GLuint previous = glState.frameBuffer;
 	pglBindFramebuffer( GL_FRAMEBUFFER_EXT, fbo->framebuffer );
 	pglFramebufferRenderbuffer( GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT, GL_RENDERBUFFER_EXT, fbo->renderbuffer );
 	pglDrawBuffer( GL_COLOR_ATTACHMENT0_EXT );
 	pglReadBuffer( GL_COLOR_ATTACHMENT0_EXT );
-	pglBindFramebuffer( GL_FRAMEBUFFER_EXT, 0 );
+	pglBindFramebuffer( GL_FRAMEBUFFER_EXT, previous );
 	fbo->init = true;
+	tr.num_framebuffers++;
 
 	return i;
 }
@@ -710,6 +728,8 @@ void R_FreeFrameBuffer( int buffer )
 
 	gl_fbo_t *fbo = &tr.frame_buffers[buffer];
 
+	if(fbo->framebuffer && glState.frameBuffer == fbo->framebuffer)
+		GL_BindFBO(0);
 	pglDeleteRenderbuffers( 1, &fbo->renderbuffer );
 	pglDeleteFramebuffers( 1, &fbo->framebuffer );
 	memset( fbo, 0, sizeof( *fbo ));
@@ -719,13 +739,14 @@ void GL_BindFrameBuffer( int buffer, TextureHandle texture )
 {
 	gl_fbo_t *fbo = NULL;
 
-	if( buffer >= 0 && buffer < MAX_FRAMEBUFFERS )
+	if( buffer >= 0 && buffer < MAX_FRAMEBUFFERS &&
+		tr.frame_buffers[buffer].init && texture.Initialized() )
 		fbo = &tr.frame_buffers[buffer];
 
 	if( !fbo )
 	{
 		pglBindFramebuffer( GL_FRAMEBUFFER_EXT, 0 );
-		glState.frameBuffer = buffer;
+		glState.frameBuffer = 0;
 		return;
 	}
 

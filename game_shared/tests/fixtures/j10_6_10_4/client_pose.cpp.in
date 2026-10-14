@@ -1,0 +1,35 @@
+// Packet receipt, shared CPU prediction/draw and ownership transitions use the
+// real renderer methods and Studio animation implementation from the base fixture.
+static unsigned f4ClientChecks=0;
+static void F4Check(bool v,const char *label) {++f4ClientChecks;if(!v){std::cerr<<"FAIL "<<label<<'\n';std::abort();}}
+static bool F4Near(float a,float b){return std::fabs(a-b)<0.001f;}
+static void additionalCases()
+{
+    for(float scale:{0.5f,1.0f,2.5f})
+    {
+        sampleTime=100;Fixture f;f.entity.curstate.scale=scale;f.sequences[0].numblends=1;
+        query(f);f.entity.curstate.iuser1|=CF_RAGDOLL;
+        const Vector4D q(0,0,0,1);
+        g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,1,1,Vector(40,0,0),q,0,nullptr,nullptr,nullptr);
+        F4Check(F4Near(query(f,1).GetOrigin().x,2*scale),"entry starts at current scaled animation");
+        sampleTime+=0.13f;F4Check(F4Near(query(f,1).GetOrigin().x,40),"entry reaches physical root");
+        F4Check(F4Near(query(f,0).GetOrigin().x,40-2*scale),"passive ancestor follows pelvis in world units");
+        const auto before=query(f,2);
+        F4Check(F4Near(before.GetOrigin().x,40+3*scale),"passive child keeps current animation offset");
+        sampleTime+=0.01f;const byte bone[]={2};const Vector relative[]={Vector(50*scale,0,0)};const Vector4D rotations[]={q};
+        g_StudioRenderer.StudioSetRagdollPose(&f.entity,false,false,false,2,1,Vector(50,0,0),q,1,bone,relative,rotations);
+        F4Check(F4Near(query(f,2).GetOrigin().x,before.GetOrigin().x),"new physical mask starts from displayed passive bone");
+        auto *inst=g_StudioRenderer.StudioEnsureCpuInstance(&f.entity);
+        drawSame(f);F4Check(F4Near(inst->m_pbones[2].GetOrigin().x,before.GetOrigin().x),"receipt-time continuity agrees between prediction and draw");
+        sampleTime+=0.11f;F4Check(F4Near(query(f,2).GetOrigin().x,50+50*scale),"new mask converges to packet target");
+        F4Check(F4Near(query(f,2).GetForward().Length(),scale),"render basis scale survives interpolation");
+        f.entity.curstate.iuser1&=~CF_RAGDOLL;const auto last=query(f,2);drawSame(f);
+        F4Check(F4Near(last.GetOrigin().x,50+50*scale)&&inst->m_bRagdollExitBlend,"implicit exit captures final physical skeleton");
+        sampleTime+=0.19f;F4Check(F4Near(query(f,2).GetOrigin().x,5*scale)&&!inst->m_bRagdollExitBlend,"exit reaches current scaled animation");
+        g_StudioRenderer.StudioSetPartPose(&f.entity,1,false,false,1,Vector(20,0,0),q);
+        sampleTime+=0.13f;query(f);
+        F4Check(F4Near(query(f,0).GetOrigin().x,0)&&F4Near(query(f,1).GetOrigin().x,20),"physical part preserves master animation ownership");
+        F4Check(F4Near(query(f,2).GetOrigin().x,20+3*scale),"physical part child retains scaled local transform");
+    }
+    std::cout<<"F4 client packet/prediction/draw: "<<f4ClientChecks<<" checks PASS; no native game/GPU\n";
+}

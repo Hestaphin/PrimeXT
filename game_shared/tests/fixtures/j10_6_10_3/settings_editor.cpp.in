@@ -1,0 +1,153 @@
+#include "ragdoll_geometry.h"
+#include "physics_asset_sidecar_removal.h"
+#include <limits>
+@PRODUCTION@
+static int checks=0;
+static void Check(bool value,const char *name) {++checks;if(!value) {std::cerr<<"FAIL "<<name<<'\n';std::abort();}}
+static void Action(RagdollTemplateDialog &dialog,int id) {mxEvent e{};e.event=mxEvent::Action;e.action=id;dialog.handleEvent(&e);}
+struct Input
+{
+    studiohdr_t hdr{};mstudiobone_t bones[3]{};mstudiobodyparts_t parts[3]{};mstudiomodel_t models[3]{};
+    Vector vertices[7]{};byte owners[7]{};mstudioboneweight_t weights[7]{};
+};
+int main(int argc,char **argv)
+{
+    Check(argc==2,"temporary path");Input input;
+    auto &h=input.hdr;h.numbones=3;h.boneindex=offsetof(Input,bones);h.numbodyparts=3;h.bodypartindex=offsetof(Input,parts);
+    std::strcpy(input.bones[0].name,"root");input.bones[0].parent=-1;input.bones[0].value[5]=0.6f;
+    std::strcpy(input.bones[1].name,"limb");input.bones[1].parent=0;input.bones[1].value[0]=4;input.bones[1].value[3]=0.3f;
+    std::strcpy(input.bones[2].name,"tip");input.bones[2].parent=1;input.bones[2].value[0]=6;input.bones[2].value[1]=8;
+    const char *names[]={"character","gun","gunner"};
+    for(int i=0;i<3;++i)
+    {
+        std::strcpy(input.parts[i].name,names[i]);input.parts[i].nummodels=1;input.parts[i].modelindex=int(offsetof(Input,models)+i*sizeof(mstudiomodel_t));
+        const int start=i==0?0:i==1?5:6;
+        input.models[i].numverts=i==0?5:1;input.models[i].vertindex=int(offsetof(Input,vertices)+start*sizeof(Vector));
+        input.models[i].vertinfoindex=int(offsetof(Input,owners)+start);input.models[i].blendvertinfoindex=int(offsetof(Input,weights)+start*sizeof(mstudioboneweight_t));
+    }
+    for(int i=0;i<5;++i) {input.vertices[i]=Vector(1.2f*i,1.6f*i,i%2?1.0f:-1.0f);input.owners[i]=1;}
+    input.vertices[5]=Vector(1000,1000,1000);input.owners[5]=1;input.vertices[6]=Vector(3,4,0);input.owners[6]=1;
+    ViewerSettings settings;StudioModel model(settings);model.m_pstudiohdr=&h;
+    std::vector<matrix3x4> ref(3);
+    for(int i=0;i<3;++i)
+    {
+        auto &b=input.bones[i];const matrix3x4 local(Vector(b.value[0],b.value[1],b.value[2]),Radian(b.value[3],b.value[4],b.value[5]));
+        ref[i]=b.parent<0?local:ref[b.parent].ConcatTransforms(local);model.m_plocaltransform[i]=ref[i].Invert();
+        model.m_pbonetransform[i]=matrix3x4(Vector(999,99,9),Vector(50,60,70),1.0f);model.m_pworldtransform[i]=model.m_pbonetransform[i];
+    }
+    std::vector<std::vector<Vector>> points;
+    Check(model.GetRagdollFitVertices(points,{"gun"})&&points[1].size()==6,"accessory token excluded while gunner is retained");
+    Check(points[1][1].x==1.2f&&points[1][1].y==1.6f,"rigid bind samples independent of current pose");
+    Check(model.GetRagdollFitVertices(points,{})&&points[1].size()==7,"explicit inclusion control");
+    const auto rigid=points;
+    h.flags=STUDIO_HAS_BONEWEIGHTS;
+    for(int i=0;i<7;++i)
+    {
+        const Vector local=input.vertices[i];input.vertices[i]=ref[1].VectorTransform(local);
+        for(int k=0;k<4;++k) input.weights[i].bone[k]=-1;
+        input.weights[i].bone[0]=1;input.weights[i].weight[0]=200;input.weights[i].bone[1]=0;input.weights[i].weight[1]=55;
+    }
+    Check(model.GetRagdollFitVertices(points,{"gun"})&&points[1].size()==6,"strongest-weight assignment excludes accessories");
+    bool equal=true;for(size_t i=0;i<5;++i) equal=equal&&(points[1][i]-rigid[1][i]).Length()<0.001f;
+    Check(equal,"weighted inverse-bind collection agrees with equivalent rigid model");
+    PhysicsAssetEditor editor(nullptr,model,settings);editor.m_modelPath=std::string(argv[1])+"/synthetic.mdl";editor.m_assetPath=std::string(argv[1])+"/synthetic.phys";
+    std::vector<ragtemplate::Bone> collected;std::string error;
+    Check(editor.CollectTemplateBones(collected,error,{"gun"})&&collected[1].vertices.size()==6&&collected[1].boundsMax.x<10,"production filtered bounds collection");
+    Check(std::fabs(collected[1].localAngles.x-0.3f)<1e-6,"Studio reference rotations retained");
+    // Check portable/engine rotations using independently implemented production matrices.
+    bool rotation=true;
+    for(physicsasset::Vec3 angles: {physicsasset::Vec3{22,31,-40},physicsasset::Vec3{90,13,21}})
+    {
+        matrix3x4 engine(Vector(0,0,0),Vector(angles.x,angles.y,angles.z),1.0f);auto portable=raggeometry::Euler(angles);
+        Vector value(2,3,4);auto expected=engine.VectorRotate(value);auto actual=portable.Rotate({2,3,4});
+        rotation=rotation&&(expected-Vector(actual.x,actual.y,actual.z)).Length()<0.0001f;
+    }
+    Check(rotation,"portable frame convention agrees with engine Euler implementation");
+    editor.AutoGenerate();auto &dialog=*editor.m_templateDialog;dialog.m_draft=ragtemplate::Builtins()[2];dialog.m_builtin=false;
+    dialog.m_draft.excludedSections={"gun"};ragtemplate::Role role;role.id="limb";role.parent="root";role.aliases={"limb"};role.joint.frameMode=ragtemplate::FrameMode::Flexion;
+    role.joint.twistLow=0;role.joint.twistHigh=130;dialog.m_draft.roles.push_back(role);dialog.ShowTemplate();
+    Check(dialog.GeneratePreview()&&editor.m_generation.Preview().axisReviews==1,"actual dialog infers a reviewable flexion frame");
+    const auto empty=physicsasset::Serialize(editor.m_asset);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(dialog.isVisible()&&physicsasset::Serialize(editor.m_asset)==empty,"unchecked axis review blocks Apply");
+    dialog.m_axisReviewed->setChecked(true);Action(dialog,RagdollTemplateDialog::Apply);
+    Check(!dialog.isVisible()&&editor.m_asset.bodies.size()==2&&editor.m_dirty,"reviewed candidate applies through actual dialog");
+    editor.ShowJoint(0);editor.m_frameAnchor[0]->setLabel("1.25");editor.m_frameAnchor[1]->setLabel("-2.5");editor.m_frameAnchor[2]->setLabel("3.75");
+    editor.m_frameAngles[0]->setLabel("15");editor.m_frameAngles[1]->setLabel("-60");editor.m_frameAngles[2]->setLabel("25");
+    Check(editor.ApplyJointFields()&&editor.m_asset.joints[0].frameAnchor.y==-2.5f&&editor.m_asset.joints[0].frameAngles.y==-60,"production joint frame editing");
+    const std::string edited=physicsasset::Serialize(editor.m_asset);editor.m_frameAngles[1]->setLabel("nan");
+    Check(!editor.ApplyJointFields()&&physicsasset::Serialize(editor.m_asset)==edited,"nonfinite frame edit leaves asset unchanged");editor.ShowJoint(0);
+    Check(editor.SaveAsset()&&!editor.m_dirty,"production frame Save");editor.m_asset.joints[0].frameAnchor={};editor.ReloadAsset();
+    Check(physicsasset::Serialize(editor.m_asset)==edited&&editor.m_frameAngles[1]->getLabel()!=nullptr,"production frame Reload restores all fields");
+    dialog.Open();dialog.m_draft.roles[1].joint.frameMode=ragtemplate::FrameMode::Explicit;dialog.ShowTemplate();dialog.m_roles->select(1);dialog.ShowRole(1);dialog.m_templateAngles[1]->setLabel("33.25");dialog.m_templateAnchor[1]->setLabel("-1.5");Check(dialog.ReadFields()&&dialog.m_draft.roles[1].joint.frameAngles.y==33.25f&&dialog.m_draft.roles[1].joint.frameAnchor.y==-1.5f,"production template frame editing");Check(dialog.GeneratePreview()&&editor.m_generation.Preview().axisReviews==0,"explicit frames need no inferred-axis review");
+    Action(dialog,RagdollTemplateDialog::Apply);editor.UndoGeneration();Check(physicsasset::Serialize(editor.m_asset)==edited,"production Undo restores edited frames");
+    dialog.Open();Check(dialog.GeneratePreview(),"second isolated preview");Action(dialog,RagdollTemplateDialog::Close);
+    Check(physicsasset::Serialize(editor.m_asset)==edited,"Cancel preserves saved frames");
+    input.bones[1].parent=1;Check(!model.GetRagdollFitVertices(points,{"gun"}),"invalid cyclic reference rejected safely");
+
+    input.bones[1].parent=0;
+    auto SettingsAction=[](PhysicsSettingsDialog &d,int id) {mxEvent e{};e.event=mxEvent::Action;e.action=id;d.handleEvent(&e);};
+    editor.ShowBody(0);editor.EditPhysicsSettings();auto &tuning=*editor.m_settingsDialog;
+    bool layout=true;std::vector<WidgetRecord *> rects;
+    for(const auto &entry:widgets) if(entry.second->parent==&tuning) {auto *r=entry.second;layout=layout&&r->x>=0&&r->y>=0&&r->x+r->w<=640&&r->y+r->h<=830;rects.push_back(r);}
+    for(size_t i=0;i<rects.size();++i) for(size_t j=i+1;j<rects.size();++j) {auto a=rects[i],b=rects[j];if(a->x<b->x+b->w&&b->x<a->x+a->w&&a->y<b->y+b->h&&b->y<a->y+a->h) layout=false;}
+    Check(layout,"settings controls fit and do not overlap");
+    const auto originalSettings=physicsasset::Serialize(editor.m_asset);
+    tuning.m_values[2]->setLabel("27");tuning.m_self->select(2);tuning.m_first->select(0);tuning.m_second->select(1);SettingsAction(tuning,PhysicsSettingsDialog::AllowPair);
+    Check(tuning.m_draft.collisionPairs.size()==1&&tuning.m_draft.collisionPairs[0].enabled,"pair allow remains isolated in draft");
+    tuning.Cancel();Check(physicsasset::Serialize(editor.m_asset)==originalSettings,"Cancel preserves source settings");
+    editor.EditPhysicsSettings();Check(editor.m_settingsDialog==&tuning&&tuning.m_draft.simulation.positionIterations==editor.m_asset.simulation.positionIterations,"reopen reuses dialog with fresh snapshot");
+    tuning.m_values[2]->setLabel("2.5");SettingsAction(tuning,PhysicsSettingsDialog::Apply);
+    Check(tuning.isVisible()&&physicsasset::Serialize(editor.m_asset)==originalSettings&&std::strstr(tuning.m_status->getLabel(),"integers"),"fractional solver count rejected transactionally");
+    tuning.m_values[2]->setLabel("27");tuning.m_values[1]->setLabel("0.8");tuning.m_values[12]->setLabel("0.9");tuning.m_values[13]->setLabel("0.05");
+    tuning.m_self->select(2);SettingsAction(tuning,PhysicsSettingsDialog::AllowPair);
+    editor.m_mass->setLabel("7.5");editor.m_linearDamping->setLabel("0.123");SettingsAction(tuning,PhysicsSettingsDialog::Apply);
+    Check(!tuning.isVisible()&&editor.m_asset.simulation.positionIterations==27&&editor.m_asset.simulation.contactOffset==.9f&&editor.m_dirty,"Apply commits profile/margins and marks dirty");
+    Check(std::string(editor.m_mass->getLabel())=="7.5"&&std::string(editor.m_linearDamping->getLabel())=="0.123"&&std::fabs(std::strtof(editor.m_angularDamping->getLabel(),nullptr)-.8f)<1e-6,"settings Apply preserves pending fields and refreshes effective damping");
+    Check(editor.ApplyBodyFields()&&editor.m_asset.bodies[0].mass==7.5f&&editor.m_asset.bodies[0].linearDamping==.123f&&editor.m_asset.bodies[0].angularDamping==-1,"normal body Apply retains unchanged inherited angular damping");
+    editor.EditPhysicsSettings();tuning.m_scope->select(1);SettingsAction(tuning,PhysicsSettingsDialog::Scope);tuning.m_values[2]->setLabel("31");SettingsAction(tuning,PhysicsSettingsDialog::Apply);
+    Check(editor.m_asset.bodies[0].tuning.positionIterations==31&&editor.m_asset.bodies[0].tuning.ccd==-1&&editor.m_asset.bodies[0].tuning.contactOffset==-1&&editor.m_asset.bodies[0].angularDamping==-1,"editing a partial override preserves other inheritance");
+    editor.EditPhysicsSettings();tuning.m_scope->select(2);SettingsAction(tuning,PhysicsSettingsDialog::Scope);tuning.m_inherit->setChecked(false);SettingsAction(tuning,PhysicsSettingsDialog::Inherit);tuning.m_values[8]->setLabel("0");tuning.m_projection->select(0);SettingsAction(tuning,PhysicsSettingsDialog::Apply);
+    Check(editor.m_asset.joints[0].tuning.angularResistance==0&&editor.m_asset.joints[0].tuning.projection==physicsasset::ProjectionMode::Off,"joint explicit zero resistance and projection off");
+    editor.ShowBody(0);const auto oldName=editor.m_asset.bodies[0].name;editor.m_bodyName->setLabel("renamed_root");Check(editor.ApplyBodyFields()&&physicsasset::FindBody(editor.m_asset,"renamed_root")==0,"production body rename");
+    Check(editor.m_asset.collisionPairs[0].first=="renamed_root"&&editor.m_asset.joints[0].parent=="renamed_root","rename rewrites contact rows and joint endpoints");
+    Check(editor.SaveAsset(),"production settings Save");const auto savedSettings=physicsasset::Serialize(editor.m_asset);editor.m_asset.simulation.positionIterations=1;editor.ReloadAsset();
+    Check(physicsasset::Serialize(editor.m_asset)==savedSettings,"production settings Reload exact roundtrip");
+    editor.EditPhysicsSettings();tuning.m_values[2]->setLabel("35");editor.m_asset.bodies[0].mass=8;SettingsAction(tuning,PhysicsSettingsDialog::Apply);
+    Check(tuning.isVisible()&&editor.m_asset.simulation.positionIterations==27&&std::strstr(tuning.m_status->getLabel(),"changed"),"stale snapshot cannot overwrite intervening edits");tuning.Cancel();
+    editor.EditPhysicsSettings();tuning.m_scope->select(1);SettingsAction(tuning,PhysicsSettingsDialog::Scope);tuning.m_inherit->setChecked(true);SettingsAction(tuning,PhysicsSettingsDialog::Apply);
+    Check(editor.m_asset.bodies[0].linearDamping==-1&&editor.m_asset.bodies[0].tuning.positionIterations==-1,"reset body restores profile inheritance");
+    dialog.Open();dialog.m_builtin=false;dialog.ShowTemplate();dialog.EditPhysicsSettings();auto &roleSettings=*dialog.m_settingsDialog;
+    roleSettings.m_values[2]->setLabel("22");roleSettings.m_values[8]->setLabel("2.25");roleSettings.m_self->select(2);roleSettings.m_first->select(0);roleSettings.m_second->select(1);SettingsAction(roleSettings,PhysicsSettingsDialog::AllowPair);SettingsAction(roleSettings,PhysicsSettingsDialog::Apply);
+    Check(!roleSettings.isVisible()&&dialog.m_draft.simulation.positionIterations==22&&dialog.m_draft.simulation.angularResistance==2.25f&&dialog.m_draft.pairRules.size()==1,"template profile and semantic pair Apply");
+    Check(dialog.m_previewKey.empty()&&!editor.m_generationPreview&&!enabled[dialog.m_apply],"template settings invalidate stale generated preview");
+    dialog.m_roles->select(1);dialog.ShowRole(1);dialog.m_roleId->setLabel("forelimb");Check(dialog.ReadFields()&&dialog.m_draft.pairRules[0].second=="forelimb","role rename rewrites semantic pair rules");
+    savePath=std::string(argv[1])+"/settings.ragtemplate";dialog.ExportTemplate();ragtemplate::Template imported;
+    Check(ragtemplate::LoadFile(savePath.c_str(),imported,&error)&&ragtemplate::Serialize(imported)==ragtemplate::Serialize(dialog.m_draft),"template profile pair Export exact");
+    openPath=savePath;dialog.ImportTemplate();Check(dialog.m_draft.simulation.positionIterations==22&&dialog.m_draft.pairRules[0].second=="forelimb","template settings Import exact");dialog.Cancel();
+    editor.ShowBody(0);editor.RemoveBody();Check(editor.m_asset.collisionPairs.empty()&&editor.m_asset.joints.empty(),"body deletion removes dangling contact/joint rows");
+    physicsasset::AssetDef collisionOnly;physicsasset::CollisionDef object;object.name="solid";object.bone="root";object.vertices={{0,0,0},{1,0,0},{0,1,0}};object.indices={0,1,2};collisionOnly.collisions.push_back(object);
+    bool called=false;PhysicsSettingsDialog proxySettings(nullptr,collisionOnly,false,[&](const auto &){called=true;return true;});proxySettings.m_scope->select(2);SettingsAction(proxySettings,PhysicsSettingsDialog::Scope);
+    Check(proxySettings.m_scopeIndex==0&&proxySettings.m_scope->getSelectedIndex()==0,"empty joint scope stays usable on collision-only assets");SettingsAction(proxySettings,PhysicsSettingsDialog::Apply);if(!called) std::cerr<<proxySettings.m_status->getLabel()<<"\n";Check(called&&!proxySettings.isVisible(),"collision-only profile Apply");
+    std::filesystem::remove(savePath);std::filesystem::remove(editor.m_assetPath);
+    // The normal Save button must transfer a reviewed preview, rather than
+    // treating the still-empty authored asset as a request to delete its file.
+    editor.m_assetPath=(std::filesystem::path(argv[1])/"generator_handoff.phys").string();
+    Check(physicsasset::SaveFile(editor.m_assetPath.c_str(),editor.m_asset,&error),"seed existing handoff sidecar");
+    physicsasset::AssetDef beforeHandoff;Check(physicsasset::LoadFile(editor.m_assetPath.c_str(),beforeHandoff,&error),"load handoff baseline");
+    const auto baselineHandoff=physicsasset::Serialize(beforeHandoff);
+    editor.m_asset=physicsasset::AssetDef{};editor.RefreshBodyList(-1);editor.RefreshJointList(-1);
+    dialog.Open();dialog.m_draft.roles[1].joint.frameMode=ragtemplate::FrameMode::Flexion;
+    dialog.ShowTemplate();Check(dialog.GeneratePreview(),"generate save handoff candidate");
+    Check(editor.m_generation.Preview().axisReviews>0,"handoff fixture requires explicit axis review");
+    const auto candidateBodies=editor.m_generation.Preview().asset.bodies.size();
+    const auto candidateJoints=editor.m_generation.Preview().asset.joints.size();
+    Check(!editor.SaveAsset()&&editor.m_generationPreview,"unreviewed Save keeps the generated candidate");
+    physicsasset::AssetDef preserved;Check(physicsasset::LoadFile(editor.m_assetPath.c_str(),preserved,&error)&&physicsasset::Serialize(preserved)==baselineHandoff,"blocked preview Save never deletes the existing sidecar");
+    dialog.m_axisReviewed->setChecked(true);dialog.m_risksReviewed->setChecked(true);
+    Check(editor.SaveAsset()&&!editor.m_generationPreview&&!editor.m_dirty,"normal Save commits and writes the reviewed template");
+    physicsasset::AssetDef roundTrip;Check(physicsasset::LoadFile(editor.m_assetPath.c_str(),roundTrip,&error),"load generated .phys from disk");
+    Check(roundTrip.bodies.size()==candidateBodies&&roundTrip.joints.size()==candidateJoints,"all generated bodies and joints reach the saved .phys");
+    openPath=editor.m_assetPath;editor.m_asset=physicsasset::AssetDef{};editor.OpenAsset();openPath.clear();
+    Check(editor.m_asset.bodies.size()==candidateBodies&&!editor.m_dirty,"Open .phys loads an existing editable model asset");
+    std::cout<<"F3 production fitting/frame and settings draft, inheritance, pair, Save/Reload/Undo: "<<checks<<" checks PASS (synthetic Studio model; GUI adapters; NO PhysX/game)\n";
+}

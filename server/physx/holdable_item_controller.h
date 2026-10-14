@@ -31,7 +31,7 @@ public:
 	void ClearAllTargets();
 
 	// called before each physics substep — applies PD forces/torques
-	void ApplyForces();
+	void ApplyForces(float dt);
 
 private:
 	struct Entry

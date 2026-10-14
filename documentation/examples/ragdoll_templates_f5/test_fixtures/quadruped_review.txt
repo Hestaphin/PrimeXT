@@ -1,0 +1,21 @@
+SYNTHETIC TEST FIXTURE; no matching MDL and no solver/game acceptance.
+CHAIN REVIEW tail_chain_1 -> tail_02; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW tail_chain_2 -> tail_03; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW tail_chain_3 -> tail_04; inherited angular/body profile, inferred segment frame.
+CHAIN REVIEW tail_chain_4 -> tail_05; inherited angular/body profile, inferred segment frame.
+AXIS REVIEW left_front_lower: bind bend plane; confirm positive flexion, or use explicit frame.
+AXIS REVIEW left_hind_lower: bind bend plane; confirm positive flexion, or use explicit frame.
+AXIS REVIEW right_front_lower: bind bend plane; confirm positive flexion, or use explicit frame.
+AXIS REVIEW right_hind_lower: bind bend plane; confirm positive flexion, or use explicit frame.
+No anatomical segment for jaw; capsule used bounds axis, review it.
+No anatomical segment for tail_05; capsule used bounds axis, review it.
+Resolved self collision=selective; configured allow pairs=184. Off suppresses the matrix.
+MASS RATIO chest_to_neck = 12.900000; rebalance neighbors or merge the small link.
+MASS RATIO pelvis_to_tail = 22.500000; rebalance neighbors or merge the small link.
+OVERLAP neck / head depth estimate=0.509639; trim/offset colliders before enabling contact.
+OVERLAP front_lower_l / front_foot_l depth estimate=0.188903; trim/offset colliders before enabling contact.
+OVERLAP hind_lower_l / hind_foot_l depth estimate=0.188903; trim/offset colliders before enabling contact.
+OVERLAP front_lower_r / front_foot_r depth estimate=0.188903; trim/offset colliders before enabling contact.
+OVERLAP hind_lower_r / hind_foot_r depth estimate=0.188903; trim/offset colliders before enabling contact.
+OVERLAP tail_04 / tail_05 depth estimate=1.089479; trim/offset colliders before enabling contact.
+F2 candidate: inspect axes, overlaps and live drops. No solver or visual stability certification.

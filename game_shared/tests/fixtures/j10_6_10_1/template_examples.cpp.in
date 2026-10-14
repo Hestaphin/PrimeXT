@@ -1,0 +1,45 @@
+// Rebuild the published examples from actual production presets and supplied
+// Barney skeleton/vertex-bound numbers. No solver or visual fitting proof.
+#include "ragdoll_template.h"
+#include "fixtures/j10_6_10_1/barney_skeleton.h"
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <filesystem>
+static bool WriteOrVerify(const std::filesystem::path &path,const std::string &value,bool verify)
+{
+    if(verify)
+    {
+        std::ifstream f(path,std::ios::binary);const std::string old{std::istreambuf_iterator<char>(f),{}};
+        if(old==value) return true;
+        std::cerr<<"Example differs/missing: "<<path<<'\n';return false;
+    }
+    std::ofstream file(path,std::ios::binary);file<<value;return bool(file);
+}
+int main(int argc,char **argv)
+{
+    if(argc<2||argc>3) return 2;
+    const std::filesystem::path folder=argv[1];const bool verify=argc==3&&std::string(argv[2])=="--verify";
+    std::error_code ec;if(!verify) std::filesystem::create_directories(folder,ec);
+    const auto &presets=ragtemplate::Builtins();std::string error;
+    // These are the historical F3 files. F5 verifies/exports all seven presets
+    // separately; do not require new files inside a previous release directory.
+    for(size_t i=0;i<3;++i)
+        if(!ragtemplate::Validate(presets[i],&error)||!WriteOrVerify(folder/(presets[i].id+".ragtemplate"),ragtemplate::Serialize(presets[i]),verify)) return 1;
+    physicsasset::AssetDef source;
+    for(size_t i=0;i<2;++i)
+    {
+        ragtemplate::Candidate candidate;
+        if(!ragtemplate::Generate(presets[i],BarneySkeleton(),1,source,ragtemplate::ComposeMode::ReplaceRagdoll,candidate,&error))
+        {std::cerr<<error<<'\n';return 1;}
+        const std::string text="// J.10.6.10.3 F3 bounds-fixture review candidate; NOT stability-certified.\n"
+            "// Recorded Barney bounds lack reference rotations/section samples; regenerate from matching MDL before game use.\n"+physicsasset::Serialize(candidate.asset);
+        physicsasset::AssetDef reloaded;
+        if(!physicsasset::Parse(text,reloaded,&error)||physicsasset::Serialize(reloaded)!=physicsasset::Serialize(candidate.asset)) return 1;
+        reloaded.bodies[0].mass+=1;
+        physicsasset::AssetDef edited;
+        if(!physicsasset::Parse(physicsasset::Serialize(reloaded),edited,&error)||edited.bodies[0].mass!=reloaded.bodies[0].mass) return 1;
+        if(!WriteOrVerify(folder/("barney_f3_"+presets[i].id+".phys"),text,verify)) return 1;
+    }
+    std::cout<<"PASS three preset files and two resolved Barney candidates; concrete asset edit/round trip\n";
+}

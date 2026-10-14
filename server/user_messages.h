@@ -18,6 +18,7 @@ extern int gmsgTrain;
 extern int gmsgLogo;
 extern int gmsgWeaponList;
 extern int gmsgAmmoX;
+extern int gmsgModCfg;
 extern int gmsgHudText;
 extern int gmsgDeathMsg;
 extern int gmsgScoreInfo;
@@ -50,6 +51,9 @@ extern int gmsgMusicFade;
 extern int gmsgRainData;
 extern int gmsgStatusIcon;
 extern int gmsgSetupBones;
+extern int gmsgRagdollPose;
+extern int gmsgPartPose;
+extern int gmsgRagdollDecal;
 extern int gmsgPostFxSettings;
 
 void LinkUserMessages();

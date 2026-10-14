@@ -1,0 +1,241 @@
+// Extracted production sleep/capture/presentation/network/save methods.
+// Project matrices and recording SDK mathematics; no native solver or GPU.
+#include "PxPhysicsAPI.h"
+#include "matrix.h"
+#include "studio.h"
+#include "physic.h"
+#include "physics_asset_format.h"
+#include "physics_asset_settings.h"
+#include "ragdoll_net.h"
+#include "exact_geometry_cache.h"
+#include "performance_profile.h"
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <vector>
+extern "C" const char *__asan_default_options() {return "detect_leaks=0:halt_on_error=1";}
+using namespace physx;
+using PhysicsAssetDef=physicsasset::AssetDef;
+using PhysicsAssetBodyDef=physicsasset::BodyDef;
+struct CBaseEntity;
+struct entvars_t
+{
+    int modelindex=1,body=0,skin=0,solid=SOLID_NOT,movetype=MOVETYPE_NONE,iuser1=CF_RAGDOLL;
+    Vector origin{0,0,0},angles{0,0,0},mins{-1,-1,-1},maxs{1,1,1},absmin{-1,-1,-1},absmax{1,1,1};
+};
+struct edict_s {int serialnumber=1;CBaseEntity *owner=nullptr;};
+struct CBaseEntity
+{
+    entvars_t vars;entvars_t *pev=&vars;edict_t ed;int index=1;
+    Vector velocity{0,0,0};unsigned relinks=0;void (*onRelink)(CBaseEntity *)=nullptr;
+    CBaseEntity(){ed.owner=this;}
+    edict_t *edict(){return &ed;}
+    int entindex() const {return index;}
+    Vector GetAbsOrigin() const{return pev->origin;}Vector GetAbsAngles() const{return pev->angles;}
+    Vector GetAbsVelocity() const{return velocity;}Vector GetScale() const{return Vector(1,1,1);}
+    void SetAbsOrigin(Vector v){pev->origin=v;}void SetAbsAngles(Vector v){pev->angles=v;}
+    void SetAbsVelocity(Vector v){velocity=v;}
+    const char *GetClassname() const{return "corpse";}
+    void RelinkEntity(bool touch)
+    {assert(touch);++relinks;pev->absmin=pev->origin+pev->mins;pev->absmax=pev->origin+pev->maxs;if(onRelink)onRelink(this);}
+};
+static int ENTINDEX(edict_t *ed){return ed->owner->index;}
+static studiohdr_t modelHeader{};
+static void *GET_MODEL_PTR(edict_t *){return &modelHeader;}
+constexpr int at_warning=1;
+static int gmsgRagdollPose=1;
+static void ALERT(int,const char *,...){}
+struct Globals{float time=1;};static Globals globals;static Globals *gpGlobals=&globals;
+static std::uint64_t generation=1;
+static std::uint64_t ServerStudioPoseGeneration(){return generation;}
+static bool FiniteVec3(const PxVec3 &v){return v.isFinite();}
+static matrix4x4 MatrixFromPxTransform(const PxTransform &v){return matrix4x4(Vector(v.p.x,v.p.y,v.p.z),Vector4D(v.q.x,v.q.y,v.q.z,v.q.w));}
+static void UTIL_SetSize(entvars_t *vars,Vector mins,Vector maxs){vars->mins=mins;vars->maxs=maxs;}
+struct Message{int index=0;Vector pvs;std::vector<byte> bytes;};
+static std::vector<Message> messages;
+static PxRigidDynamic *triggerWakeActor=nullptr;
+static unsigned triggerCalls=0;
+static void MESSAGE_BEGIN(int,int,const Vector &where){messages.push_back({0,where,{}});}
+template<class T> static void Write(T value){const auto *start=reinterpret_cast<const byte *>(&value);messages.back().bytes.insert(messages.back().bytes.end(),start,start+sizeof(value));}
+static void WRITE_ENTITY(int value){messages.back().index=value;Write(std::int16_t(value));}
+static void WRITE_BYTE(int value){Write(std::uint8_t(value));}
+static void WRITE_LONG(int value){Write(std::int32_t(value));}
+static void WRITE_SHORT(int value){Write(std::int16_t(value));}
+static void WRITE_FLOAT(float value){Write(value);}
+static void MESSAGE_END(){}
+void physx::PxRigidBodyExt::addForceAtPos(PxRigidDynamic &actor,PxVec3 impulse,PxVec3,PxForceMode::Enum)
+{++actor.impulses;actor.linear=actor.linear+impulse;actor.wakeUp();}
+struct PhysicsAssetBodyRuntime
+{
+    int boneIndex=-1;PxRigidDynamic *actor=nullptr;PxShape *shape=nullptr;
+    PxTransform bodyToBonePose{PxIdentity},simulatedBonePose{PxIdentity},currentAnimationPose{PxIdentity};
+    bool hasSimulationPose=false,hasCurrentAnimationPose=false,hasAnimationVelocity=false;
+    float physicsWeight=1;PxVec3 animationLinearVelocity{0},animationAngularVelocity{0};
+};
+struct PhysicsAssetInstance
+{
+    CBaseEntity *m_owner=nullptr;std::shared_ptr<PhysicsAssetDef> m_def;
+    std::vector<PhysicsAssetBodyRuntime> m_bodies;std::vector<PxJoint *> m_joints;
+    bool m_ragdoll=true,m_actorsCreated=true,m_hasSimulationPose=false,m_hasSimulationBounds=false,m_frozen=false;
+    float m_sleepStartTime=-1,m_rigidScale=1,m_currentSampleTime=1;int m_rootBodyIndex=0;
+    PxBounds3 m_simulationBounds;
+    posecache::Key m_captureScratchKey;posecache::Stamp m_stationaryCaptureStamp;
+    std::vector<PxTransform> m_captureBodyWorld;std::uint64_t m_simulationPoseRevision=0;
+    @INVALIDATE@
+    bool IsRagdoll() const{return m_ragdoll;}bool HasSimulationPose() const{return m_hasSimulationPose;}
+    bool IsFrozen() const{return m_frozen;}CBaseEntity *Owner(){return m_owner;}
+    int RootBodyIndex() const{return m_rootBodyIndex;}const auto &Bodies() const{return m_bodies;}
+    std::uint64_t SimulationPoseRevision() const{return m_simulationPoseRevision;}
+    PxVec3 FallbackLinearVelocity() const{return PxVec3(0);}PxVec3 FallbackAngularVelocity() const{return PxVec3(0);}
+    PxTransform BoneWorldTransform(int,const PhysicsAssetBodyDef &) const{return PxTransform(PxIdentity);}
+    void CaptureSimulationPose();void BaselineCapture();bool IsSleeping() const;bool CanFreeze() const;
+    bool NeedsAnimationControl() const;void Thaw();bool UpdateSleepFreeze(float,bool,float);
+    void SetBodyKinematicState(size_t,bool,bool);bool AddImpulseToBody(int,const PxVec3 &,const PxVec3 &);
+    void AddRadialImpulse(const PxVec3 &,float,float);
+    bool GetRootBonePose(PxTransform &) const;bool GetSimulationBounds(PxBounds3 &) const;
+    bool SaveArticulatedBodies(PhysicsRagdollBodySaveRecord *,int) const;
+    bool RestoreArticulatedBodies(const PhysicsRagdollBodySaveRecord *,int,bool,const PxVec3 &);
+};
+struct CPhysicPhysX
+{
+    @STATES@
+    std::map<int,RagdollEntityState> m_ragdollEntityState;
+    std::map<int,RagdollNetworkState> m_ragdollNetworkState;
+    std::uint32_t m_ragdollSnapshotSequence=0;
+    void SendRagdollPose(PhysicsAssetInstance *);
+    void UpdateRagdollPresentation(PhysicsAssetInstance *);
+    void BaselinePresentation(PhysicsAssetInstance *);
+};
+@PRODUCTION@
+@BASELINE@
+
+struct Fixture
+{
+    CBaseEntity owner;PhysicsAssetInstance asset;CPhysicPhysX physics;
+    std::array<std::unique_ptr<PxRigidDynamic>,2> actors;
+    std::array<PxShape,2> shapes;
+    Fixture()
+    {
+        asset.m_owner=&owner;asset.m_def=std::make_shared<PhysicsAssetDef>();
+        for(int i=0;i<2;++i)
+        {
+            PhysicsAssetBodyDef def;def.name="body"+std::to_string(i);def.bone=def.name;def.tuning.ccd=1;
+            asset.m_def->bodies.push_back(def);
+            actors[i]=std::make_unique<PxRigidDynamic>(PxTransform(PxVec3(float(i)*8,0,10)));
+            actors[i]->mass=2;actors[i]->sleeping=true;
+            PhysicsAssetBodyRuntime body;body.boneIndex=i;body.actor=actors[i].get();body.shape=&shapes[i];
+            body.bodyToBonePose=PxTransform(PxVec3(1,2,3));asset.m_bodies.push_back(body);
+        }
+        auto &relation=physics.m_ragdollEntityState[1];relation.hasRootRelation=true;
+        relation.rootToEntity=matrix4x4(Vector(-1,0,-4),Vector(0,0,0),1);
+    }
+    unsigned BoundsReads() const{return actors[0]->boundsReads+actors[1]->boundsReads;}
+    void Capture(){asset.CaptureSimulationPose();}
+    void Present(){physics.UpdateRagdollPresentation(&asset);}
+};
+static void Same(PxTransform a,PxTransform b)
+{assert(a.p.x==b.p.x&&a.p.y==b.p.y&&a.p.z==b.p.z&&a.q.x==b.q.x&&a.q.y==b.q.y&&a.q.z==b.q.z&&a.q.w==b.q.w);}
+static void SameBounds(PxBounds3 a,PxBounds3 b){assert(a.minimum.x==b.minimum.x&&a.minimum.y==b.minimum.y&&a.minimum.z==b.minimum.z&&a.maximum.x==b.maximum.x&&a.maximum.y==b.maximum.y&&a.maximum.z==b.maximum.z);}
+static void CompareBaseline(Fixture &f)
+{
+    const auto poses=f.asset.m_bodies;const auto bounds=f.asset.m_simulationBounds;
+    f.asset.BaselineCapture();
+    for(size_t i=0;i<poses.size();++i) {assert(poses[i].hasSimulationPose==f.asset.m_bodies[i].hasSimulationPose);Same(poses[i].simulatedBonePose,f.asset.m_bodies[i].simulatedBonePose);}
+    SameBounds(bounds,f.asset.m_simulationBounds);
+}
+static void CaptureCases()
+{
+    Fixture f;f.Capture();const auto revision=f.asset.SimulationPoseRevision();const auto reads=f.BoundsReads();
+    for(int i=0;i<100;++i) f.Capture();assert(f.BoundsReads()==reads&&f.asset.SimulationPoseRevision()==revision);
+    CompareBaseline(f);
+    auto changed=[&](auto mutate){const auto old=f.asset.SimulationPoseRevision();mutate();f.Capture();assert(f.asset.SimulationPoseRevision()!=old);CompareBaseline(f);};
+    changed([&](){f.actors[1]->pose.p.x+=.0001f;}); // no movement tolerance
+    changed([&](){f.asset.m_bodies[1].bodyToBonePose.p.x+=1;});
+    changed([&](){f.asset.m_bodies[1].boneIndex=3;});
+    changed([&](){f.asset.m_bodies[1].shape=&f.shapes[0];});
+    changed([&](){++generation;});
+    changed([&](){f.actors[1]->sleeping=false;});
+    const auto awake=f.BoundsReads();for(int i=0;i<10;++i)f.Capture();assert(f.BoundsReads()==awake+20);
+    f.actors[1]->sleeping=true;f.Capture();const auto asleep=f.BoundsReads();f.Capture();assert(f.BoundsReads()==asleep);
+    f.asset.m_bodies[1].physicsWeight=.5f;f.Capture();const auto partial=f.BoundsReads();f.Capture();assert(f.BoundsReads()==partial+2);
+    f.asset.m_bodies[1].physicsWeight=1;f.Capture();
+    f.actors[1]->pose.p.x=NAN;f.Capture();assert(!f.asset.m_bodies[1].hasSimulationPose);
+    f.actors[1]->pose.p.x=9;f.Capture();assert(f.asset.m_bodies[1].hasSimulationPose);
+    f.actors[1]->badBounds=true;f.Capture(); // actor motion ensures this is a new sample
+    f.actors[1]->pose.p.x+=1;f.Capture();const auto invalid=f.BoundsReads();f.Capture();assert(f.BoundsReads()==invalid+2);
+    f.actors[1]->badBounds=false;f.Capture();
+    f.asset.m_bodies[1].actor=nullptr;f.Capture();assert(!f.asset.m_bodies[1].hasSimulationPose);
+    f.asset.m_bodies[1].actor=f.actors[1].get();f.Capture();assert(f.asset.m_bodies[1].hasSimulationPose);
+    f.asset.m_ragdoll=false;f.Capture();assert(!f.asset.HasSimulationPose());
+    std::cout<<"capture: 100 settled steps / 0 added bound queries; exact baseline, wake, partial, missing/invalid and generation changes PASS\n";
+}
+static void FreezeImpulseRestoreCases()
+{
+    Fixture f;f.Capture();assert(!f.asset.UpdateSleepFreeze(1,true,3));assert(!f.asset.UpdateSleepFreeze(3.9f,true,3));
+    assert(f.asset.UpdateSleepFreeze(4,true,3));assert(f.asset.IsFrozen());
+    const auto reads=f.BoundsReads();for(int i=0;i<100;++i)f.Capture();assert(f.BoundsReads()==reads);
+    for(auto &actor:f.actors)assert(actor->getRigidBodyFlags().isSet(PxRigidBodyFlag::eKINEMATIC));
+    assert(f.asset.AddImpulseToBody(1,PxVec3(3,0,0),PxVec3(8,0,10)));
+    assert(!f.asset.IsFrozen()&&!f.actors[1]->isSleeping()&&f.actors[1]->impulses==1);
+    assert(f.actors[1]->getRigidBodyFlags().isSet(PxRigidBodyFlag::eENABLE_CCD));
+    f.Capture();assert(f.BoundsReads()==reads+2);
+    for(auto &actor:f.actors)actor->putToSleep();f.Capture();
+    assert(!f.asset.UpdateSleepFreeze(10,true,0));assert(f.asset.UpdateSleepFreeze(10,true,0));
+    f.asset.AddRadialImpulse(PxVec3(0),50,10);assert(!f.asset.IsFrozen()&&f.actors[0]->impulses==1&&f.actors[1]->impulses==2);
+    for(auto &actor:f.actors)actor->putToSleep();f.Capture();
+    std::array<PhysicsRagdollBodySaveRecord,2> save{};assert(f.asset.SaveArticulatedBodies(save.data(),2));
+    assert(save[0].sleeping==1&&save[1].sleeping==1);
+    const auto version=f.asset.SimulationPoseRevision();
+    assert(f.asset.RestoreArticulatedBodies(save.data(),2,true,PxVec3(100,0,0)));
+    assert(f.asset.IsFrozen()&&f.asset.SimulationPoseRevision()!=version&&f.actors[0]->pose.p.x==100);
+    Same(f.asset.m_bodies[1].simulatedBonePose,f.actors[1]->pose*f.asset.m_bodies[1].bodyToBonePose);
+    const auto savedVersion=f.asset.SimulationPoseRevision();const auto savedPose=f.actors[1]->pose;
+    save[1].pose[0]=NAN;assert(!f.asset.RestoreArticulatedBodies(save.data(),2,true,PxVec3(0)));
+    Same(f.actors[1]->pose,savedPose);f.Capture();assert(f.asset.SimulationPoseRevision()==savedVersion);
+    assert(!f.asset.UpdateSleepFreeze(30,false,3));assert(!f.asset.IsFrozen());
+    for(auto &actor:f.actors)actor->putToSleep();
+    assert(!f.asset.UpdateSleepFreeze(100,true,3));assert(!f.asset.UpdateSleepFreeze(1,true,3));assert(!f.asset.UpdateSleepFreeze(3,true,3));assert(f.asset.UpdateSleepFreeze(4,true,3));
+    std::cout<<"freeze/wake: grace/rewind/disable, bullet/radial impulses, CCD and transactional landmark save/restore PASS\n";
+}
+static void PresentationNetworkCases()
+{
+    Fixture f;messages.clear();globals.time=1;f.Capture();f.Present();
+    const auto pose=f.owner.GetAbsOrigin();const auto mins=f.owner.pev->mins;const auto maxs=f.owner.pev->maxs;
+    const auto firstMessage=messages[0].bytes;const auto version=f.asset.SimulationPoseRevision();
+    for(int i=1;i<=40;++i){globals.time=1+float(i)*.01f;f.Capture();f.Present();}
+    assert(f.asset.SimulationPoseRevision()==version&&f.owner.relinks==41&&messages.size()==1);
+    assert(f.owner.GetAbsOrigin()==pose&&f.owner.pev->mins==mins&&f.owner.pev->maxs==maxs);
+    globals.time=1.5f;f.Present();assert(messages.size()==2);
+    assert(messages[1].bytes.size()==firstMessage.size());
+    for(size_t i=0;i<firstMessage.size();++i)if(i<4||i>=8)assert(firstMessage[i]==messages[1].bytes[i]);
+    const auto prior=f.owner.relinks;f.owner.pev->mins.x-=2;f.Present();assert(f.owner.relinks==prior+1&&f.owner.pev->mins==mins);
+    f.owner.ed.serialnumber++;f.Present();
+    const auto geometry=f.owner.vars;f.physics.BaselinePresentation(&f.asset);
+    assert(f.owner.pev->origin==geometry.origin&&f.owner.pev->angles==geometry.angles&&f.owner.pev->mins==geometry.mins&&f.owner.pev->maxs==geometry.maxs);
+    // Relink side effects still run on a cache hit and may wake a corpse.
+    triggerWakeActor=f.actors[0].get();const auto touches=triggerCalls;
+    f.owner.onRelink=[](CBaseEntity *){++triggerCalls;triggerWakeActor->wakeUp();};
+    f.Present();assert(triggerCalls==touches+1&&!f.actors[0]->isSleeping()&&messages.size()==3);
+    f.owner.onRelink=nullptr;triggerWakeActor=nullptr;
+    f.actors[0]->wakeUp();globals.time=1.51f;f.Capture();f.Present();assert(messages.size()==3);
+    assert(!(messages.back().bytes[3]&ragdollnet::SnapshotSleeping));
+    for(auto &actor:f.actors)actor->putToSleep();f.Capture();globals.time=2;f.Present();
+    f.asset.UpdateSleepFreeze(2,true,0);assert(f.asset.UpdateSleepFreeze(2,true,0));f.Present();
+    const auto frozenMessages=messages.size();globals.time=3;f.Present();assert(messages.size()==frozenMessages);
+    globals.time=4;f.Present();assert(messages.size()==frozenMessages+1);
+    globals.time=1;f.Present();assert(messages.size()==frozenMessages+2);
+    std::cout<<"presentation/network: exact baseline frame/bounds; every-frame relink; sleeping/frozen heartbeat, wake and clock rewind PASS\n";
+}
+int main(int argc,char **)
+{
+    modelHeader.numbones=8;const bool profiling=argc==1;pxperf::Get().BeginFrame(profiling?1:0,60,1,0);
+    CaptureCases();FreezeImpulseRestoreCases();PresentationNetworkCases();pxperf::Get().EndFrame();
+    if(profiling)
+    {assert(pxperf::Get().Stats(pxperf::Metric::SleepingCaptureReuses).mean>=200);assert(pxperf::Get().Stats(pxperf::Metric::SleepingPresentationReuses).mean>=40);}
+    std::cout<<"K.11.4.1.3 sleep recording adapters PASS\n";
+}

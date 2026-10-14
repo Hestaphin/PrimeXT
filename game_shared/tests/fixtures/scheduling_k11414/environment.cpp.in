@@ -1,0 +1,120 @@
+// Recording PhysX services and independent force accounting; no native solver.
+#include "physics_step_scheduler.h"
+#include "physics_drive_timestep.h"
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <iostream>
+#include <vector>
+extern "C" const char *__asan_default_options() { return "detect_leaks=0:halt_on_error=1"; }
+namespace physx
+{
+struct PxVec3
+{
+    float x=0,y=0,z=0;PxVec3()=default;explicit PxVec3(float v):x(v),y(v),z(v){};PxVec3(float a,float b,float c):x(a),y(b),z(c){}
+    PxVec3 operator+(PxVec3 v)const{return {x+v.x,y+v.y,z+v.z};}PxVec3 operator-(PxVec3 v)const{return {x-v.x,y-v.y,z-v.z};}
+    PxVec3 operator-()const{return {-x,-y,-z};}PxVec3 operator*(float s)const{return {x*s,y*s,z*s};}
+    bool isFinite()const{return std::isfinite(x)&&std::isfinite(y)&&std::isfinite(z);}
+    float normalizeSafe(){const float l=std::sqrt(x*x+y*y+z*z);if(l>1e-6f){x/=l;y/=l;z/=l;}else x=y=z=0;return l;}
+};
+PxVec3 operator*(float s,PxVec3 v){return v*s;}
+struct PxBounds3
+{
+    PxVec3 minimum{-1},maximum{1};
+    static PxBounds3 empty(){return {{1,1,1},{-1,-1,-1}};}
+    bool isEmpty()const{return minimum.x>maximum.x||minimum.y>maximum.y||minimum.z>maximum.z;}
+    bool intersects(PxBounds3 b)const{return minimum.x<=b.maximum.x&&maximum.x>=b.minimum.x&&minimum.y<=b.maximum.y&&maximum.y>=b.minimum.y&&minimum.z<=b.maximum.z&&maximum.z>=b.minimum.z;}
+    PxVec3 getDimensions()const{return maximum-minimum;}
+};
+struct PxForceMode {enum Enum{eFORCE,eIMPULSE,eVELOCITY_CHANGE,eACCELERATION};};
+struct PxRigidBodyFlag {enum Enum{eKINEMATIC=1};};
+struct PxActor{void *userData=nullptr;virtual ~PxActor()=default;template<class T>T *is(){return dynamic_cast<T *>(this);}};
+struct PxRigidDynamic:PxActor
+{
+    int flags=0,calls=0;float mass=2;PxBounds3 bounds;PxVec3 linear,angular,inverseInertia{1},stepForce,stepTorque,impulses,velocityChanges,angularImpulses,angularVelocityChanges;
+    int getRigidBodyFlags()const{return flags;}PxBounds3 getWorldBounds()const{return bounds;}
+    float getMass()const{return mass;}PxVec3 getMassSpaceInvInertiaTensor()const{return inverseInertia;}
+    PxVec3 getLinearVelocity()const{return linear;}PxVec3 getAngularVelocity()const{return angular;}
+    void addForce(PxVec3 v,PxForceMode::Enum mode=PxForceMode::eFORCE){++calls;if(mode==PxForceMode::eFORCE)stepForce=stepForce+v;else if(mode==PxForceMode::eIMPULSE)impulses=impulses+v;else if(mode==PxForceMode::eVELOCITY_CHANGE)velocityChanges=velocityChanges+v;else assert(false);}
+    void addTorque(PxVec3 v,PxForceMode::Enum mode=PxForceMode::eFORCE){++calls;if(mode==PxForceMode::eFORCE)stepTorque=stepTorque+v;else if(mode==PxForceMode::eIMPULSE)angularImpulses=angularImpulses+v;else if(mode==PxForceMode::eVELOCITY_CHANGE)angularVelocityChanges=angularVelocityChanges+v;else assert(false);}
+};
+using PxRigidBody=PxRigidDynamic;
+}
+using namespace physx;
+using Vector=PxVec3;
+struct edict_t{};
+struct CBaseEntity{PxActor *actor=nullptr;};
+struct Cvar{float value;};Cvar gravity{800},sv_physics_hz{60},sv_physics_max_steps{4};Cvar *g_psv_gravity=&gravity;
+struct Globals{float frametime=.01f;};Globals globals;Globals *gpGlobals=&globals;
+#define FBitSet(flags,bit) ((flags)&(bit))
+struct EventHandler
+{
+    struct Pair{PxActor *waterTriggerActor,*objectActor;};std::vector<Pair> water;
+    std::vector<Pair> &getWaterContactPairs(){return water;}
+};
+class CPhysicPhysX
+{
+public:
+    enum class ForceMode{Force,Impulse,VelocityChange,Acceleration};
+    EventHandler handler;EventHandler *m_eventHandler=&handler;
+    PxActor *ActorFromEntity(CBaseEntity *e){return e?e->actor:nullptr;}
+    PxBounds3 GetIntersectionBounds(const PxBounds3 &,const PxBounds3 &);
+    void AddForce(CBaseEntity *,const Vector &,ForceMode);
+    void AddTorque(CBaseEntity *,const Vector &,ForceMode);
+    void ApplyWaterForces(float);
+};
+@CONSTANTS@
+@PRODUCTION@
+static void near(double a,double b,double epsilon=.001){assert(std::fabs(a-b)<epsilon);}
+int main()
+{
+    using Mode=CPhysicPhysX::ForceMode;
+    for(int hz:{30,60,100})for(int fps:{30,60,144,240})
+    {
+        CPhysicPhysX physics;PxRigidDynamic body;CBaseEntity entity{&body};sv_physics_hz.value=float(hz);
+        globals.frametime=1.0f/fps;
+        for(int frame=0;frame<fps*2;++frame)
+        {
+            physics.AddForce(&entity,{50,0,0},Mode::Force);physics.AddTorque(&entity,{0,25,0},Mode::Force);
+            physics.AddForce(&entity,{0,10,0},Mode::Acceleration);physics.AddTorque(&entity,{0,0,20},Mode::Acceleration);
+        }
+        near(body.impulses.x,100);near(body.angularImpulses.y,50);
+        near(body.velocityChanges.y,20);near(body.angularVelocityChanges.z,40);
+        assert(body.stepForce.x==0 && body.stepTorque.y==0);
+        globals.frametime=0;physics.AddForce(&entity,{3,0,0},Mode::Impulse);physics.AddTorque(&entity,{0,4,0},Mode::VelocityChange);
+        near(body.impulses.x,103);near(body.angularVelocityChanges.y,4);
+        const int calls=body.calls;physics.AddForce(&entity,{1,0,0},Mode::Force);globals.frametime=NAN;physics.AddTorque(&entity,{1,0,0},Mode::Force);
+        physics.AddForce(&entity,{NAN,0,0},Mode::Impulse);assert(body.calls==calls);
+    }
+    near(physicsasset::PhysicsFrameForceSeconds(10,60,4),4.0/60);
+    assert(physicsasset::PhysicsFrameForceSeconds(-1,60,4)==0);
+    for(int hz:{30,60,100})
+    {
+        CPhysicPhysX physics;PxRigidDynamic body,water;edict_t entity;body.userData=&entity;
+        physics.handler.water.push_back({&water,&body});body.linear={4,0,0};body.angular={0,0,2};
+        const float dt=1.0f/hz;
+        physics.ApplyWaterForces(dt);
+        near(body.stepForce.z,8*k_WaterDensity*800);
+        assert(body.stepForce.x<0 && body.stepTorque.z<0);
+        const double dragDenominator=hz==100?1:1+k_WaterLinearDragFactor*k_WaterDensity*4*dt/body.mass;
+        near(body.stepForce.x,-k_WaterLinearDragFactor*k_WaterDensity*16/dragDenominator);
+        const double angularDenominator=hz==100?1:1+k_WaterAngularDragFactor*8*dt;
+        near(body.stepTorque.z,-k_WaterAngularDragFactor*8*2/angularDenominator);
+        // Independent drag integration: longer-step drag never reverses motion.
+        if(hz!=100)
+        {
+            for(int frame=0;frame<hz*2;++frame)
+            {
+                body.stepForce=PxVec3(0);body.stepTorque=PxVec3(0);physics.ApplyWaterForces(dt);
+                const float next=body.linear.x+body.stepForce.x/body.mass*dt;
+                assert(next>=0 && next<=body.linear.x);body.linear.x=next;
+            }
+            assert(body.linear.x<.5f);
+        }
+        const int calls=body.calls;body.flags=1;physics.ApplyWaterForces(dt);assert(body.calls==calls);
+        body.flags=0;body.bounds={{10,10,10},{11,11,11}};physics.ApplyWaterForces(dt);assert(body.calls==calls);
+        body.bounds={{-1,-1,-1},{1,1,1}};body.mass=0;physics.ApplyWaterForces(dt);assert(body.calls==calls);
+        body.mass=2;physics.ApplyWaterForces(NAN);assert(body.calls==calls);
+    }
+    std::cout<<"PASS actual environmental methods: 12 server-FPS/rate force and torque integrations, preserved one-shot impulse/velocity units, paused/invalid time, bounded stall duration; water buoyancy/drag at 30/60/100 Hz, non-reversing low-rate drag, kinematic/outside/invalid cases\n";
+}

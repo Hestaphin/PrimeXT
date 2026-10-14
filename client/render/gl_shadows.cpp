@@ -17,6 +17,7 @@ GNU General Public License for more details.
 #include "utils.h"
 #include "const.h"
 #include "gl_local.h"
+#include "performance_gpu.h"
 #include <mathlib.h>
 #include <stringlib.h>
 #include "gl_studio.h"
@@ -25,6 +26,7 @@ GNU General Public License for more details.
 #include "gl_grass.h"
 #include "gl_cvars.h"
 #include "pm_defs.h"
+#include "gl_render_budget.h"
 
 /*
 =============================================================
@@ -44,6 +46,7 @@ TextureHandle R_AllocateShadowTexture( bool copyToImage = true )
 	}
 
 	TextureHandle texture = tr.shadowTextures[i];
+	R_MarkShadowWrite(LIGHT_SPOT,i);
 	tr.num_2D_shadows_used++;
 
 	if( !tr.shadowTextures[i].Initialized() )
@@ -80,6 +83,7 @@ TextureHandle R_AllocateShadowCubemap( int side, bool copyToImage = true )
 		}
 
 		texture = tr.shadowCubemaps[i];
+		R_MarkShadowWrite(LIGHT_OMNI,i);
 
 		if( !tr.shadowCubemaps[i].Initialized() )
 		{
@@ -99,6 +103,7 @@ TextureHandle R_AllocateShadowCubemap( int side, bool copyToImage = true )
 
 		texture = tr.shadowCubemaps[i];
 		tr.num_CM_shadows_used++;
+		R_MarkShadowWrite(LIGHT_OMNI,i);
 
 		if( !tr.shadowCubemaps[i].Initialized() )
 		{
@@ -326,6 +331,7 @@ static void R_ShadowPassSetupViewCache( CDynLight *pl, int split = 0 )
 	// setup frustum
 	if( pl->type == LIGHT_DIRECTIONAL )
 	{
+		R_MarkShadowWrite(LIGHT_DIRECTIONAL,0);
 		pl->splitFrustum[split] = RI->view.splitFrustum[split];
 		RI->view.matrix = pl->viewMatrix;
 		R_SetupLightDirectional( pl, split );
@@ -498,6 +504,7 @@ static void R_ShadowPassEndGL( void )
 	GL_DepthRange( gldepthmin, gldepthmax );
 	pglPolygonOffset( -1, -2 );
 	r_stats.c_shadow_passes++;
+	pxperf::Get().Add(pxperf::Metric::ShadowPasses, 1);
 	GL_Cull( GL_FRONT );
 }
 
@@ -549,7 +556,7 @@ void R_RenderShadowScene( CDynLight *pl, int split = 0 )
 
 	R_RenderShadowBrushList();
 	R_RenderShadowStudioList();
-	R_DrawParticles( false );
+	if(R_BudgetValue("r_shadow_particles",1)>0) R_DrawParticles( false );
 	R_ShadowPassEndGL();
 
 	if( !using_fbo )
@@ -593,7 +600,7 @@ void R_RenderShadowCubeSide( CDynLight *pl, int side )
 
 	R_RenderShadowBrushList();
 	R_RenderShadowStudioList();
-	R_DrawParticles( false );
+	if(R_BudgetValue("r_shadow_particles",1)>0) R_DrawParticles( false );
 	R_ShadowPassEndGL();
 
 	if( !using_fbo )
@@ -602,7 +609,9 @@ void R_RenderShadowCubeSide( CDynLight *pl, int side )
 
 void R_RenderShadowmaps( void )
 {
+	pxperf::Scope cpuShadows(pxperf::Metric::Shadows);
 	ZoneScoped;
+	R_BeginRenderBudgetFrame();
 
 	unsigned int	oldFBO;
 
@@ -616,16 +625,51 @@ void R_RenderShadowmaps( void )
 	if( !HasDynamicLights( )) return;
 
 	GL_DEBUG_SCOPE();
+	pxperf::GpuScope gpuShadows(pxperf::Metric::GpuShadows);
+	const bool mainView=RP_NORMALPASS();
+	const bool cacheShadows=mainView && R_BudgetValue("r_shadow_cache",0)>0;
+	const std::uint64_t scene=cacheShadows ? R_BudgetShadowScene() : 0;
+	const int limit=renderbudget::PassLimit(R_BudgetValue(mainView ? "r_shadow_budget" : "r_shadow_subview_budget",-1));
+	auto &budget=mainView ? R_RenderBudget().mainShadows : R_RenderBudget().secondaryShadows;
 	R_PushRefState(); // make refinst backup
 	oldFBO = glState.frameBuffer;
 
 	const bool skipCulling = CVAR_TO_BOOL(r_nocull);
-	for( int i = 0; i < MAX_DLIGHTS; i++ )
+	std::array<int,MAX_DLIGHTS> order{};
+	for(int i=0;i<MAX_DLIGHTS;++i) order[i]=i;
+	if(limit>=0)
+	{
+		const Vector eye=R_GetPrevInstance()->view.origin;
+		std::stable_sort(order.begin(),order.end(),[&](int a,int b) {
+			const auto &left=tr.dlights[a],&right=tr.dlights[b];
+			if((left.type==LIGHT_DIRECTIONAL)!=(right.type==LIGHT_DIRECTIONAL)) return left.type==LIGHT_DIRECTIONAL;
+			const float ld=(left.origin-eye).LengthSqr(),rd=(right.origin-eye).LengthSqr();
+			return (std::isfinite(ld) ? ld : INFINITY)<(std::isfinite(rd) ? rd : INFINITY);
+		});
+	}
+	for(int i:order)
 	{
 		CDynLight *pl = &tr.dlights[i];
 
 		if( !pl->Active() || FBitSet( pl->flags, DLF_NOSHADOWS ))
 			continue;
+		for(int split=0;split<MAX_SHADOWMAPS;++split)
+			pl->shadowTexture[split]=pl->type==LIGHT_OMNI ? tr.depthCubemap : tr.depthTexture;
+		// Visibility/support checks precede budgeting, so invisible lights do
+		// not consume the quota. Whole lights are admitted before any face draws.
+		if(pl->type==LIGHT_DIRECTIONAL && (!CVAR_TO_BOOL(r_sunshadows) || tr.sky_normal.z>=0)) continue;
+		if(pl->type==LIGHT_OMNI && !GL_Support(R_TEXTURECUBEMAP_EXT)) continue;
+		if(pl->type!=LIGHT_DIRECTIONAL && !skipCulling &&
+			(!Mod_CheckBoxVisible(pl->absmin,pl->absmax) || R_CullBox(pl->absmin,pl->absmax))) continue;
+		posecache::Key key;
+		if(cacheShadows && scene)
+		{
+			key=R_BudgetShadowKey(pl,scene);
+			if(R_ReuseBudgetShadow(pl,i,key)) continue;
+		}
+		const int cost=pl->type==LIGHT_OMNI ? 6 : pl->type==LIGHT_DIRECTIONAL ? MAX_SHADOWMAPS : 1;
+		if(!budget.Take(cost,limit)) { pxperf::Get().Add(pxperf::Metric::ShadowBudgetSkips,1);continue; }
+		const int slot=pl->type==LIGHT_OMNI ? tr.num_CM_shadows_used : tr.num_2D_shadows_used;
 
 		if( pl->type == LIGHT_OMNI )
 		{
@@ -673,6 +717,7 @@ void R_RenderShadowmaps( void )
 				R_ResetRefState(); // restore ref instance
 			}
 		}
+		if(cacheShadows && scene) R_CommitBudgetShadow(pl,i,key,slot);
 	}
 
 	R_PopRefState(); // restore ref instance

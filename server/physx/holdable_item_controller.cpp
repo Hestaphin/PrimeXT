@@ -14,6 +14,7 @@ GNU General Public License for more details.
 */
 #include "holdable_item_controller.h"
 #include "cbase.h"
+#include "physics_drive_timestep.h"
 #include <PxPhysicsAPI.h>
 
 using namespace physx;
@@ -52,8 +53,11 @@ void HoldableItemController::ClearAllTargets()
 	m_entries.clear();
 }
 
-void HoldableItemController::ApplyForces()
+void HoldableItemController::ApplyForces(float dt)
 {
+	if(!std::isfinite(dt) || dt <= 0.0f) return;
+	const auto linearGains = physicsasset::ResolveStepDriveGains(linearSpring, linearDamping, dt);
+	const auto angularGains = physicsasset::ResolveStepDriveGains(angularSpring, angularDamping, dt);
 	for( auto it = m_entries.begin(); it != m_entries.end(); )
 	{
 		Entry &entry = it->second;
@@ -85,7 +89,7 @@ void HoldableItemController::ApplyForces()
 
 		// linear PD
 		PxVec3 targetPos( target.origin.x, target.origin.y, target.origin.z );
-		PxVec3 accel = ( targetPos - pos ) * linearSpring - vel * linearDamping;
+		PxVec3 accel = ( targetPos - pos ) * linearGains.spring - vel * linearGains.damping;
 		pRigid->addForce( accel, PxForceMode::eACCELERATION );
 
 		// angular PD (quaternion-based)
@@ -103,8 +107,8 @@ void HoldableItemController::ApplyForces()
 
 		PxVec3 angVel = pRigid->getAngularVelocity();
 		float velProj = angVel.dot( axis ); 
-		PxVec3 torque = axis * ( angle * angularSpring - velProj * angularDamping );
-		torque -= ( angVel - axis * velProj ) * angularDamping;
+		PxVec3 torque = axis * ( angle * angularGains.spring - velProj * angularGains.damping );
+		torque -= ( angVel - axis * velProj ) * angularGains.damping;
 		pRigid->addTorque( torque, PxForceMode::eACCELERATION );
 
 		++it;

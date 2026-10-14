@@ -1,0 +1,193 @@
+// Real CMeshDesc implementation and headers; filesystem APIs are adapters.
+#include "hud.h"
+#include "utils.h"
+#include "gl_local.h"
+#include "virtualfs.h"
+#include "filesystem_utils.h"
+#include <cassert>
+#include <algorithm>
+#include <limits>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+#define private public
+#include "meshdesc.h"
+#undef private
+
+extern "C" const char *__asan_default_options() { return "detect_leaks=0:halt_on_error=1"; }
+extern "C" const char *__ubsan_default_options() { return "halt_on_error=1:print_stacktrace=1"; }
+cl_enginefunc_t gEngfuncs = {};
+render_api_t gRenderfuncs = {};
+static int filesystemCalls;
+static std::string savedPath;
+static std::vector<byte> savedCache;
+void ALERT(ALERT_TYPE, char *, ...) {}
+static void QuietPrint(const char *, ...) {}
+namespace fs {
+static size_t cursor;
+static bool append;
+File::File() : m_handle(nullptr) {}
+File::File(const Path &path, const char *mode) : m_handle(nullptr) { Open(path, mode); }
+File::~File() { Close(); }
+bool File::IsOpen() { return m_handle != nullptr; }
+bool File::Open(const Path &path, const char *mode) {
+    ++filesystemCalls;
+    m_handle = !savedCache.empty() && path.string() == savedPath ? &cursor : nullptr;
+    cursor = 0; append = mode[0] == 'a'; return IsOpen();
+}
+void File::Close() { m_handle = nullptr; }
+void File::Seek(int32_t offset, SeekType type) {
+    cursor = size_t(offset) + (type == SeekType::End ? savedCache.size() : type == SeekType::Current ? cursor : 0);
+}
+int32_t File::Tell() { return int32_t(cursor); }
+int32_t File::Size() { return int32_t(savedCache.size()); }
+int32_t File::Read(void *out, int32_t size) {
+    if(!IsOpen() || size < 0 || cursor > savedCache.size()) return 0;
+    size_t count = std::min(size_t(size), savedCache.size() - cursor);
+    std::memcpy(out, savedCache.data() + cursor, count); cursor += count; return int32_t(count);
+}
+int32_t File::Write(void *in, int32_t size) {
+    if(!IsOpen() || size < 0) return 0;
+    if(append) cursor = savedCache.size();
+    if(cursor + size_t(size) > savedCache.size()) savedCache.resize(cursor + size_t(size));
+    std::memcpy(savedCache.data() + cursor, in, size_t(size)); cursor += size_t(size); return size;
+}
+bool FileExists(const Path &path) { ++filesystemCalls; return path.string() == savedPath && !savedCache.empty(); }
+void RemoveFile(const Path &path) { ++filesystemCalls; if(path.string() == savedPath) savedCache.clear(); }
+}
+
+static void SetupApi() {
+    gRenderfuncs.pfnMemAlloc = [](size_t n, const char *, int) { return std::calloc(1, n); };
+    gRenderfuncs.pfnMemFree = [](void *p, const char *, int) { std::free(p); };
+    gRenderfuncs.COM_CompareFileTime = [](const char *, const char *path, int *order) {
+        ++filesystemCalls; *order = 0; return savedPath == path ? 1 : 0;
+    };
+    gRenderfuncs.pfnSaveFile = [](const char *path, const void *data, int size) {
+        savedPath = path; savedCache.assign((const byte *)data, (const byte *)data + size); return 1;
+    };
+    gEngfuncs.COM_LoadFile = [](const char *path, int, int *size) -> byte * {
+        ++filesystemCalls;
+        if(savedPath != path) return nullptr;
+        *size = (int)savedCache.size();
+        byte *copy = (byte *)std::malloc(*size); std::memcpy(copy, savedCache.data(), *size); return copy;
+    };
+    gEngfuncs.COM_FreeFile = [](void *p) { std::free(p); };
+    gEngfuncs.Con_Printf = QuietPrint;
+    gEngfuncs.pfnSys_FloatTime = []() { return 0.0; };
+}
+
+static const char *brushNames[] = {/* BRUSH_NAMES */};
+int main(int argc, char **argv) {
+    assert(argc == 2); SetupApi(); std::string test = argv[1];
+    model_t model = {}; model.type = mod_brush;
+    std::strcpy(model.name, brushNames[0]);
+    CMeshDesc desc; desc.SetModel(&model, 0, 0);
+    if(test == "brush_load") {
+        for(const char *name : brushNames) {
+            std::strcpy(model.name, name); filesystemCalls = 0;
+            assert(!desc.LoadFromCacheFile()); assert(filesystemCalls == 0);
+        }
+    } else if(test == "brush_path") {
+        for(const char *name : brushNames) {
+            std::strcpy(model.name, name); std::string path = "old";
+            desc.GetCacheFilePath(path); assert(path.empty());
+        }
+    } else if(test == "brush_private_load") {
+        assert(desc.StudioLoadCache() == CMeshDesc::LoadStatus::Error);
+        assert(!desc.CacheFileExists() && !desc.PresentInCache());
+        assert(filesystemCalls == 0);
+    } else if(test == "null_cache") {
+        desc.SetModel(nullptr, 0, 0);
+        assert(!desc.LoadFromCacheFile() && !desc.PresentInCache() && !desc.CacheFileExists());
+        assert(filesystemCalls == 0);
+    } else if(test == "studio_paths") {
+        model.type = mod_studio;
+        for(const char *name : {"models/asset/testgman.mdl", "models\\asset\\testgman.mdl"}) {
+            std::strcpy(model.name, name); std::string path;
+            desc.GetCacheFilePath(path);
+            assert(path == (std::strchr(name, '\\') ? "cache/asset\\testgman.clip" : "cache/asset/testgman.clip"));
+        }
+    } else if(test == "studio_extensionless") {
+        model.type = mod_studio;
+        std::strcpy(model.name, "models/asset.v2/door"); std::string path;
+        desc.GetCacheFilePath(path); assert(path == "cache/asset.v2/door.clip");
+        std::strcpy(model.name, "barney"); desc.GetCacheFilePath(path); assert(path == "cache/barney.clip");
+    } else if(test == "studio_missing") {
+        model.type = mod_studio; std::strcpy(model.name, "models/barney.mdl");
+        assert(!desc.LoadFromCacheFile()); assert(filesystemCalls > 0);
+    } else if(test == "studio_roundtrip" || test == "studio_append" || test.find("bad_") == 0) {
+        model.type = mod_studio; model.modelCRC = 12345;
+        std::strcpy(model.name, "models/asset/testgman.mdl");
+        desc.SetModel(&model, 2, 1); desc.SetGeometryType(clipfile::GeometryType::CookedConvexHull);
+        desc.SetSourceFingerprint(0x123456789ABCDEF0ULL);
+        assert(desc.InitMeshBuild(1));
+        Vector triangle[3] = {Vector(0,0,0), Vector(16,0,0), Vector(0,16,0)};
+        assert(desc.AddMeshTrinagle(triangle)); assert(desc.FinishMeshBuild());
+        assert((uintptr_t)desc.GetMesh()->facets % alignof(mfacet_t) == 0);
+        desc.SaveToCacheFile();
+        if(test == "studio_append") { desc.SetModel(&model, 3, 1); desc.SaveToCacheFile(); }
+        desc.FreeMeshBuild();
+        assert(savedPath == "cache/asset/testgman.clip" && !savedCache.empty());
+        const auto validCache = savedCache;
+        if(test.find("bad_") == 0) {
+            clipfile::Header header = {}; std::memcpy(&header, savedCache.data(), sizeof(header));
+            clipfile::CacheEntry entry = {}; std::memcpy(&entry, savedCache.data() + header.tableOffset + 4, sizeof(entry));
+            clipfile::CacheData data = {}; std::memcpy(&data, savedCache.data() + entry.dataOffset, sizeof(data));
+            clipfile::Facet facet = {}; std::memcpy(&facet, savedCache.data() + data.lumps[clipfile::kDataLumpFacets].fileofs, sizeof(facet));
+            if(test == "bad_facet_count") facet.numplanes = 255;
+            if(test == "bad_first_index") facet.firstindex = 0xffffffffu;
+            if(test == "bad_facet_zero") facet.numplanes = 0;
+            if(test == "bad_facet_range") ++facet.numplanes;
+            if(test == "bad_unused_indexes") --facet.numplanes;
+            if(test == "bad_vertex_nan") facet.triangle[0].point[0] = std::numeric_limits<float>::quiet_NaN();
+            if(test == "bad_bounds") facet.mins[0] = facet.maxs[0] + 1;
+            std::memcpy(savedCache.data() + data.lumps[clipfile::kDataLumpFacets].fileofs, &facet, sizeof(facet));
+            if(test == "bad_plane_index") { uint32_t value = data.lumps[clipfile::kDataLumpPlanes].filelen / sizeof(clipfile::Plane); std::memcpy(savedCache.data() + data.lumps[clipfile::kDataLumpPlaneIndexes].fileofs, &value, sizeof(value)); }
+            if(test == "bad_plane_nan" || test == "bad_plane_zero") {
+                clipfile::Plane plane = {}; std::memcpy(&plane, savedCache.data() + data.lumps[clipfile::kDataLumpPlanes].fileofs, sizeof(plane));
+                if(test == "bad_plane_nan") plane.dist = std::numeric_limits<float>::quiet_NaN();
+                else plane.normal[0] = plane.normal[1] = plane.normal[2] = 0;
+                std::memcpy(savedCache.data() + data.lumps[clipfile::kDataLumpPlanes].fileofs, &plane, sizeof(plane));
+            }
+            if(test == "bad_lump_offset") data.lumps[0].fileofs = 0xffffffffu;
+            if(test == "bad_lump_length") data.lumps[0].filelen = 0xffffffffu;
+            if(test == "bad_lump_entry") data.lumps[0].fileofs = header.tableOffset;
+            if(test == "bad_lump_overlap") data.lumps[1].fileofs = data.lumps[0].fileofs;
+            if(test == "bad_lump_size") --data.lumps[2].filelen;
+            std::memcpy(savedCache.data() + entry.dataOffset, &data, sizeof(data));
+            if(test == "bad_entry_offset") entry.dataOffset = 0xffffffffu;
+            if(test == "bad_entry_length") entry.dataLength = 0xffffffffu;
+            std::memcpy(savedCache.data() + header.tableOffset + 4, &entry, sizeof(entry));
+            if(test == "bad_entry_count") { uint32_t count = 0xffffffffu; std::memcpy(savedCache.data() + header.tableOffset, &count, sizeof(count)); }
+            if(test == "bad_table_offset") header.tableOffset = 0xffffffffu;
+            std::memcpy(savedCache.data(), &header, sizeof(header));
+            if(test == "bad_short_header") savedCache.resize(sizeof(header) - 1);
+            if(test == "bad_short_table") savedCache.resize(header.tableOffset + 3);
+            if(test == "bad_short_data") savedCache.resize(entry.dataOffset + sizeof(data) - 1);
+        }
+        CMeshDesc reader; reader.SetModel(&model, test == "studio_append" ? 3 : 2, 1);
+        reader.SetGeometryType(clipfile::GeometryType::CookedConvexHull);
+        reader.SetSourceFingerprint(0x123456789ABCDEF0ULL);
+        if(test.find("bad_") == 0) {
+            if(test.find("bad_entry_") == 0 || test.find("bad_short_") == 0 || test == "bad_table_offset") {
+                assert(!reader.PresentInCache());
+                assert(!desc.StudioSaveCache());
+            }
+            assert(!reader.LoadFromCacheFile());
+            assert(!reader.GetMesh() && !reader.m_srcPlaneElems && !reader.m_srcFacets && !reader.m_srcPlanePool);
+            // Rejection must permit a fresh build and a subsequent valid load.
+            assert(reader.InitMeshBuild(1)); assert(reader.AddMeshTrinagle(triangle)); assert(reader.FinishMeshBuild());
+            reader.FreeMeshBuild(); reader.FreeMesh();
+            savedCache = validCache;
+        }
+        assert(reader.LoadFromCacheFile()); assert(reader.FinishMeshBuild());
+        reader.FreeMeshBuild(); assert(reader.GetMesh() && reader.GetMesh()->numfacets == 1);
+        assert((uintptr_t)reader.GetMesh()->facets % alignof(mfacet_t) == 0);
+        CMeshDesc wrong; wrong.SetModel(&model, 2, 1);
+        wrong.SetGeometryType(clipfile::GeometryType::CookedConvexHull); wrong.SetSourceFingerprint(1);
+        assert(!wrong.LoadFromCacheFile());
+    } else { assert(false && "Unknown case"); }
+    std::printf("PASS %s\n", test.c_str());
+}

@@ -56,6 +56,10 @@ list(APPEND CLDLL_SOURCES
 	"${CMAKE_SOURCE_DIR}/game_shared/frustum.cpp"
 	"${CMAKE_SOURCE_DIR}/game_shared/meshdesc.cpp"
 	"${CMAKE_SOURCE_DIR}/game_shared/meshdesc_factory.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/performance_profile.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/performance_gpu.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/physics_asset_format.cpp"
+	"${CMAKE_SOURCE_DIR}/game_shared/modular_weapons.cpp"
 	"${CMAKE_SOURCE_DIR}/game_shared/playermove.cpp"
 	"${CMAKE_SOURCE_DIR}/game_shared/procbones.cpp"
 	"${CMAKE_SOURCE_DIR}/game_shared/stringlib.cpp"
@@ -89,6 +93,7 @@ list(APPEND IMGUI_SOURCES
 	"ui/ui_demo_window.cpp"
 	"ui/ui_material_editor.cpp"
 	"ui/ui_postfx_menu.cpp"
+	"ui/ui_physics_menu.cpp"
 )
 
 list(APPEND CLDLL_SOURCES ${IMGUI_SOURCES})

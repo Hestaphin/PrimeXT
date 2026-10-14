@@ -41,9 +41,16 @@
 #include "weapons/handgrenade.h"
 #include "weapons/egon.h"
 #include "weapons/gauss.h"
+#include "weapons/modular.h"
+#include "modular_weapons.h"
+#include "modular_ballistics.h"
+#include "performance_profile.h"
+#include "studio_pose_cache.h"
 #include "usercmd.h"
 #include "netadr.h"
 #include "user_messages.h"
+#include "physic.h"
+#include "ragdoll_bullet_policy.h"
 #include "beam.h"
 #include <algorithm>
 #include <locale>
@@ -566,6 +573,8 @@ static int g_serveractive = 0;
 
 void ServerDeactivate( void )
 {
+	ClearServerStudioPoseCache();
+	pxperf::Get().Reset();
 //	ALERT( at_console, "ServerDeactivate()\n" );
 
 	// It's possible that the engine will call this function more times than is necessary
@@ -679,6 +688,8 @@ void ParmsChangeLevel( void )
 //
 void StartFrame( void )
 {
+	BeginServerStudioPoseFrame(gpGlobals->time);
+	pxperf::Get().BeginFrame(sv_profile.value, sv_profile_interval.value, gpGlobals->time, gpGlobals->frametime);
 //	ALERT( at_console, "SV_Physics( %g, frametime %g )\n", gpGlobals->time, gpGlobals->frametime );
 
 	if ( g_pGameRules )
@@ -694,10 +705,17 @@ void StartFrame( void )
 void EndFrame( void )
 {
 	if ( g_fGameOver )
+	{
+		pxperf::Get().EndFrame();
 		return;
+	}
 
 	// update physic step
 	WorldPhysic->Update( gpGlobals->frametime );
+	UpdateModularBallisticManager(); // J.8: one dynamic sweep pass per server frame
+	pxperf::Get().EndFrame();
+	if(pxperf::Get().ReportDue())
+		pxperf::Get().Report("server", [](const char *line) { ALERT(at_console, "%s\n", line); });
 }
 
 void ClientPrecache( void )
@@ -1664,6 +1682,16 @@ int GetWeaponData( struct edict_s *player, struct weapon_data_s *info )
 							data->fuser2 = std::max(pGauss->m_flNextAmmoBurn, -0.001f);
 							data->iuser1 = pGauss->m_fInAttack;
 						}
+                        else if (modular::SharedRegistry().FindWeaponByRuntimeId(itemInfo.iId))
+                        {
+                            auto *mod = static_cast<CModularWeaponContext*>(ctx);
+                            data->iuser1 = mod->m_modularFlags;
+                            data->iuser2 = mod->m_burstRemaining;
+                            data->iuser3 = mod->m_loadedCartridgeIndex;
+                            data->iuser4 = mod->m_selectedCartridgeIndex;
+                            modular::EncodeAssetState(mod->m_assetSeed, mod->m_assetAction,
+                                data->fuser1, data->fuser2, data->fuser3);
+                        }
 					}
 				}
 				item = item->m_pNext;
@@ -1732,8 +1760,10 @@ void UpdateClientData ( const struct edict_s *ent, int sendweapons, struct clien
 				cd->m_iId = itemInfo.iId;
 				cd->vuser3.z = weapon->m_pWeaponContext->m_iSecondaryAmmoType;
 				cd->vuser4.x = weapon->m_pWeaponContext->m_iPrimaryAmmoType;
-				cd->vuser4.y = player->m_rgAmmo[weapon->m_pWeaponContext->m_iPrimaryAmmoType];
-				cd->vuser4.z = player->m_rgAmmo[weapon->m_pWeaponContext->m_iSecondaryAmmoType];
+                const int primaryIndex = weapon->m_pWeaponContext->m_iPrimaryAmmoType;
+                const int secondaryIndex = weapon->m_pWeaponContext->m_iSecondaryAmmoType;
+                cd->vuser4.y = (primaryIndex > 0 && primaryIndex < MAX_AMMO_SLOTS) ? player->m_rgAmmo[primaryIndex] : 0;
+                cd->vuser4.z = (secondaryIndex > 0 && secondaryIndex < MAX_AMMO_SLOTS) ? player->m_rgAmmo[secondaryIndex] : 0;
 
 				if (itemInfo.iId == WEAPON_RPG)
 				{
@@ -1917,6 +1947,18 @@ int ShouldCollide( edict_t *pentTouched, edict_t *pentOther )
 {
 	CBaseEntity *pTouch = CBaseEntity::Instance( pentTouched );
 	CBaseEntity *pOther = CBaseEntity::Instance( pentOther );
+
+    // B5: weapon rays must not let an obsolete Studio hitbox of a partially
+    // physical character defeat the real (possibly displaced) .phys limb.
+    // Only the explicit bullet trace opts in. Movement and ordinary gameplay
+    // traces continue to use the GoldSrc hull/hitboxes unchanged.
+    if( pTouch && WorldPhysic &&
+        ragdollquery::SkipStudioBulletHitbox(
+            gpGlobals && (gpGlobals->trace_flags & FTRACE_BULLET_PHYSICS),
+            (pTouch->pev->flags & (FL_MONSTER | FL_CLIENT)) != 0,
+            (pTouch->pev->iuser1 & CF_RAGDOLL) != 0,
+            WorldPhysic->IsRagdoll(pTouch)) )
+        return 0;
 
 	if( pTouch && pOther )
 		return pOther->ShouldCollide( pTouch );

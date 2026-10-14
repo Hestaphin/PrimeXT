@@ -1,0 +1,205 @@
+// Recording collision services for the actual manager and BeginPenetration.
+// Exact entry planes represent thin boxes; exit/energy queries are controlled
+// here. Production BSP/shape PreparePenetration is covered by retained suites.
+extern "C" const char *__asan_default_options(){return "detect_leaks=0:halt_on_error=1";}
+const Vector g_vecZero;
+struct Barrier {double entry,exit,resistance;bool penetrable;CBaseEntity* target;};
+std::vector<Barrier> barriers;
+struct RecordedSweep {Vector from,to;};
+std::vector<RecordedSweep> sweepLog;
+const Barrier* lastBarrier=nullptr;
+std::vector<double> damageLog;
+int BulletTrace(Vector from,Vector to,CBaseEntity*,TraceResult& out){
+    ++traceCalls;sweepLog.push_back({from,to});lastBarrier=nullptr;out.flFraction=1;
+    out.vecEndPos=to;
+    const double a=from.x/kUnitsPerMeter,b=to.x/kUnitsPerMeter;
+    if(b<=a)return -1;
+    for(const auto& wall:barriers){
+        if(wall.entry>=a-1e-7 && wall.entry<b){
+            const double f=std::clamp((wall.entry-a)/(b-a),0.0,1.0);
+            if(f<out.flFraction){out.flFraction=float(f);out.pHit=wall.target;lastBarrier=&wall;}
+        }
+    }
+    out.vecEndPos=from+(to-from)*out.flFraction;return -1;
+}
+bool PreparePenetration(Shot& shot,const TraceResult&,int,const Vector&,const Vector&,
+    const modular::BallisticState& contact,PenetrationCandidate& out){
+    if(!lastBarrier || !lastBarrier->penetrable || shot.penetrations>=kMaxPenetrations)return false;
+    const auto& wall=*lastBarrier;
+    const double speed=modular::Length(contact.velocity);
+    const auto result=modular::ComputePenetration({shot.physics.massKg,speed,wall.exit-wall.entry,
+        wall.resistance,1.,shot.projectileFactor,1.});
+    if(!result.penetrated)return false;
+    out.exitPoint=GamePoint({wall.exit,contact.position.y,contact.position.z});
+    out.thicknessMeters=wall.exit-wall.entry;out.exitSpeed=result.exitSpeedMps;out.incomingSpeed=speed;
+    out.postExitOffsetUnits=.05f;return true;
+}
+
+static modular::Weapon weapon(){modular::Weapon w;w.range=float(10000*kUnitsPerMeter);return w;}
+static modular::Cartridge cartridge(){modular::Cartridge c;c.massGrams=8;c.diameterMm=9;c.damage=18;return c;}
+static void clear(){barriers.clear();sweepLog.clear();damageLog.clear();lastBarrier=nullptr;traceCalls=0;gravityScale=0;airDensity=0;curveHz=50;}
+static void record(CBaseEntity& target){target.onDamage=[&]{damageLog.push_back(target.damage);};}
+static void advance(CModularBallisticManager& manager,double budget){
+    assert(manager.Count()==1);double consumed=0;auto& shot=manager.m_shots[0];
+    const double before=shot.state.seconds;
+    assert(AdvanceShot(shot,budget,consumed));
+    assert(std::abs(shot.state.seconds-before-consumed)<1e-8);
+    assert(consumed>=0 && consumed<=budget+1e-10);shot.lastSimulatedTime+=consumed;
+}
+static void sweepBound(double speed){
+    assert(!sweepLog.empty());
+    for(const auto& sweep:sweepLog)
+        assert(double((sweep.to-sweep.from).Length())/kUnitsPerMeter/speed<=.020003);
+}
+static void rates(){
+    clear();CBaseEntity owner;CModularBallisticManager manager;manager.Spawn();
+    auto w=weapon();auto c=cartridge();
+    pxperf::Get().BeginFrame(2,2,0,.01);
+    assert(manager.Add(&owner,w,c,{0,0,0},{1,0,0},360));
+    assert(manager.m_shots[0].curveStep==.02 && manager.m_shots[0].curve.size()==501);
+    curveHz=100;assert(manager.Add(&owner,w,c,{0,0,0},{1,0,0},360));
+    assert(manager.m_shots[1].curveStep==.01 && manager.m_shots[1].curve.size()==1001);
+    curveHz=50;c.massGrams=1;c.diameterMm=10;c.dragCoefficient=2;airDensity=1.225f;
+    assert(manager.Add(&owner,w,c,{0,0,0},{1,0,0},2000));
+    assert(manager.m_shots[2].curveStep==.01);
+    pxperf::Get().EndFrame();
+    assert(pxperf::Get().Stats(pxperf::Metric::CurveBuilds20ms).mean==1);
+    assert(pxperf::Get().Stats(pxperf::Metric::CurveBuilds10ms).mean==2);
+    assert(pxperf::Get().Stats(pxperf::Metric::CurveAccuracyFallbacks).mean==1);
+    assert(pxperf::Get().Stats(pxperf::Metric::CurveSamples).mean==
+        double(manager.m_shots[0].curve.size()+manager.m_shots[1].curve.size()+manager.m_shots[2].curve.size()));
+    pxperf::Get().Report("server",[](const char* line){std::cout<<line<<"\n";});
+    pxperf::Get().Reset();
+}
+static void fps(){
+    for(float hz:{50.f,100.f})for(int frames:{20,30,60,100,144,240}){
+        clear();curveHz=hz;CBaseEntity owner;CModularBallisticManager manager;
+        globals.time=10;manager.Spawn();assert(manager.Add(&owner,weapon(),cartridge(),{0,0,0},{1,0,0},100));
+        for(int f=1;f<=frames*2;++f){globals.time=float(10.+double(f)/frames);manager.Update();assert(manager.Count()==1);}
+        assert(std::abs(manager.m_shots[0].state.seconds-2)<1e-7);
+        assert(std::abs(manager.m_shots[0].state.position.x-200)<1e-6);
+        assert(manager.m_shots[0].curveStep==(hz==50?.02:.01));sweepBound(100);
+    }
+}
+static void thin(){
+    for(float hz:{50.f,100.f})for(int frames:{20,30,60,144,240})for(float speed:{100.f,900.f,10000.f}){
+        clear();curveHz=hz;CBaseEntity owner,target;record(target);barriers.push_back({.731,.73354,0,false,&target});
+        CModularBallisticManager manager;globals.time=10;manager.Spawn();
+        assert(manager.Add(&owner,weapon(),cartridge(),{0,0,0},{1,0,0},speed));
+        double impactX=0,age=0;target.onDamage=[&]{damageLog.push_back(target.damage);
+            impactX=manager.m_shots[0].state.position.x;age=manager.m_shots[0].state.seconds;};
+        for(int f=1;f<=frames && manager.Count();++f){globals.time=float(10.+double(f)/frames);manager.Update();}
+        assert(manager.Count()==0 && damageLog.size()==1);
+        assert(std::abs(impactX-.731)<1e-6 && std::abs(age-.731/speed)<1e-7);
+        assert(std::abs(damageLog[0]-18)<1e-5);sweepBound(speed);
+    }
+}
+static void penetration(){
+    for(float hz:{50.f,100.f}){
+        clear();curveHz=hz;CBaseEntity owner,glass,stop;record(glass);record(stop);
+        barriers={{1.,1.08,1500,true,&glass},{1.2,1.3,0,false,&stop}};
+        CModularBallisticManager manager;globals.time=10;manager.Spawn();
+        assert(manager.Add(&owner,weapon(),cartridge(),{0,0,0},{1,0,0},360));
+        // Damage may remove/change geometry after candidate capture.
+        glass.onDamage=[&]{damageLog.push_back(glass.damage);barriers[0].exit=9.;};
+        globals.time=10.02f;manager.Update();
+        const double energy=360.*360.*.008*.5;
+        assert(manager.Count()==0 && damageLog.size()==2);
+        assert(std::abs(damageLog[0]-18)<1e-5);
+        assert(std::abs(damageLog[1]-18*(energy-120)/energy)<2e-4);sweepBound(360);
+    }
+}
+static void multiple(){
+    for(float hz:{50.f,100.f}){
+        clear();curveHz=hz;CBaseEntity owner,target;record(target);
+        for(int i=1;i<=5;++i)barriers.push_back({double(i),i+.01,100,true,&target});
+        CModularBallisticManager manager;globals.time=10;manager.Spawn();
+        assert(manager.Add(&owner,weapon(),cartridge(),{0,0,0},{1,0,0},360));
+        globals.time=10.03f;manager.Update();
+        assert(manager.Count()==0 && damageLog.size()==5);
+        const double energy=.5*.008*360*360;
+        for(size_t i=0;i<damageLog.size();++i)assert(std::abs(damageLog[i]-18*(energy-double(i))/energy)<2e-4);
+    }
+}
+static void transitSave(const std::string& root){
+    for(float hz:{50.f,100.f}){
+        clear();curveHz=hz;CBaseEntity owner,target;record(target);
+        auto& registry=modular::SharedRegistry();assert(registry.Load([&](const std::string& name,std::string& text){
+            std::ifstream in(root+"/"+name);std::ostringstream out;out<<in.rdbuf();text=out.str();return bool(in);}));
+        auto w=*registry.FindWeapon("test_pistol");auto c=*registry.FindCartridge("test_fmj");c.dragCoefficient=0;
+        w.range=float(10000*kUnitsPerMeter);barriers={{1.,1.08,1500,true,&target}};
+        CModularBallisticManager manager;globals.time=10;manager.Spawn();
+        assert(manager.Add(&owner,w,c,{0,0,0},{1,0,0},360));
+        advance(manager,1./360+.0001);
+        assert(manager.m_shots[0].transit.active && manager.m_shots[0].penetrations==1 && damageLog.size()==1);
+        const auto savedState=manager.m_shots[0].state;const double duration=manager.m_shots[0].transit.durationSeconds;
+        CSave write;CRestore read;assert(manager.Save(write));manager.m_shots.clear();globals.time=20;
+        assert(manager.Restore(read) && manager.Count()==1);
+        assert(manager.m_savedRecordVersion==3 && manager.m_shots[0].transit.active && manager.m_shots[0].curve.empty());
+        assert(std::abs(manager.m_shots[0].state.position.x-savedState.position.x)<1e-6);
+        assert(std::abs(manager.m_shots[0].state.seconds-savedState.seconds)<1e-7);
+        assert(manager.m_shots[0].lastSimulatedTime==20);
+        advance(manager,duration);
+        assert(!manager.m_shots[0].transit.active && manager.m_shots[0].curveStep==(hz==50?.02:.01));
+        assert(manager.m_shots[0].state.position.x>1.08 && manager.m_shots[0].state.position.x<1.2);
+        assert(damageLog.size()==1 && manager.m_shots[0].penetrations==1);
+    }
+}
+static void restore(const std::string& root){
+    for(float hz:{50.f,100.f}){
+        clear();curveHz=hz;gravityScale=1;airDensity=1.225f;CBaseEntity owner;
+        auto& registry=modular::SharedRegistry();assert(registry.Load([&](const std::string& name,std::string& text){
+            std::ifstream in(root+"/"+name);std::ostringstream out;out<<in.rdbuf();text=out.str();return bool(in);}));
+        auto w=*registry.FindWeapon("test_pistol");auto c=*registry.FindCartridge("test_fmj");w.range=float(10000*kUnitsPerMeter);
+        CModularBallisticManager manager;globals.time=10;manager.Spawn();assert(manager.Add(&owner,w,c,{0,0,0},{1,0,0},360));
+        for(int i=0;i<7;++i)advance(manager,.05);
+        Shot continuous=manager.m_shots[0];const auto before=continuous.state;
+        CSave write;CRestore read;assert(manager.Save(write));manager.m_shots.clear();globals.time=20;
+        assert(manager.Restore(read) && manager.Count()==1);
+        assert(std::abs(manager.m_shots[0].state.seconds-before.seconds)<1e-7);
+        assert((GamePoint(manager.m_shots[0].state.position)-GamePoint(before.position)).Length()<.001);
+        for(int i=0;i<10;++i){double used=0;assert(AdvanceShot(continuous,.05,used));advance(manager,.05);}
+        const auto& resumed=manager.m_shots[0];
+        assert(std::abs(resumed.state.seconds-continuous.state.seconds)<1e-7);
+        assert((GamePoint(resumed.state.position)-GamePoint(continuous.state.position)).Length()/kUnitsPerMeter<.05);
+        assert(std::abs(modular::BallisticEnergy(resumed.state,resumed.physics.massKg)/
+            modular::BallisticEnergy(continuous.state,continuous.physics.massKg)-1)<.005);
+    }
+}
+static void rateChange(){
+    clear();CBaseEntity owner,target;record(target);barriers={{1.,1.08,1500,true,&target}};
+    CModularBallisticManager manager;globals.time=10;manager.Spawn();assert(manager.Add(&owner,weapon(),cartridge(),{0,0,0},{1,0,0},360));
+    curveHz=100;advance(manager,.001);assert(manager.m_shots[0].curveStep==.02);
+    advance(manager,.01);assert(manager.m_shots[0].curveStep==.01 && damageLog.size()==1);
+    curveHz=50;advance(manager,.01);assert(manager.m_shots[0].curveStep==.01);
+}
+static void damage(){
+    for(float hz:{50.f,100.f})for(auto logic:{modular::DamageLogic::ConfigurableBase,modular::DamageLogic::EnergyBased}){
+        clear();curveHz=hz;CBaseEntity owner,target;record(target);airDensity=1.225f;
+        auto c=cartridge();c.schemaVersion=4;c.attackLogic=modular::AttackLogic::Ballistic;c.damageLogic=logic;
+        c.baseDamage=40;c.damageCoefficient=.3f;c.dragCoefficient=.3f;
+        barriers={{30.,30.1,0,false,&target}};CModularBallisticManager manager;globals.time=10;manager.Spawn();
+        assert(manager.Add(&owner,weapon(),c,{0,0,0},{1,0,0},360));
+        double expected=0;target.onDamage=[&]{const auto& s=manager.m_shots[0];
+            expected=modular::ImpactDamage(logic,modular::BallisticEnergy(s.state,s.physics.massKg),s.originalEnergy,
+                s.physics.diameterM*1000,s.damageCoefficient,s.damage);damageLog.push_back(target.damage);};
+        for(int i=1;i<=40 && manager.Count();++i){globals.time=10+i*.01f;manager.Update();}
+        assert(manager.Count()==0 && damageLog.size()==1 && std::abs(damageLog[0]-expected)<1e-5);
+    }
+}
+static void backlog(){
+    clear();CBaseEntity owner;CModularBallisticManager manager;globals.time=10;manager.Spawn();
+    assert(manager.Add(&owner,weapon(),cartridge(),{0,0,0},{1,0,0},100));globals.time=10.5f;
+    for(int i=1;i<=5;++i){manager.Update();assert(manager.Count()==1);assert(std::abs(manager.m_shots[0].state.seconds-i*.1)<1e-8);}
+    const auto before=manager.m_shots[0].state;manager.Update();assert(manager.m_shots[0].state.seconds==before.seconds);
+    assert(std::abs(manager.m_shots[0].state.position.x-50)<1e-7);sweepBound(100);
+}
+int main(int argc,char** argv){
+    assert(argc==3);const std::string name=argv[1],root=argv[2];
+    if(name=="rates")rates();else if(name=="fps")fps();else if(name=="thin")thin();
+    else if(name=="penetration")penetration();else if(name=="multiple")multiple();
+    else if(name=="transit_save")transitSave(root);else if(name=="restore")restore(root);
+    else if(name=="rate_change")rateChange();else if(name=="damage")damage();else if(name=="backlog")backlog();
+    else assert(false);
+    std::cout<<"PASS actual ballistic manager K.11.4.1.6: "<<name<<"\n";
+}
